@@ -1,0 +1,201 @@
+#!/bin/bash
+set -e
+set -o pipefail
+
+# TeamBoss 数据恢复脚本
+#
+# 用法：
+#   ./restore.sh <backup_file_path> [--skip-service-check]
+#
+# 示例：
+#   ./restore.sh /home/auto_team/backend/data/backups/app-20260723T063420Z.db
+#   ./restore.sh /home/auto_team/backend/data/backups/sessions-20260723T063420Z.tar.gz
+#
+# 重要：恢复前必须停止所有会写入该数据目录的后端进程！
+#       脚本会检查本机 auto-team.service；容器恢复需先停止 Compose
+#       backend，再指定 --skip-service-check。
+#       如服务配置了 AUTO_TEAM_DATA_DIR，恢复时也必须带上相同环境变量。
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+DATA_DIR="${AUTO_TEAM_DATA_DIR:-${PROJECT_ROOT}/backend/data}"
+mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
+
+BACKUP_FILE="${1}"
+SKIP_SERVICE_CHECK="${2}"
+
+# 颜色定义
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_info() {
+    echo -e "[INFO] $1"
+}
+
+# 使用说明
+if [ -z "$BACKUP_FILE" ]; then
+    cat <<EOF
+TeamBoss 数据恢复脚本
+
+用法：
+  $0 <backup_file_path> [--skip-service-check]
+
+示例：
+  $0 /home/auto_team/backend/data/backups/app-20260723T063420Z.db
+  $0 /home/auto_team/backend/data/backups/sessions-20260723T063420Z.tar.gz
+
+参数：
+  backup_file_path         备份文件路径（.db 或 .tar.gz）
+  --skip-service-check     跳过服务运行检查（谨慎使用）
+
+重要安全提示：
+  恢复前必须停止所有会写入该数据目录的后端进程！
+  在服务运行时覆盖数据库会导致数据损坏。
+
+停止服务（需要 root）：
+  sudo systemctl stop auto-team.service
+
+恢复完成后重启服务：
+  sudo systemctl start auto-team.service
+
+EOF
+    exit 1
+fi
+
+# 验证备份文件存在
+if [ ! -f "$BACKUP_FILE" ]; then
+    print_error "备份文件不存在: $BACKUP_FILE"
+    exit 1
+fi
+
+print_info "恢复文件: $BACKUP_FILE"
+
+# 检查服务是否运行
+if [ "$SKIP_SERVICE_CHECK" != "--skip-service-check" ]; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet auto-team.service; then
+        print_error "auto-team.service 正在运行！恢复前必须停止服务。"
+        print_info "停止服务命令："
+        echo "  sudo systemctl stop auto-team.service"
+        exit 1
+    fi
+    print_success "未发现正在运行的 auto-team.service"
+fi
+
+# 根据文件类型进行恢复
+if [[ "$BACKUP_FILE" == *.db ]]; then
+    # 恢复数据库
+    DB_PATH="${DATA_DIR}/app.db"
+    BACKUP_COPY="${DATA_DIR}/app.db.restore-backup-$(date +%Y%m%dT%H%M%SZ)"
+    RESTORE_TEMP=$(mktemp "${DATA_DIR}/.app.db.restore.XXXXXX")
+
+    print_info "恢复数据库..."
+    print_warning "原数据库将备份到: $BACKUP_COPY"
+
+    cp "$BACKUP_FILE" "$RESTORE_TEMP"
+    chmod 600 "$RESTORE_TEMP"
+    if ! python3 - "$RESTORE_TEMP" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+try:
+    result = conn.execute("PRAGMA integrity_check").fetchone()
+finally:
+    conn.close()
+if not result or str(result[0]).lower() != "ok":
+    raise SystemExit(1)
+PY
+    then
+        rm -f "$RESTORE_TEMP"
+        print_error "恢复的数据库完整性检查失败，现有数据库未改动。"
+        exit 1
+    fi
+
+    # 备份现有数据库
+    if [ -f "$DB_PATH" ]; then
+        cp "$DB_PATH" "$BACKUP_COPY"
+        chmod 600 "$BACKUP_COPY"
+        print_success "原数据库已备份: $BACKUP_COPY"
+    fi
+
+    # 同一文件系统内原子替换，避免复制中断留下半个数据库。
+    mv "$RESTORE_TEMP" "$DB_PATH"
+    chmod 600 "$DB_PATH"
+
+    print_success "数据库恢复成功"
+
+elif [[ "$BACKUP_FILE" == *.tar.gz ]]; then
+    # 恢复会话目录
+    print_info "恢复会话目录..."
+
+    SESSIONS_PATH="${DATA_DIR}/sessions"
+    SESSIONS_BACKUP="${DATA_DIR}/sessions.restore-backup-$(date +%Y%m%dT%H%M%SZ)"
+    EXTRACT_DIR=$(mktemp -d "${DATA_DIR}/.sessions.restore.XXXXXX")
+
+    if ! tar -tzf "$BACKUP_FILE" | python3 -c '
+import pathlib
+import sys
+for raw in sys.stdin:
+    name = raw.strip()
+    path = pathlib.PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        raise SystemExit(1)
+'; then
+        rm -rf "$EXTRACT_DIR"
+        print_error "会话备份包含不安全路径，已拒绝恢复。"
+        exit 1
+    fi
+
+    if ! tar -xzf "$BACKUP_FILE" -C "$EXTRACT_DIR"; then
+        rm -rf "$EXTRACT_DIR"
+        print_error "会话备份解压失败，现有会话未改动。"
+        exit 1
+    fi
+    if [ ! -d "$EXTRACT_DIR/sessions" ]; then
+        rm -rf "$EXTRACT_DIR"
+        print_error "会话备份缺少 sessions 目录，现有会话未改动。"
+        exit 1
+    fi
+
+    chmod 700 "$EXTRACT_DIR/sessions"
+    find "$EXTRACT_DIR/sessions" -type f -exec chmod 600 {} \;
+    if [ -d "$SESSIONS_PATH" ]; then
+        mv "$SESSIONS_PATH" "$SESSIONS_BACKUP"
+        print_success "原会话目录已备份: $SESSIONS_BACKUP"
+    fi
+    mv "$EXTRACT_DIR/sessions" "$SESSIONS_PATH"
+    rmdir "$EXTRACT_DIR"
+
+    print_success "会话目录恢复成功"
+
+else
+    print_error "不支持的备份文件格式，需要 .db 或 .tar.gz 文件"
+    exit 1
+fi
+
+cat <<EOF
+
+${GREEN}恢复完成${NC}
+
+后续步骤：
+  1. 检查恢复后的数据是否正确
+  2. 重新启动此前停止的后端服务
+  3. 请求 /api/health 验证服务状态
+  4. 检查后端日志
+
+EOF

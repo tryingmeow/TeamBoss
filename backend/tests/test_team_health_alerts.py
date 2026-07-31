@@ -1,0 +1,146 @@
+import asyncio
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import database as app_database
+from app.services import team_health_alerts
+
+
+class TeamHealthAlertsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_dir = self.tmpdir.name
+
+        # Patch get_db_dir to return temp directory
+        self.db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
+        self.db_dir_patch.start()
+
+        asyncio.run(app_database.init_database())
+
+        self.db_path = app_database.get_db_path()
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO teams (id, name, status) VALUES ('team-1', 'Test Team', 'active')"
+        )
+        conn.commit()
+        conn.close()
+
+        self.original_notify = team_health_alerts.notify_admins_sync
+        self.messages: list[str] = []
+        team_health_alerts.notify_admins_sync = self._notify
+
+    def tearDown(self):
+        self.db_dir_patch.stop()
+        team_health_alerts.notify_admins_sync = self.original_notify
+        self.tmpdir.cleanup()
+
+    def _notify(self, text: str) -> int:
+        self.messages.append(text)
+        return 1
+
+    def _incident(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM team_health_incidents WHERE team_id='team-1' AND alert_key='chatgpt_auth'"
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def test_failure_is_deduplicated_and_recovery_is_sent_once(self):
+        first = team_health_alerts.report_team_failure_sync(
+            "team-1",
+            "chatgpt_auth",
+            "401 Unauthorized",
+            source="test",
+        )
+        repeated = team_health_alerts.report_team_failure_sync(
+            "team-1",
+            "chatgpt_auth",
+            "401 Unauthorized again",
+            source="test",
+        )
+
+        self.assertEqual(first["notified"], 1)
+        self.assertEqual(repeated["reason"], "deduplicated")
+        self.assertEqual(len(self.messages), 1)
+        self.assertIn("🚨 Team 异常", self.messages[0])
+        self.assertIn("🏢 车队：Test Team", self.messages[0])
+        self.assertEqual(self._incident()["failure_count"], 2)
+
+        recovered = team_health_alerts.report_team_recovery_sync(
+            "team-1",
+            "chatgpt_auth",
+            source="test",
+        )
+        repeated_recovery = team_health_alerts.report_team_recovery_sync(
+            "team-1",
+            "chatgpt_auth",
+            source="test",
+        )
+
+        self.assertEqual(recovered["notified"], 1)
+        self.assertEqual(repeated_recovery["reason"], "no_open_incident")
+        self.assertEqual(len(self.messages), 2)
+        self.assertIn("✅ Team 恢复", self.messages[1])
+        self.assertEqual(self._incident()["status"], "resolved")
+
+    def test_undelivered_alert_is_retried_on_next_failure(self):
+        deliveries = [0, 1]
+
+        def flaky_notify(text: str) -> int:
+            self.messages.append(text)
+            return deliveries.pop(0)
+
+        team_health_alerts.notify_admins_sync = flaky_notify
+        first = team_health_alerts.report_team_failure_sync(
+            "team-1", "chatgpt_auth", "401", source="test"
+        )
+        second = team_health_alerts.report_team_failure_sync(
+            "team-1", "chatgpt_auth", "401", source="test"
+        )
+
+        self.assertEqual(first["reason"], "not_delivered")
+        self.assertEqual(second["reason"], "sent")
+        self.assertEqual(len(self.messages), 2)
+        self.assertEqual(self._incident()["notified"], 1)
+
+    def test_undelivered_recovery_stays_open_and_retries(self):
+        team_health_alerts.report_team_failure_sync(
+            "team-1", "chatgpt_auth", "401", source="test"
+        )
+        deliveries = [0, 1]
+
+        def flaky_notify(text: str) -> int:
+            self.messages.append(text)
+            return deliveries.pop(0)
+
+        team_health_alerts.notify_admins_sync = flaky_notify
+        first = team_health_alerts.report_team_recovery_sync(
+            "team-1", "chatgpt_auth", source="test"
+        )
+        self.assertEqual(first["reason"], "not_delivered")
+        self.assertEqual(self._incident()["status"], "open")
+
+        second = team_health_alerts.report_team_recovery_sync(
+            "team-1", "chatgpt_auth", source="test"
+        )
+        self.assertEqual(second["reason"], "sent")
+        self.assertEqual(self._incident()["status"], "resolved")
+
+    def test_auth_error_detection(self):
+        self.assertTrue(team_health_alerts.is_auth_error("401 Client Error"))
+        self.assertTrue(team_health_alerts.is_auth_error("Unauthorized"))
+        self.assertFalse(team_health_alerts.is_auth_error("Read timed out"))
+
+
+if __name__ == "__main__":
+    unittest.main()

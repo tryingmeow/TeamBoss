@@ -1,0 +1,1345 @@
+import asyncio
+import hashlib
+import logging
+import re
+import secrets
+import sqlite3
+import time
+from typing import Any, Callable, Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+
+from ..client_ip import RateLimiter as _RateLimiter, get_client_ip
+from ..chatgpt_client import ChatGPTClient
+from ..chatgpt_limiter import run_chatgpt_call
+from ..database import get_db, log_operation
+from ..member_cache_service import add_member_watch, fetch_and_cache_members, get_cached_members
+from ..security import require_admin
+from ..services.member_expiry import (
+    PermanentMembershipError,
+    extend_member_expiry,
+    record_confirmed_invite_extension,
+)
+from ..services.team_clients import get_proxy_url as _get_proxy_url
+from ..services.seat_capacity import (
+    SeatCapacityFetchError,
+    fetch_live_chatgpt_seat_capacity,
+    update_capacity_cache,
+)
+from ..services.team_clients import load_active_teams
+from ..services.team_locks import (
+    member_operation_claim,
+    reserve_default_seat,
+    reserved_default_seats,
+    team_invite_lock,
+)
+from ..services.tg_notify import notify_member_event
+from ..utils.durations import (
+    DurationError,
+    expiry_from_duration,
+    normalize_duration,
+    parse_optional_datetime,
+    utc_now,
+)
+
+
+admin_router = APIRouter(
+    prefix="/api/access-tokens",
+    tags=["access-tokens"],
+    dependencies=[Depends(require_admin)],
+)
+public_router = APIRouter(prefix="/api/self-service", tags=["self-service"])
+
+logger = logging.getLogger(__name__)
+
+
+
+
+# 限流器实例
+_limiter_query = _RateLimiter(max_requests=30, window_seconds=60)  # 查询：30请求/分钟
+_limiter_redeem = _RateLimiter(max_requests=10, window_seconds=60)  # 兑换：10请求/分钟
+
+
+
+
+async def _check_rate_limit(request: Request, limiter: _RateLimiter) -> None:
+    """检查速率限制，超限时抛出 429 异常。"""
+    client_ip = get_client_ip(request)
+    if not limiter.is_allowed(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="请求过于频繁，请稍后再试",
+        )
+
+
+class GenerateAccessTokenRequest(BaseModel):
+    grant_expires_in: str = Field(..., description="成员加入/续期时长，如 7d/30d/360d/never")
+    token_ttl: str = Field("7d", description="token 自身有效期，如 1d/7d/never")
+    max_uses: int = Field(1, ge=1, le=1, description="固定为 1：token 一经兑换即失效")
+    note: Optional[str] = None
+
+
+class AccessTokenResponse(BaseModel):
+    id: int
+    token: str
+    token_prefix: str
+    grant_expires_in: str
+    token_expires_at: Optional[str]
+    max_uses: int
+    used_count: int
+    note: Optional[str]
+    created_at: str
+
+
+class AccessTokenListItem(BaseModel):
+    id: int
+    token_prefix: str
+    grant_expires_in: str
+    token_expires_at: Optional[str]
+    max_uses: int
+    used_count: int
+    note: Optional[str]
+    disabled: bool
+    created_at: str
+    last_used_at: Optional[str]
+
+
+class RedeemAccessTokenRequest(BaseModel):
+    email: str
+    token: str
+
+
+class RedeemAccessTokenResponse(BaseModel):
+    status: Literal["ok", "pending_confirmation"]
+    action: Optional[Literal["invited", "renewed_member", "renewed_invite"]] = None
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    email: str
+    expires_at: Optional[str]
+    message: str
+
+
+class QueryMembershipRequest(BaseModel):
+    email: str
+
+
+class QuerySelfServiceRequest(BaseModel):
+    query: str = Field(..., description="邮箱或 token")
+
+
+class RedemptionHistoryItem(BaseModel):
+    action: str
+    result: str
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    token_prefix: Optional[str] = None
+    grant_expires_in: Optional[str] = None
+    expires_at: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: str
+
+
+class QueryMembershipResponse(BaseModel):
+    status: Literal["joined", "pending", "absent"]
+    email: str
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    expires_at: Optional[str] = None
+    is_owner: bool = False
+    message: str
+    redemption_history: list[RedemptionHistoryItem] = Field(default_factory=list)
+    cache_updated_at: Optional[str] = None  # 缓存更新时间，None 表示数据不来自缓存
+
+
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+
+def _duration_or_400(raw: str, *, allow_never: bool) -> str:
+    try:
+        return normalize_duration(raw, allow_never=allow_never)
+    except DurationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _new_token() -> str:
+    return "atm_" + secrets.token_urlsafe(24)
+
+
+def _normalize_email(raw: str) -> str:
+    email = (raw or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="邮箱格式无效")
+    return email
+
+
+
+async def _set_token_use_phase(
+    token_use_id: int,
+    action: str,
+    *,
+    team_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> None:
+    async with get_db() as db:
+        cursor = await db.execute(
+            """UPDATE access_token_uses
+               SET action = ?, team_id = ?, user_id = ?
+               WHERE id = ? AND result = 'pending'""",
+            (action, team_id, user_id, token_use_id),
+        )
+        await db.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"redemption attempt is no longer pending: {token_use_id}")
+
+
+async def _mark_token_use_uncertain(
+    token_use_id: int,
+    *,
+    team_id: str,
+    error_message: str,
+) -> None:
+    async with get_db() as db:
+        cursor = await db.execute(
+            """UPDATE access_token_uses
+               SET action = 'invite_pending', team_id = ?, result = 'uncertain',
+                   error_message = ?
+               WHERE id = ? AND result = 'pending'""",
+            (team_id, error_message, token_use_id),
+        )
+        await db.commit()
+        if cursor.rowcount != 1:
+            raise RuntimeError(f"failed to lock uncertain redemption: {token_use_id}")
+
+
+async def _get_redemption_history(email: str, limit: int = 20) -> list[dict[str, Any]]:
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT
+                   atu.action,
+                   atu.result,
+                   atu.team_id,
+                   t.name AS team_name,
+                   at.token_prefix,
+                   at.grant_expires_in,
+                   atu.expires_at,
+                   atu.error_message,
+                   atu.created_at
+               FROM access_token_uses atu
+               LEFT JOIN access_tokens at ON at.id = atu.token_id
+               LEFT JOIN teams t ON t.id = atu.team_id
+               WHERE lower(atu.email) = ?
+               ORDER BY atu.created_at DESC
+               LIMIT ?""",
+            (email.lower(), limit),
+        )
+        rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def _get_token_by_raw(raw_token: str) -> Optional[dict[str, Any]]:
+    token = (raw_token or "").strip()
+    if not token:
+        return None
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM access_tokens WHERE token_hash = ?",
+            (_hash_token(token),),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def _get_latest_token_use(token_id: int) -> Optional[dict[str, Any]]:
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT atu.*, t.name AS team_name
+               FROM access_token_uses atu
+               LEFT JOIN teams t ON t.id = atu.team_id
+               WHERE atu.token_id = ?
+               ORDER BY atu.created_at DESC
+               LIMIT 1""",
+            (token_id,),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+class _TokenConsumption:
+    """标记这次兑换有没有跨过"不可回滚"的那个点。
+
+    ``confirm()`` 必须是同步的、并且在**外部副作用刚刚生效的那一行**就调用：
+    OpenAI 邀请一旦成功，人就已经在车队里了，这次兑换码的消耗就已经成立，之后
+    的落库/日志/缓存/通知再怎么炸也不能把码退回去（退回 = 同一张码能再用一次）。
+    """
+
+    __slots__ = ("confirmed",)
+
+    def __init__(self) -> None:
+        self.confirmed = False
+
+    def confirm(self) -> None:
+        self.confirmed = True
+
+
+async def _reserve_token_use(
+    token_id: int,
+    email: str,
+    nominal_expires_at: Optional[str],
+) -> int:
+    """Atomically occupy the token's single use slot.
+
+    This is the concurrency guard: the conditional ``UPDATE ... WHERE
+    used_count < 1`` only lets one concurrent redeemer win the row, so a
+    second submission of the same token gets rowcount=0 and a 409 instead of
+    racing into a duplicate invite. The reservation is provisional — call
+    ``_fail_and_release_token_use`` if the redemption ultimately fails so the token
+    can be retried, or leave it as-is once the redemption truly succeeds.
+    """
+    now = utc_now().isoformat()
+    async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            """UPDATE access_tokens
+               SET used_count = used_count + 1, last_used_at = ?
+               WHERE id = ? AND disabled = 0 AND used_count < 1""",
+            (now, token_id),
+        )
+        if cursor.rowcount != 1:
+            await db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Token 已用完")
+        cursor = await db.execute(
+            """INSERT INTO access_token_uses
+               (token_id, email, action, team_id, user_id, expires_at, result,
+                error_message, created_at)
+               VALUES (?, ?, 'lookup_pending', NULL, NULL, ?, 'pending', NULL, ?)""",
+            (token_id, email, nominal_expires_at, now),
+        )
+        token_use_id = int(cursor.lastrowid)
+        try:
+            await db.execute(
+                """INSERT INTO redemption_email_claims (email, token_use_id, created_at)
+                   VALUES (?, ?, ?)""",
+                (email, token_use_id, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该邮箱有一笔兑换正在处理，请稍后用原兑换码查询",
+            ) from exc
+        await db.commit()
+        return token_use_id
+
+
+async def _fail_and_release_token_use(
+    token_use_id: int,
+    *,
+    action: str,
+    error_message: str,
+    team_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> bool:
+    """Undo a provisional reservation from ``_reserve_token_use``.
+
+    只有仍为 ``pending`` 的同一次 attempt 才能释放；``uncertain`` 和
+    ``success`` 都拒绝释放，避免结果不确定时双花。
+    """
+    async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT token_id, result FROM access_token_uses WHERE id = ?",
+            (token_use_id,),
+        )
+        row = await cursor.fetchone()
+        if not row or row["result"] != "pending":
+            await db.rollback()
+            return False
+
+        await db.execute(
+            """UPDATE access_token_uses
+               SET action = ?, team_id = ?, user_id = ?, result = 'failed',
+                   error_message = ?
+               WHERE id = ? AND result = 'pending'""",
+            (action, team_id, user_id, error_message, token_use_id),
+        )
+        await db.execute(
+            "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
+            (token_use_id,),
+        )
+        await db.execute(
+            """UPDATE access_tokens
+               SET used_count = 0, last_used_at = NULL
+               WHERE id = ? AND used_count = 1""",
+            (row["token_id"],),
+        )
+        await db.commit()
+        return True
+
+
+async def _load_token(raw_token: str) -> dict[str, Any]:
+    token = (raw_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token 不能为空")
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM access_tokens WHERE token_hash = ?",
+            (_hash_token(token),),
+        )
+        row = await cursor.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token 无效")
+
+    token_row = dict(row)
+    if token_row.get("disabled"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token 已禁用")
+
+    expires_at = parse_optional_datetime(token_row.get("token_expires_at"))
+    if expires_at and expires_at <= utc_now():
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Token 已过期")
+
+    if int(token_row.get("used_count") or 0) >= 1:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Token 已用完")
+
+    return token_row
+
+
+async def _find_existing_membership(
+    email: str, teams: list[dict[str, Any]], use_cache_only: bool = False
+) -> Optional[dict[str, Any]]:
+    """
+    查找邮箱在哪个 Team 中的成员身份（已加入或待接受邀请）。
+
+    当 use_cache_only=True 时，仅读本地缓存，不触发实时 OpenAI 请求（用于公开查询路径）。
+    当 use_cache_only=False 时，实时拉取成员列表（用于兑换/邀请等写操作）。
+    """
+    for team in teams:
+        if use_cache_only:
+            # 只读缓存，不触发实时请求
+            snapshot = await get_cached_members(team["id"])
+            if not snapshot:
+                # 缓存不存在，跳过该 team
+                continue
+        else:
+            # 实时拉取并缓存
+            _proxy_url = await _get_proxy_url(team.get("proxy_id"))
+            client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=_proxy_url)
+            try:
+                snapshot = await fetch_and_cache_members(team["id"], client)
+            except Exception as exc:
+                await log_operation(
+                    team["id"],
+                    "self_service_lookup",
+                    email,
+                    None,
+                    "failed",
+                    str(exc),
+                    "manual",
+                )
+                # 写操作前必须确认这个邮箱不在任何 Team。只要有一个 Team
+                # 拉取失败，就不能假装“不存在”后把人邀请到另一个 Team。
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="暂时无法确认全部 Team 的成员状态，请稍后重试",
+                ) from exc
+
+        for member in snapshot.get("members", []):
+            if (member.get("email") or "").lower() == email:
+                return {
+                    "kind": "member",
+                    "team": team,
+                    "user_id": member.get("id") or "",
+                    "is_owner": bool(member.get("is_owner")),
+                    "expires_at": member.get("expires_at"),
+                    "cache_updated_at": snapshot.get("updated_at"),
+                }
+
+        for invite in snapshot.get("pending_invites", []):
+            if (invite.get("email") or "").lower() == email:
+                return {
+                    "kind": "invite",
+                    "team": team,
+                    "user_id": "",
+                    "is_owner": False,
+                    "expires_at": invite.get("expires_at"),
+                    "cache_updated_at": snapshot.get("updated_at"),
+                }
+    return None
+
+
+def _token_status(token_row: dict[str, Any]) -> str:
+    if int(token_row.get("used_count") or 0) >= 1:
+        return "used"
+    if token_row.get("disabled"):
+        return "disabled"
+    expires_at = parse_optional_datetime(token_row.get("token_expires_at"))
+    if expires_at and expires_at <= utc_now():
+        return "expired"
+    return "unused"
+
+
+def _email_status_label(status_value: str) -> str:
+    return {
+        "pending": "待接受",
+        "joined": "已加入",
+        "expired_removed": "已过期移出",
+        "absent": "未找到",
+        "unknown": "未知",
+    }.get(status_value, status_value)
+
+
+async def _resolve_email_status(email: str, expires_at: Optional[str]) -> dict[str, Any]:
+    if not email:
+        return {"status": "unknown", "status_label": _email_status_label("unknown")}
+
+    try:
+        teams = await load_active_teams()
+        # 公开查询路径，只读缓存不触发实时请求
+        existing = await _find_existing_membership(email, teams, use_cache_only=True)
+    except Exception:
+        existing = None
+
+    if existing and existing["kind"] == "invite":
+        return {
+            "status": "pending",
+            "status_label": _email_status_label("pending"),
+            "team_id": existing["team"]["id"],
+            "team_name": existing["team"]["name"],
+            "expires_at": existing.get("expires_at"),
+            "cache_updated_at": existing.get("cache_updated_at"),
+        }
+    if existing and existing["kind"] == "member":
+        return {
+            "status": "joined",
+            "status_label": _email_status_label("joined"),
+            "team_id": existing["team"]["id"],
+            "team_name": existing["team"]["name"],
+            "expires_at": existing.get("expires_at"),
+            "cache_updated_at": existing.get("cache_updated_at"),
+        }
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT me.*, t.name AS team_name
+               FROM member_expiry me
+               LEFT JOIN teams t ON t.id = me.team_id
+               WHERE lower(me.email) = ? AND me.kicked = 1
+               ORDER BY me.kicked_at DESC, me.created_at DESC
+               LIMIT 1""",
+            (email.lower(),),
+        )
+        kicked_row = await cursor.fetchone()
+    if kicked_row:
+        kicked = dict(kicked_row)
+        return {
+            "status": "expired_removed",
+            "status_label": _email_status_label("expired_removed"),
+            "team_id": kicked.get("team_id"),
+            "team_name": kicked.get("team_name"),
+            "expires_at": kicked.get("expires_at") or expires_at,
+            "kicked_at": kicked.get("kicked_at"),
+            "cache_updated_at": None,  # 已踢出状态，不从缓存得来
+        }
+
+    expires_dt = parse_optional_datetime(expires_at)
+    status_value = "expired_removed" if expires_dt and expires_dt <= utc_now() else "absent"
+    return {
+        "status": status_value,
+        "status_label": _email_status_label(status_value),
+        "expires_at": expires_at,
+        "cache_updated_at": None,  # 未找到状态，不从缓存得来
+    }
+
+
+async def _query_token(raw_token: str) -> dict[str, Any]:
+    token_row = await _get_token_by_raw(raw_token)
+    if not token_row:
+        return {
+            "query_type": "token",
+            "token": {
+                "token_status": "invalid",
+                "token_status_label": "无效",
+            },
+            "usage": None,
+        }
+
+    latest_use = await _get_latest_token_use(int(token_row["id"]))
+    status_value = _token_status(token_row)
+    if latest_use and latest_use.get("result") in {"pending", "uncertain"}:
+        status_value = "pending_confirmation"
+    usage = None
+    if latest_use:
+        email_status = await _resolve_email_status(latest_use.get("email") or "", latest_use.get("expires_at"))
+        usage = {
+            "email": latest_use.get("email"),
+            "email_status": email_status.get("status"),
+            "email_status_label": email_status.get("status_label"),
+            "team_id": latest_use.get("team_id") or email_status.get("team_id"),
+            "team_name": latest_use.get("team_name") or email_status.get("team_name"),
+            "user_id": latest_use.get("user_id"),
+            "action": latest_use.get("action"),
+            "result": latest_use.get("result"),
+            "error_message": (
+                "结果确认中，兑换码已暂时锁定，请稍后查询"
+                if latest_use.get("result") in {"pending", "uncertain"}
+                else latest_use.get("error_message")
+            ),
+            "expires_at": latest_use.get("expires_at") or email_status.get("expires_at"),
+            "kicked_at": email_status.get("kicked_at"),
+            "used_at": latest_use.get("created_at"),
+        }
+
+    return {
+        "query_type": "token",
+        "token": {
+            "id": token_row["id"],
+            "token_prefix": token_row["token_prefix"],
+            "token_status": status_value,
+            "token_status_label": {
+                "unused": "未使用",
+                "used": "已使用",
+                "pending_confirmation": "结果确认中",
+                "expired": "已过期",
+                "disabled": "已禁用",
+            }.get(status_value, status_value),
+            "grant_expires_in": token_row["grant_expires_in"],
+            "token_expires_at": token_row.get("token_expires_at"),
+            "max_uses": 1,
+            "used_count": int(token_row.get("used_count") or 0),
+            "created_at": token_row.get("created_at"),
+            "last_used_at": token_row.get("last_used_at"),
+        },
+        "usage": usage,
+    }
+
+
+def _snapshot_contains_email(snapshot: dict[str, Any] | None, email: str) -> bool:
+    if not snapshot:
+        return False
+    email_lower = (email or "").strip().lower()
+    for member in snapshot.get("members", []):
+        if (member.get("email") or "").strip().lower() == email_lower:
+            return True
+    for invite in snapshot.get("pending_invites", []):
+        if (invite.get("email") or "").strip().lower() == email_lower:
+            return True
+    return False
+
+
+async def _chatgpt_available(client: ChatGPTClient, team_id: str, *, email: str = "") -> tuple[bool, str]:
+    try:
+        capacity, subscription, seat_counts, _pending = await fetch_live_chatgpt_seat_capacity(client)
+    except SeatCapacityFetchError as exc:
+        return False, str(exc)
+
+    await update_capacity_cache(team_id, subscription, seat_counts)
+    reserved = await reserved_default_seats(team_id, exclude_email=email)
+    available_after_reservations = capacity.available - reserved
+
+    if available_after_reservations <= 0:
+        return (
+            False,
+            "no_chatgpt_seat: "
+            f"active_chatgpt={capacity.active_chatgpt}/{capacity.seats_entitled}, "
+            f"total_in_use={capacity.seats_in_use_total}, "
+            f"codex={capacity.codex_count}, "
+            f"pending_default={capacity.pending_default}, "
+            f"reserved_default={reserved}",
+        )
+    return True, f"available={available_after_reservations}, active_chatgpt={capacity.active_chatgpt}"
+
+
+async def _invite_to_available_team(
+    email: str,
+    grant_duration: str,
+    teams: list[dict[str, Any]],
+    *,
+    token_use_id: int,
+    on_invite_confirmed: Optional[Callable[[], None]] = None,
+) -> dict[str, Any]:
+    """给 email 在第一个有空位的 Team 上发邀请。
+
+    ``on_invite_confirmed``：OpenAI 侧邀请**真正成功、不可回滚**的那一刻会被同步
+    调用一次。调用方用它来标记"这次兑换的消耗已经确定"，而不是等本函数返回——
+    返回之前还有落库、审计日志、缓存刷新、占位、TG 通知这些步骤（其中有网络请求），
+    任何一步抛异常（包括 systemd 停服时的 CancelledError 这类 BaseException）都
+    不能再让兑换码被退回。
+    """
+    last_error: Optional[str] = None
+
+    for team in teams:
+        async with team_invite_lock(team["id"]):
+            _proxy_url_inv = await _get_proxy_url(team.get("proxy_id"))
+            client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=_proxy_url_inv)
+            ok, reason = await _chatgpt_available(client, team["id"], email=email)
+            if not ok:
+                last_error = reason
+                continue
+
+            # 进入不可幂等的远端写操作前先持久化目标 Team。进程即使在请求
+            # 返回前退出，恢复任务也知道应该去哪个 Team 对账。
+            await _set_token_use_phase(
+                token_use_id,
+                "invite_pending",
+                team_id=team["id"],
+            )
+            mutation_task = asyncio.create_task(
+                run_chatgpt_call(client.invite_member, email, "default")
+            )
+            try:
+                result = await asyncio.shield(mutation_task)
+            except asyncio.CancelledError:
+                # executor 中的 requests 请求不会随协程取消而停止。这里等它真正
+                # 结束并继续完成持久化，避免停服恰好把结果留在半空。
+                result = await mutation_task
+
+            mutation_status = result.get("_mutation_status")
+            if mutation_status is None:
+                # 兼容测试桩和旧版 client：无 error 即已确认，带 error 则按
+                # 明确失败处理；生产 client 会始终给出精确分类。
+                mutation_status = "rejected" if "error" in result else "confirmed"
+
+            if mutation_status == "uncertain":
+                # 超时后先立即读取原 Team：能看见成员/邀请就可以确认成功；
+                # 看不见仍不能证明失败（远端可能正在最终一致），继续锁码等待。
+                try:
+                    snapshot = await fetch_and_cache_members(team["id"], client)
+                except Exception:
+                    snapshot = None
+                if _snapshot_contains_email(snapshot, email):
+                    mutation_status = "confirmed"
+
+            if mutation_status == "uncertain":
+                error = str(result.get("error") or "OpenAI invite result is uncertain")
+                await _mark_token_use_uncertain(
+                    token_use_id,
+                    team_id=team["id"],
+                    error_message=error,
+                )
+                if on_invite_confirmed is not None:
+                    # 这里不是确认邀请成功，而是确认这张码绝不能再释放。
+                    on_invite_confirmed()
+                try:
+                    await log_operation(
+                        team["id"],
+                        "self_service_invite",
+                        email,
+                        "seat_type=default",
+                        "uncertain",
+                        error,
+                        "manual",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to log uncertain invite team=%s email=%s",
+                        team["id"],
+                        email,
+                    )
+                return {
+                    "status": "pending_confirmation",
+                    "team": team,
+                    "user_id": "",
+                    "expires_at": None,
+                }
+
+            if mutation_status == "rejected" or "error" in result:
+                last_error = str(result.get("error") or "OpenAI rejected the invite")
+                try:
+                    await log_operation(
+                        team["id"],
+                        "self_service_invite",
+                        email,
+                        "seat_type=default",
+                        "failed",
+                        result["error"],
+                        "manual",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to log rejected invite team=%s email=%s",
+                        team["id"],
+                        email,
+                    )
+                continue
+
+            # ↓↓↓ 从这一行往后，OpenAI 侧的邀请已经生效且无法回滚 ↓↓↓
+            # 先把"消耗已确认"标记打上，再做任何可能失败的收尾动作。
+            if on_invite_confirmed is not None:
+                on_invite_confirmed()
+
+            # OpenAI 邀请已在上面成功，本地记录必须最终落地，见
+            # record_confirmed_invite_extension 注释；它不会抛异常，所以下面这段
+            # 属于"邀请已经确定成功"之后的收尾。
+            expires_iso = await record_confirmed_invite_extension(
+                team["id"],
+                "",
+                email,
+                grant_duration,
+                source="self_service",
+                token_use_id=token_use_id,
+                token_action="invited",
+            )
+            try:
+                await log_operation(
+                    team["id"],
+                    "self_service_invite",
+                    email,
+                    f"expires_at={expires_iso}",
+                    "success",
+                    None,
+                    "manual",
+                )
+            except Exception as exc:
+                # 邀请和本地成员记录都已经成功；这里只是审计日志写入抖动，绝不能让它
+                # 把已经确定成功的邀请变成上层的失败分支（那会导致 token 被误退回）。
+                logger.warning(
+                    "self_service_invite: log_operation failed after successful invite "
+                    "team=%s email=%s: %s", team["id"], email, exc,
+                )
+
+            snapshot = None
+            try:
+                snapshot = await fetch_and_cache_members(team["id"], client)
+                await add_member_watch(team["id"], "invite", target_email=email)
+            except Exception as exc:
+                try:
+                    await log_operation(
+                        team["id"],
+                        "self_service_cache_refresh",
+                        email,
+                        None,
+                        "failed",
+                        str(exc),
+                        "manual",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to log cache refresh failure team=%s email=%s",
+                        team["id"],
+                        email,
+                    )
+            if not _snapshot_contains_email(snapshot, email):
+                try:
+                    await reserve_default_seat(team["id"], email)
+                except Exception:
+                    logger.exception(
+                        "failed to reserve confirmed invite seat team=%s email=%s",
+                        team["id"],
+                        email,
+                    )
+
+            try:
+                await notify_member_event(
+                    "自助拉人",
+                    team["id"],
+                    email=email,
+                    source="self_service",
+                    detail=f"expires_at={expires_iso}",
+                )
+            except Exception:
+                logger.exception(
+                    "failed to notify successful invite team=%s email=%s",
+                    team["id"],
+                    email,
+                )
+
+            return {
+                "status": "ok",
+                "action": "invited",
+                "team": team,
+                "user_id": "",
+                "expires_at": expires_iso,
+            }
+
+    detail = "没有可用 ChatGPT 席位"
+    if last_error:
+        detail = f"{detail}: {last_error}"
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
+async def reconcile_pending_redemptions() -> dict[str, int]:
+    """恢复进程中断留下的兑换。
+
+    ``invite_pending`` 已经越过“可能向 OpenAI 发出请求”的边界，只能读取原
+    Team 对账，绝不自动释放或换 Team 重试。纯本地的 lookup/renew pending
+    超过 30 分钟仍未完成则可安全回滚，因为续期和收据本来就在同一事务里。
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT atu.id, atu.email, atu.action, atu.team_id, atu.user_id,
+                      atu.result, atu.created_at, at.grant_expires_in,
+                      t.access_token, t.device_id, t.proxy_id
+               FROM access_token_uses atu
+               JOIN access_tokens at ON at.id = atu.token_id
+               LEFT JOIN teams t ON t.id = atu.team_id
+               WHERE atu.result IN ('pending', 'uncertain')
+               ORDER BY atu.id"""
+        )
+        attempts = [dict(row) for row in await cursor.fetchall()]
+
+    counts = {"confirmed": 0, "released": 0, "waiting": 0}
+    stale_before = utc_now().timestamp() - 30 * 60
+    for attempt in attempts:
+        token_use_id = int(attempt["id"])
+        action = attempt.get("action") or ""
+        created_at = parse_optional_datetime(attempt.get("created_at"))
+
+        if action != "invite_pending":
+            if created_at and created_at.timestamp() <= stale_before:
+                released = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="redeem_interrupted",
+                    error_message="local redemption interrupted before remote mutation",
+                    team_id=attempt.get("team_id"),
+                    user_id=attempt.get("user_id"),
+                )
+                counts["released" if released else "waiting"] += 1
+            else:
+                counts["waiting"] += 1
+            continue
+
+        if not attempt.get("team_id") or not attempt.get("access_token") or not attempt.get("device_id"):
+            counts["waiting"] += 1
+            continue
+
+        proxy_url = await _get_proxy_url(attempt.get("proxy_id"))
+        client = ChatGPTClient(
+            attempt["access_token"],
+            attempt["team_id"],
+            attempt["device_id"],
+            proxy_url=proxy_url,
+        )
+        try:
+            snapshot = await fetch_and_cache_members(attempt["team_id"], client)
+        except Exception:
+            counts["waiting"] += 1
+            continue
+        if not _snapshot_contains_email(snapshot, attempt["email"]):
+            counts["waiting"] += 1
+            continue
+
+        await record_confirmed_invite_extension(
+            attempt["team_id"],
+            attempt.get("user_id") or "",
+            attempt["email"],
+            attempt["grant_expires_in"],
+            source="self_service",
+            token_use_id=token_use_id,
+            token_action="invited",
+        )
+        latest = await _get_latest_token_use_by_id(token_use_id)
+        if latest and latest.get("result") == "success":
+            counts["confirmed"] += 1
+            try:
+                await log_operation(
+                    attempt["team_id"],
+                    "self_service_invite_reconciled",
+                    attempt["email"],
+                    f"token_use_id={token_use_id}",
+                    "success",
+                    None,
+                    "scheduler",
+                )
+            except Exception:
+                logger.exception(
+                    "failed to log reconciled invite token_use_id=%s",
+                    token_use_id,
+                )
+        else:
+            counts["waiting"] += 1
+    return counts
+
+
+async def _get_latest_token_use_by_id(token_use_id: int) -> Optional[dict[str, Any]]:
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM access_token_uses WHERE id = ?",
+            (token_use_id,),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def _renew_existing_membership(
+    existing: dict[str, Any],
+    email: str,
+    grant_duration: str,
+    token_use_id: int,
+) -> Optional[dict[str, Any]]:
+    """续期前与踢人任务互斥，并在拿锁后重新确认远端成员仍存在。"""
+    team = existing["team"]
+    async with member_operation_claim(
+        team["id"],
+        email=email,
+        user_id=existing.get("user_id") or "",
+        operation="self_service_renew",
+    ) as acquired:
+        if not acquired:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="成员状态正在变更，请稍后重试；兑换码未使用",
+            )
+
+        # 可能在第一次查询后、claim 拿到前已被自动踢出。必须重新拉原 Team；
+        # 若已不在，则退出续期分支，后续按新邀请处理。
+        refreshed = await _find_existing_membership(email, [team])
+        if not refreshed:
+            return None
+        if refreshed["is_owner"]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Owner 邮箱不支持自助续期",
+            )
+
+        action = "renewed_member" if refreshed["kind"] == "member" else "renewed_invite"
+        await _set_token_use_phase(
+            token_use_id,
+            "renew_pending",
+            team_id=team["id"],
+            user_id=refreshed.get("user_id") or "",
+        )
+        expires_at = await extend_member_expiry(
+            team["id"],
+            refreshed.get("user_id") or "",
+            email,
+            grant_duration,
+            source="self_service",
+            token_use_id=token_use_id,
+            token_action=action,
+        )
+        return {
+            "existing": refreshed,
+            "action": action,
+            "expires_at": expires_at,
+        }
+
+
+@admin_router.post("", response_model=AccessTokenResponse)
+async def generate_access_token(req: GenerateAccessTokenRequest):
+    grant_expires_in = _duration_or_400(req.grant_expires_in, allow_never=True)
+    token_ttl = _duration_or_400(req.token_ttl, allow_never=True)
+    max_uses = 1
+    token = _new_token()
+    now = utc_now()
+    token_expires_at = expiry_from_duration(token_ttl, base=now)
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            """INSERT INTO access_tokens
+               (token_hash, token_prefix, grant_expires_in, token_expires_at,
+                max_uses, used_count, note, disabled, created_at)
+               VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?)""",
+            (
+                _hash_token(token),
+                token[:12],
+                grant_expires_in,
+                token_expires_at.isoformat() if token_expires_at else None,
+                max_uses,
+                req.note,
+                now.isoformat(),
+            ),
+        )
+        await db.commit()
+        token_id = cursor.lastrowid
+
+    return {
+        "id": token_id,
+        "token": token,
+        "token_prefix": token[:12],
+        "grant_expires_in": grant_expires_in,
+        "token_expires_at": token_expires_at.isoformat() if token_expires_at else None,
+        "max_uses": max_uses,
+        "used_count": 0,
+        "note": req.note,
+        "created_at": now.isoformat(),
+    }
+
+
+@admin_router.get("", response_model=list[AccessTokenListItem])
+async def list_access_tokens():
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT id, token_prefix, grant_expires_in, token_expires_at,
+                      max_uses, used_count, note, disabled, created_at, last_used_at
+               FROM access_tokens
+               ORDER BY created_at DESC"""
+        )
+        rows = await cursor.fetchall()
+
+    return [
+        {
+            **dict(row),
+            "max_uses": 1,
+            "disabled": bool(row["disabled"]),
+        }
+        for row in rows
+    ]
+
+
+@admin_router.delete("/{token_id}")
+async def disable_access_token(token_id: int):
+    async with get_db() as db:
+        cursor = await db.execute(
+            "UPDATE access_tokens SET disabled = 1 WHERE id = ?",
+            (token_id,),
+        )
+        await db.commit()
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
+    return {"status": "ok"}
+
+
+@public_router.post("/redeem", response_model=RedeemAccessTokenResponse)
+async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
+    # 限流检查：兑换操作严格限制
+    await _check_rate_limit(request, _limiter_redeem)
+
+    email = _normalize_email(req.email)
+    token_row = await _load_token(req.token)
+    token_id = int(token_row["id"])
+    grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
+    # 这只是这张码的"面额"（从现在起算的名义到期），仅用于失败记录/审计展示。
+    # 真正落库的到期时间由 extend_member_expiry 按 max(现有到期, now) + 时长 算出来，
+    # 绝不能拿这个值直接覆盖成员现有的到期时间——那会把客户已购时长清零。
+    nominal_expires_at = expiry_from_duration(grant_duration)
+    nominal_expires_iso = nominal_expires_at.isoformat() if nominal_expires_at else None
+
+    # token 一经兑换成功即失效；先原子占用次数挡住并发重放（同一个 token 只有一次
+    # 占用能成功），兑换流程中途真正失败时会在 finally 里把占用释放掉，让用户可以
+    # 拿同一个 token 重试——只有真正走到下面的续期/邀请成功点才会保留这次消耗。
+    token_use_id = await _reserve_token_use(token_id, email, nominal_expires_iso)
+    consumption = _TokenConsumption()
+    failure_recorded = False
+
+    try:
+        teams = await load_active_teams()
+        if not teams:
+            failure_recorded = await _fail_and_release_token_use(
+                token_use_id,
+                action="none",
+                error_message="no_active_team",
+            )
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="没有可用 Team")
+
+        existing = await _find_existing_membership(email, teams)
+        if existing:
+            if existing["is_owner"]:
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="renew_owner_rejected",
+                    team_id=existing["team"]["id"],
+                    user_id=existing.get("user_id"),
+                    error_message="owner_email",
+                )
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Owner 邮箱不支持自助续期")
+
+            try:
+                renewed = await _renew_existing_membership(
+                    existing,
+                    email,
+                    grant_duration,
+                    token_use_id,
+                )
+            except PermanentMembershipError:
+                # 当前成员没有到期时间（永久）。给他续一段有限时长只会是降级，
+                # 所以拒绝并保留兑换码（finally 里会把占用退回）。
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="renew_permanent_rejected",
+                    team_id=existing["team"]["id"],
+                    user_id=existing.get("user_id"),
+                    error_message="permanent_membership",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。",
+                )
+            if renewed:
+                existing = renewed["existing"]
+                action = renewed["action"]
+                actual_expires_iso = renewed["expires_at"]
+                # 成员到期时间与兑换收据已经同事务提交。
+                consumption.confirm()
+                try:
+                    await log_operation(
+                        existing["team"]["id"],
+                        "self_service_renew",
+                        email,
+                        f"action={action}, expires_at={actual_expires_iso}",
+                        "success",
+                        None,
+                        "manual",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to log successful renewal team=%s email=%s",
+                        existing["team"]["id"],
+                        email,
+                    )
+
+                return {
+                    "status": "ok",
+                    "action": action,
+                    "team_id": existing["team"]["id"],
+                    "team_name": existing["team"]["name"],
+                    "email": email,
+                    "expires_at": actual_expires_iso,
+                    "message": "已续期",
+                }
+
+        # 消耗标记不能等这个函数返回再打：邀请在函数内部就已经不可回滚了，
+        # 所以通过 on_invite_confirmed 在那一刻同步标记（见该函数注释）。
+        joined = await _invite_to_available_team(
+            email,
+            grant_duration,
+            teams,
+            token_use_id=token_use_id,
+            on_invite_confirmed=consumption.confirm,
+        )
+        if joined["status"] == "pending_confirmation":
+            return {
+                "status": "pending_confirmation",
+                "action": None,
+                "team_id": joined["team"]["id"],
+                "team_name": joined["team"]["name"],
+                "email": email,
+                "expires_at": None,
+                "message": "结果确认中，兑换码已暂时锁定，请稍后用原兑换码查询",
+            }
+        return {
+            "status": "ok",
+            "action": "invited",
+            "team_id": joined["team"]["id"],
+            "team_name": joined["team"]["name"],
+            "email": email,
+            "expires_at": joined["expires_at"],
+            "message": "已发送邀请",
+        }
+    except HTTPException as exc:
+        if not failure_recorded and not consumption.confirmed:
+            failure_recorded = await _fail_and_release_token_use(
+                token_use_id,
+                action="redeem_failed",
+                error_message=str(exc.detail),
+            )
+        raise
+    except Exception as exc:
+        if not consumption.confirmed:
+            failure_recorded = await _fail_and_release_token_use(
+                token_use_id,
+                action="redeem_failed",
+                error_message=str(exc),
+            )
+        raise
+    finally:
+        # 只有真正没跨过"不可回滚点"才释放占用。confirm() 是同步调用、发生在
+        # OpenAI 邀请成功 / 本地续期落库成功的那一刻，所以之后无论抛出什么
+        # ——包括 systemd 停服时的 CancelledError 这类 BaseException（上面的
+        # except Exception 接不住它）——都不会把已消耗的 token 退回去。
+        if not consumption.confirmed:
+            # 走到这里一定是在异常向外传播（正常返回路径必然已经 confirm 过），
+            # 所以下面吞掉的只可能是"退回动作自己"引发的新异常，不会把一次成功
+            # 的返回悄悄改成失败。
+            try:
+                # shield：即使当前任务正在被取消（停服/客户端断开），退回动作本身
+                # 也要跑完，不能半路又被取消而留下一个已占用但没人用的 token。
+                await asyncio.shield(
+                    _fail_and_release_token_use(
+                        token_use_id,
+                        action="redeem_aborted",
+                        error_message="request_aborted",
+                    )
+                )
+            except BaseException as release_exc:  # noqa: BLE001 - 见上方注释
+                logger.error(
+                    "failed to release token use during unwind token_use_id=%s: %r",
+                    token_use_id, release_exc,
+                )
+
+
+@public_router.post("/query")
+async def query_self_service(req: QuerySelfServiceRequest, request: Request):
+    # 限流检查：查询操作允许更高频率
+    await _check_rate_limit(request, _limiter_query)
+
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="查询内容不能为空")
+
+    if query.startswith("atm_"):
+        return await _query_token(query)
+
+    token_row = await _get_token_by_raw(query)
+    if token_row:
+        return await _query_token(query)
+
+    email = _normalize_email(query)
+    membership = await _query_membership_status(email)
+    return {
+        "query_type": "email",
+        "membership": membership,
+    }
+
+
+async def _query_membership_status(email: str):
+    """Membership lookup core; callers apply their public endpoint limiter once."""
+    history = await _get_redemption_history(email)
+    teams = await load_active_teams()
+    if not teams:
+        return {
+            "status": "absent",
+            "email": email,
+            "message": "未找到记录",
+            "redemption_history": history,
+            "cache_updated_at": None,
+        }
+
+    existing = await _find_existing_membership(email, teams, use_cache_only=True)
+    if not existing:
+        return {
+            "status": "absent",
+            "email": email,
+            "message": "未找到记录",
+            "redemption_history": history,
+            "cache_updated_at": None,
+        }
+
+    if existing["kind"] == "invite":
+        return {
+            "status": "pending",
+            "email": email,
+            "team_id": existing["team"]["id"],
+            "team_name": existing["team"]["name"],
+            "expires_at": existing.get("expires_at"),
+            "is_owner": False,
+            "message": "待接受邀请",
+            "redemption_history": history,
+            "cache_updated_at": existing.get("cache_updated_at"),
+        }
+
+    return {
+        "status": "joined",
+        "email": email,
+        "team_id": existing["team"]["id"],
+        "team_name": existing["team"]["name"],
+        "expires_at": existing.get("expires_at"),
+        "is_owner": bool(existing.get("is_owner")),
+        "message": "已加入",
+        "redemption_history": history,
+        "cache_updated_at": existing.get("cache_updated_at"),
+    }
+
+
+@public_router.post("/status", response_model=QueryMembershipResponse)
+async def query_membership_status(req: QueryMembershipRequest, request: Request):
+    # 限流检查：查询操作允许更高频率
+    await _check_rate_limit(request, _limiter_query)
+
+    email = _normalize_email(req.email)
+    return await _query_membership_status(email)

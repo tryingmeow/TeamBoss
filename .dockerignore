@@ -1,0 +1,27 @@
+.git/
+.env
+.env.*
+!.env.example
+
+backend/data/
+backend/.venv/
+backend/.venv-linux/
+frontend/node_modules/
+frontend/dist/
+.venv/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+*.pid
+*.db
+*.sqlite
+*.sqlite3
+
+# Root-level local notes and scratch files are not part of either image.
+/*.md
+/*.json
+/*.js
+/test_*.py
+.agents/
