@@ -77,8 +77,8 @@ export default function Dashboard({
   syncFailures,
   showToast,
 }: DashboardProps) {
-  const [sortKey, setSortKey] = useState<SortKey>('name');
-  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+  const [sortKey, setSortKey] = useState<SortKey>('idle');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -92,10 +92,10 @@ export default function Dashboard({
     ) : teams;
 
     return [...matched].sort((a, b) => {
-      const expiredComparison =
-        Number(b.subscription_status === 'expired') -
-        Number(a.subscription_status === 'expired');
-      if (expiredComparison !== 0) return expiredComparison;
+      const invalidSessionComparison =
+        Number(b.status === 'token_expired') -
+        Number(a.status === 'token_expired');
+      if (invalidSessionComparison !== 0) return invalidSessionComparison;
 
       let comparison: number;
       let keepMissingLast = false;
