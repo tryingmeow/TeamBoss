@@ -8,8 +8,8 @@ set -o pipefail
 #   ./restore.sh <backup_file_path> [--skip-service-check]
 #
 # 示例：
-#   ./restore.sh /home/auto_team/backend/data/backups/app-20260723T063420Z.db
-#   ./restore.sh /home/auto_team/backend/data/backups/sessions-20260723T063420Z.tar.gz
+#   ./restore.sh <项目目录>/backend/data/backups/app-20260723T063420Z.db
+#   ./restore.sh <项目目录>/backend/data/backups/sessions-20260723T063420Z.tar.gz
 #
 # 重要：恢复前必须停止所有会写入该数据目录的后端进程！
 #       脚本会检查本机 auto-team.service；容器恢复需先停止 Compose
@@ -56,8 +56,8 @@ TeamBoss 数据恢复脚本
   $0 <backup_file_path> [--skip-service-check]
 
 示例：
-  $0 /home/auto_team/backend/data/backups/app-20260723T063420Z.db
-  $0 /home/auto_team/backend/data/backups/sessions-20260723T063420Z.tar.gz
+  $0 "${PROJECT_ROOT}/backend/data/backups/app-20260723T063420Z.db"
+  $0 "${PROJECT_ROOT}/backend/data/backups/sessions-20260723T063420Z.tar.gz"
 
 参数：
   backup_file_path         备份文件路径（.db 或 .tar.gz）
