@@ -19,6 +19,7 @@ import { zhCN } from 'date-fns/locale';
 import { format } from 'date-fns';
 import type { SeatType } from '../../types';
 import Toast from '../../components/Toast';
+import SystemLogs from './SystemLogs';
 import {
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
@@ -1173,7 +1174,7 @@ function MemberList({
 }
 
 export default function UserManagement() {
-  const [activeTab, setActiveTab] = useState<'owner' | 'members'>('owner');
+  const [activeTab, setActiveTab] = useState<'owner' | 'members' | 'logs'>('owner');
   const [search, setSearch] = useState('');
   const [ownerSortOrder, setOwnerSortOrder] = useState<SortOrder>('asc');
   const [memberSortOrder, setMemberSortOrder] = useState<SortOrder>('desc');
@@ -1237,13 +1238,21 @@ export default function UserManagement() {
           >
             加入成员
           </button>
+          <button
+            onClick={() => setActiveTab('logs')}
+            className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              activeTab === 'logs' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:text-slate-300'
+            }`}
+          >
+            日志
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 pb-2">
           <SearchInput
             value={search}
             onChange={setSearch}
-            placeholder="搜索邮箱/姓名/队伍..."
+            placeholder={activeTab === 'logs' ? '搜索人员日志、Team 或邮箱...' : '搜索邮箱/姓名/队伍...'}
           />
 
           {activeTab === 'owner' ? (
@@ -1252,7 +1261,7 @@ export default function UserManagement() {
               order={ownerSortOrder}
               onToggle={() => setOwnerSortOrder((v) => (v === 'asc' ? 'desc' : 'asc'))}
             />
-          ) : (
+          ) : activeTab === 'members' ? (
             <>
               <StatusFilterToggle enabled={statusFilters} onChange={setStatusFilters} />
               <FilterDropdown
@@ -1266,14 +1275,14 @@ export default function UserManagement() {
                 onToggle={() => setMemberSortOrder((v) => (v === 'asc' ? 'desc' : 'asc'))}
               />
             </>
-          )}
+          ) : null}
         </div>
       </div>
 
       <div className="pt-2">
         {activeTab === 'owner' ? (
           <OwnerList search={search} sortOrder={ownerSortOrder} showToast={showToast} />
-        ) : (
+        ) : activeTab === 'members' ? (
           <MemberList
             search={search}
             sortOrder={memberSortOrder}
@@ -1281,6 +1290,8 @@ export default function UserManagement() {
             statusFilters={statusFilters}
             showToast={showToast}
           />
+        ) : (
+          <SystemLogs embedded scope="members" search={search} />
         )}
       </div>
     </div>

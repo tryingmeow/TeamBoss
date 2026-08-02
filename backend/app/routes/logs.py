@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Query
-from typing import Optional
+from typing import Literal, Optional
 
 from ..database import get_db
 
@@ -20,6 +20,31 @@ LOG_SEARCH_COLUMNS = (
     "t.status",
 )
 
+# Keep this classification on the server so the admin UI and Telegram expose
+# the same historical slice. Do not infer it from target_email: team imports
+# also use that column for the owner, while older seat/expiry logs did not.
+MEMBER_LOG_ACTIONS = (
+    "change_seat",
+    "create_tg_member_pairing_code",
+    "patrol_kick",
+    "patrol_revoke_invite",
+    "remove_expiry",
+    "remove_member",
+    "revoke_invite",
+    "set_expiry",
+    "update_user_display_name",
+)
+
+MEMBER_LOG_ACTION_PREFIXES = (
+    "auto_kick",
+    "auto_revoke_invite",
+    "invite_",
+    "member_",
+    "patrol_strict_",
+    "patrol_would_",
+    "self_service_",
+)
+
 
 def add_log_search_condition(conditions: list[str], params: list[str], q: Optional[str]) -> None:
     query = (q or "").strip()
@@ -36,10 +61,27 @@ def add_log_search_condition(conditions: list[str], params: list[str], q: Option
     params.extend([f"%{query.lower()}%"] * len(LOG_SEARCH_COLUMNS))
 
 
+def add_log_scope_condition(
+    conditions: list[str],
+    params: list[str],
+    scope: Optional[str],
+) -> None:
+    if scope != "members":
+        return
+
+    exact_placeholders = ", ".join("?" for _ in MEMBER_LOG_ACTIONS)
+    clauses = [f"l.action IN ({exact_placeholders})"]
+    clauses.extend("l.action LIKE ?" for _ in MEMBER_LOG_ACTION_PREFIXES)
+    conditions.append("(" + " OR ".join(clauses) + ")")
+    params.extend(MEMBER_LOG_ACTIONS)
+    params.extend(f"{prefix}%" for prefix in MEMBER_LOG_ACTION_PREFIXES)
+
+
 @router.get("")
 async def get_logs(
     team_id: Optional[str] = Query(None),
     action: Optional[str] = Query(None),
+    scope: Optional[Literal["members"]] = Query(None),
     q: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200)
@@ -53,6 +95,7 @@ async def get_logs(
     if action:
         conditions.append("l.action = ?")
         params.append(action)
+    add_log_scope_condition(conditions, params, scope)
     add_log_search_condition(conditions, params, q)
 
     where_clause = ""

@@ -3,6 +3,12 @@ import { fetchLogs as fetchLogsApi, type OperationLog } from '../../api/client';
 import { Activity, CheckCircle2, AlertCircle, Info, Clock, Search } from 'lucide-react';
 import { format } from 'date-fns';
 
+interface SystemLogsProps {
+  embedded?: boolean;
+  scope?: 'members';
+  search?: string;
+}
+
 function shortTeamId(teamId: string | null): string {
   if (!teamId) return '';
   return teamId.length > 8 ? teamId.slice(0, 8) : teamId;
@@ -15,18 +21,23 @@ function teamDisplayName(log: OperationLog): string {
   return '全局任务';
 }
 
-export default function SystemLogs() {
+export default function SystemLogs({ embedded = false, scope, search: externalSearch }: SystemLogsProps = {}) {
   const [logs, setLogs] = useState<OperationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState('');
+  const [localSearch, setLocalSearch] = useState('');
   const [totalPages, setTotalPages] = useState(1);
+  const search = externalSearch ?? localSearch;
+
+  useEffect(() => {
+    setPage(1);
+  }, [scope, search]);
 
   useEffect(() => {
     let cancelled = false;
 
     setLoading(true);
-    fetchLogsApi({ page, per_page: 50, q: search })
+    fetchLogsApi({ page, per_page: 50, q: search, scope })
       .then(res => {
         if (cancelled) return;
         setLogs(res.logs);
@@ -42,7 +53,7 @@ export default function SystemLogs() {
     return () => {
       cancelled = true;
     };
-  }, [page, search]);
+  }, [page, scope, search]);
 
   const getStatusIcon = (result: string | null) => {
     switch (result?.toLowerCase()) {
@@ -57,29 +68,28 @@ export default function SystemLogs() {
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500">
-      <div className="flex justify-between items-end">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 mb-1 flex items-center gap-2">
-            <Activity className="w-6 h-6 text-indigo-400" />
-            系统日志
-          </h1>
-          <p className="text-gray-500 dark:text-slate-400 text-sm">查阅近期系统活动与事件记录。</p>
+    <div className={embedded ? 'animate-in fade-in duration-300' : 'p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500'}>
+      {!embedded && (
+        <div className="flex justify-between items-end">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 mb-1 flex items-center gap-2">
+              <Activity className="w-6 h-6 text-indigo-400" />
+              系统日志
+            </h1>
+            <p className="text-gray-500 dark:text-slate-400 text-sm">查阅近期系统活动与事件记录。</p>
+          </div>
+          <div className="relative">
+            <Search className="w-4 h-4 text-gray-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setLocalSearch(e.target.value)}
+              placeholder="搜索日志、Team 或邮箱..."
+              className="pl-9 pr-4 py-2 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-lg text-sm text-gray-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
+            />
+          </div>
         </div>
-        <div className="relative">
-          <Search className="w-4 h-4 text-gray-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
-            placeholder="搜索日志、Team 或邮箱..."
-            className="pl-9 pr-4 py-2 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-lg text-sm text-gray-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
-          />
-        </div>
-      </div>
+      )}
 
       <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">

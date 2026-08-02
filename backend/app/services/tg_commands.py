@@ -38,6 +38,7 @@ ADMIN_COMMANDS = [
     {"command": "watch", "description": "查看超员风险和观察名单"},
     {"command": "billing", "description": "查看财务概览和告警"},
     {"command": "logs", "description": "查看最近操作日志"},
+    {"command": "m_logs", "description": "查看最近人员日志"},
     {"command": "team", "description": "查看车队详情：/team 名字"},
     {"command": "info", "description": "查询成员信息和到期时间"},
     {"command": "members", "description": "成员列表和关键词查询"},

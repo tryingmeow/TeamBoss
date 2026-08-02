@@ -356,6 +356,7 @@ export interface LogsResult {
 export async function fetchLogs(params?: {
   team_id?: string;
   action?: string;
+  scope?: 'members';
   q?: string;
   page?: number;
   per_page?: number;
@@ -363,6 +364,7 @@ export async function fetchLogs(params?: {
   const query = new URLSearchParams();
   if (params?.team_id) query.set('team_id', params.team_id);
   if (params?.action) query.set('action', params.action);
+  if (params?.scope) query.set('scope', params.scope);
   if (params?.q?.trim()) query.set('q', params.q.trim());
   if (params?.page) query.set('page', String(params.page));
   if (params?.per_page) query.set('per_page', String(params.per_page));

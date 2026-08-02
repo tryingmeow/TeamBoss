@@ -44,9 +44,23 @@ class TelegramBotCancelCommandTest(unittest.TestCase):
         public_commands = [item["command"] for item in tg_commands.PUBLIC_COMMANDS]
 
         self.assertIn("q", admin_commands)
+        self.assertIn("m_logs", admin_commands)
         self.assertNotIn("cancel", admin_commands)
         self.assertNotIn("q", member_commands)
         self.assertNotIn("q", public_commands)
+        self.assertNotIn("m_logs", member_commands)
+        self.assertNotIn("m_logs", public_commands)
+
+    def test_member_logs_command_uses_server_member_scope(self):
+        with patch.object(tg_bot, "_api_get", return_value={"logs": []}) as api_get:
+            text = tg_bot.cmd_member_logs({}, "alice")
+
+        api_get.assert_called_once_with(
+            "/api/logs",
+            params={"per_page": 10, "page": 1, "scope": "members", "q": "alice"},
+        )
+        self.assertEqual(text, "没有匹配的日志。")
+        self.assertIn("/m_logs [关键词] · 人员日志", tg_bot._HELP_ADMIN)
 
     def test_slash_q_cancels_current_wizard(self):
         with (

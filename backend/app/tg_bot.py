@@ -541,9 +541,11 @@ def cmd_billing(user: dict, args: str) -> str:
     return "\n\n".join(sections)
 
 
-def cmd_logs(user: dict, args: str) -> str:
+def _logs_reply(args: str, *, scope: Optional[str] = None, title: str) -> str:
     q = (args or "").strip()
     params: dict = {"per_page": 10, "page": 1}
+    if scope:
+        params["scope"] = scope
     if q:
         params["q"] = q
     try:
@@ -575,7 +577,15 @@ def cmd_logs(user: dict, args: str) -> str:
             )
         )
     query_note = f" · 关键词「{q}」" if q else ""
-    return "\n\n".join((f"🧾 最近操作日志 · {len(logs)} 条{query_note}", *cards))
+    return "\n\n".join((f"🧾 {title} · {len(logs)} 条{query_note}", *cards))
+
+
+def cmd_logs(user: dict, args: str) -> str:
+    return _logs_reply(args, title="最近操作日志")
+
+
+def cmd_member_logs(user: dict, args: str) -> str:
+    return _logs_reply(args, scope="members", title="最近人员日志")
 
 
 def cmd_team(user: dict, args: str) -> str:
@@ -724,7 +734,8 @@ _HELP_ADMIN = (
     "👥 成员与车主\n"
     "├ /info <邮箱或关键词> · 成员详情\n"
     "├ /members · 成员列表\n"
-    "└ /owners · 车主列表\n\n"
+    "├ /owners · 车主列表\n"
+    "└ /m_logs [关键词] · 人员日志\n\n"
     "⚙️ 管理操作\n"
     "├ /invite <邮箱> · 邀请成员\n"
     "├ /kick · 移除成员\n"
@@ -1358,6 +1369,7 @@ COMMANDS: dict[str, Callable[[dict, str], str]] = {
     "watch": cmd_watch,
     "billing": cmd_billing,
     "logs": cmd_logs,
+    "m_logs": cmd_member_logs,
     "team": cmd_team,
     "patrol": cmd_patrol,
     "token": cmd_token,

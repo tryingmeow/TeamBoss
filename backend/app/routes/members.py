@@ -270,6 +270,7 @@ async def remove_member(team_id: str, user_id: str):
 @router.patch("/members/{user_id}/seat")
 async def change_seat(team_id: str, user_id: str, req: ChangeSeatRequest):
     client = await get_team_client(team_id)
+    target_email = await _cached_email_for_user(team_id, user_id)
     result = await run_chatgpt_call(client.change_seat_type, user_id, req.seat_type)
 
     error = _chatgpt_error(result)
@@ -277,14 +278,14 @@ async def change_seat(team_id: str, user_id: str, req: ChangeSeatRequest):
         await log_operation(
             team_id,
             "change_seat",
-            None,
+            target_email,
             f"user_id={user_id}, seat_type={req.seat_type}",
             "failed",
             error,
         )
         raise HTTPException(status_code=502, detail=error)
 
-    await log_operation(team_id, "change_seat", None, f"user_id={user_id}, seat_type={req.seat_type}", "success")
+    await log_operation(team_id, "change_seat", target_email, f"user_id={user_id}, seat_type={req.seat_type}", "success")
     await _refresh_members_after_mutation(team_id, "")
 
     return {"status": "ok", "result": result}
@@ -317,7 +318,7 @@ async def set_expiry(team_id: str, user_id: str, req: SetExpiryRequest):
     expires_at, detail = _expiry_from_request(req)
     email = req.email or await _cached_email_for_user(team_id, user_id)
     expires_iso = await upsert_member_expiry(team_id, user_id, email, expires_at)
-    await log_operation(team_id, "set_expiry", None, f"user_id={user_id}, {detail}", "success")
+    await log_operation(team_id, "set_expiry", email, f"user_id={user_id}, {detail}", "success")
     await update_cached_member_expiry(team_id, user_id=user_id, email=email, expires_at=expires_iso)
 
     return {"status": "ok", "expires_at": expires_iso}
@@ -327,6 +328,6 @@ async def set_expiry(team_id: str, user_id: str, req: SetExpiryRequest):
 async def remove_expiry(team_id: str, user_id: str):
     email = await _cached_email_for_user(team_id, user_id)
     await delete_member_expiry(team_id, user_id=user_id, email=email)
-    await log_operation(team_id, "remove_expiry", None, f"user_id={user_id}", "success")
+    await log_operation(team_id, "remove_expiry", email, f"user_id={user_id}", "success")
     await update_cached_member_expiry(team_id, user_id=user_id, email=email, expires_at=None)
     return {"status": "ok"}
