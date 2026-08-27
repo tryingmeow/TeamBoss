@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 from contextlib import asynccontextmanager
@@ -50,11 +51,26 @@ def _resolve_app_version() -> str:
 
 APP_VERSION = _resolve_app_version()
 
+logger = logging.getLogger(__name__)
+
+
+def _log_entrypoints() -> None:
+    """把两个入口地址打到启动日志里。
+
+    后台在 /admin，根路径是给成员用的兑换页——不写出来的话，第一次部署的人会打开根路径
+    看到一个要填邮箱和兑换码的界面，完全找不到登录入口。
+    """
+    port = os.getenv("AUTO_TEAM_PORT", "8080")
+    logger.info("管理后台:   http://<你的服务器地址>:%s/admin", port)
+    logger.info("成员兑换页: http://<你的服务器地址>:%s/", port)
+    logger.info("默认只监听 127.0.0.1，请在宿主机配好 TLS 反代后再对外访问。")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_database()
     await ensure_admin_credentials_initialized()
+    _log_entrypoints()
     start_scheduler()
     start_bot_thread()
     yield

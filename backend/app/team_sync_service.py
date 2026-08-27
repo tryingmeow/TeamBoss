@@ -155,13 +155,15 @@ async def _fetch_overview(
     # value instead of being overwritten with a hardcoded guess.
     updates: dict[str, Any] = {}
     if "error" not in subscription:
-        updates["seats_in_use"] = subscription.get("seats_in_use")
-        updates["seats_entitled"] = subscription.get("seats_entitled")
-        updates["billing_currency"] = subscription.get("billing_currency")
-        updates["active_start"] = subscription.get("active_start")
-        updates["active_until"] = subscription.get("active_until")
-        will_renew_raw = subscription.get("will_renew")
-        updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
+        # 缺字段就不写这一列，避免把原本正确的值覆盖成 NULL（seats_entitled 被清成
+        # NULL 会让 patrol 的 over_by 抬成全部席位，一趟踢光）。
+        for col in ("seats_in_use", "seats_entitled", "billing_currency",
+                    "active_start", "active_until"):
+            if col in subscription:
+                updates[col] = subscription.get(col)
+        if "will_renew" in subscription:
+            will_renew_raw = subscription.get("will_renew")
+            updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
 
         pricing_updates = await fetch_seat_pricing(
             client,

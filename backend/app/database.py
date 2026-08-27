@@ -297,6 +297,29 @@ async def init_database():
             )
         """)
 
+        # Stripe 发票的本地缓存。上游响应里的 customer_email / customer_name /
+        # customer_address 等 PII 在入库前就被丢掉（见 services/invoices.py），
+        # 这张表只允许出现对账需要的字段。金额已换算成主货币单位。
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id TEXT NOT NULL,
+                invoice_id TEXT NOT NULL,
+                number TEXT,
+                status TEXT,
+                currency TEXT,
+                amount_due REAL,
+                amount_paid REAL,
+                period_start TEXT,
+                period_end TEXT,
+                description TEXT,
+                hosted_invoice_url TEXT,
+                created_at TEXT,
+                fetched_at TEXT,
+                UNIQUE(team_id, invoice_id)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS finance_card_notes (
                 card_key TEXT PRIMARY KEY,
@@ -461,7 +484,23 @@ async def init_database():
             # 官方结算页的 ChatGPT 占用分子来自 seat_type_counts.default。
             # 保留 seats_in_use 作为 ChatGPT+Codex 总占用，避免字段语义混用。
             "ALTER TABLE teams ADD COLUMN chatgpt_count INTEGER",
+            # 授权状态，与 status 分开。'rejected' 表示：/api/auth/session 仍然应答，
+            # 但它交回来的 access token 与库里那个一模一样，而业务接口正在 401——
+            # 也就是上游把这个 token 吊销了，会话已经换不出新的。
+            #
+            # 这里刻意不动 status：scheduler / patrol / 成员缓存等十余处都按
+            # `WHERE status = 'active'` 取 Team，一旦把状态改掉，这个 Team 会直接
+            # 掉出定时同步循环，再也不会重试，也就永远无法自愈。
+            "ALTER TABLE teams ADD COLUMN auth_state TEXT",
+            # 进入 rejected 的时间，用于在界面上显示「已持续 N 小时」。
+            "ALTER TABLE teams ADD COLUMN auth_state_since TEXT",
             "ALTER TABLE billing_snapshots ADD COLUMN chatgpt_count INTEGER",
+            # 上一次成功拉取发票的时间，发票同步按团队最多一天一次。
+            "ALTER TABLE teams ADD COLUMN invoices_synced_at TEXT",
+            # 上一次成功拉取纯展示字段（余额/卡号/Team 名/折扣/默认席位/单价）的时间。
+            # 这些是周级慢变量，按团队最多 DISPLAY_SYNC_INTERVAL_HOURS 小时一次。
+            # patrol 的输入（seats_entitled / 席位计数 / 成员名单）不在此列，仍然每轮实时拉。
+            "ALTER TABLE teams ADD COLUMN display_synced_at TEXT",
         ):
             try:
                 await db.execute(statement)

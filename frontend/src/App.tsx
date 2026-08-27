@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import JoinPage from './components/JoinPage';
 import AdminGate from './components/AdminGate';
+import TermsGate from './components/TermsGate';
 import Layout from './components/Layout';
 import TeamManagement from './pages/admin/TeamManagement';
 import UserManagement from './pages/admin/UserManagement';
@@ -17,10 +18,13 @@ export default function App() {
         <Route path="/" element={<JoinPage />} />
         
         {/* Admin Routes */}
+        {/* TermsGate 包在 AdminGate 外面：条款要在输密码之前看到，而不是登进去才弹 */}
         <Route path="/admin" element={
-          <AdminGate>
-            <Layout />
-          </AdminGate>
+          <TermsGate>
+            <AdminGate>
+              <Layout />
+            </AdminGate>
+          </TermsGate>
         }>
           {/* Sub routes inside Layout */}
           <Route index element={<Navigate to="/admin/dashboard" replace />} />

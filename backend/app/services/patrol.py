@@ -463,6 +463,12 @@ def strict_kick_batch_guard_exceeded(candidate_count: int, team_size: int) -> bo
     return candidate_count > strict_kick_batch_limit(team_size)
 
 
+# 非严格模式的绝对保险丝：无论 over_by 算成多少，单轮最多踢这么多人。
+# over_by 一旦因上游数据异常被抬高（历史上 seats_entitled 被写 NULL 就会这样），
+# 这道闸挡住"一趟踢光整队"；超出的下一轮再处理。想更激进/更保守改这一个数即可。
+NON_STRICT_KICK_ABS_CAP = 10
+
+
 def _strict_kick_ready_at(first_seen_at_raw: Any, mode: str, delay_hours: int) -> Optional[datetime]:
     first_seen = _parse_iso_datetime(first_seen_at_raw)
     if first_seen is None:
@@ -871,16 +877,28 @@ def _fetch_all_api_items_sync(method, *fallback_keys: str, limit: int = 100, max
         if isinstance(data, dict) and "error" in data:
             return None, data["error"]
         page_items: list = []
+        found_list = False
         for key in ("items",) + fallback_keys:
             candidate = data.get(key) if isinstance(data, dict) else None
             if isinstance(candidate, list):
                 page_items = candidate
+                found_list = True
                 break
+        if not found_list:
+            # 200 但响应体没有任何可识别的成员/邀请列表（网关 JSON 挑战、契约漂移、
+            # 代理注入）。绝不能当成"这队空了"——那样严格模式会拿空快照去踢人。
+            # fail closed，让调用方跳过整队。
+            return None, "unrecognized member/invite response structure"
         items.extend(page_items)
         total = data.get("total") if isinstance(data, dict) else None
-        if len(page_items) < limit:
-            break
-        if isinstance(total, int) and len(items) >= total:
+        short_page = len(page_items) < limit
+        if isinstance(total, int):
+            if len(items) >= total:
+                break
+            if short_page:
+                # total 已知却提前收到短页 = 响应被截断，未见到的人不能判为缺席。
+                return None, "truncated member/invite response before reported total"
+        elif short_page:
             break
         offset += limit
     return items, None
@@ -1454,6 +1472,16 @@ def run_patrol(dry_run: bool, skip_team_ids: Optional[set[str]] = None) -> dict:
             over_by = status["over_by"]
             candidates = select_kick_candidates(members)
             selected = candidates[:over_by]
+
+            # 绝对保险丝：单轮踢人数封顶，挡住 over_by 因数据异常被抬高导致的"一趟踢光"。
+            # 命中说明这轮的超额判定不正常，记一条日志让人来查，超出的部分留给下一轮。
+            if len(selected) > NON_STRICT_KICK_ABS_CAP:
+                _log_operation_sync(
+                    team_id, "patrol_kick_batch_capped", None,
+                    f"over_by={over_by} candidates={len(candidates)} capped_to={NON_STRICT_KICK_ABS_CAP}",
+                    "capped",
+                )
+                selected = selected[:NON_STRICT_KICK_ABS_CAP]
 
             insufficient_note = None
             if len(candidates) < over_by:

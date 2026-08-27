@@ -1,0 +1,15 @@
+# 仓库内文本文件统一以 LF 存储，检出时由各平台自行处理。
+# 没有这条规则时，Windows 贡献者的 clone 会把整份文件重写成 CRLF，
+# 制造出与内容无关的巨大 diff。
+* text=auto eol=lf
+
+# Windows 启动脚本必须是 CRLF，否则 cmd.exe / PowerShell 可能解析异常。
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件不做任何换行转换。
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

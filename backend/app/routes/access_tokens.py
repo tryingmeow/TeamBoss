@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from ..client_ip import RateLimiter as _RateLimiter, get_client_ip
-from ..chatgpt_client import ChatGPTClient
+from ..chatgpt_client import ChatGPTClient, mask_secrets
 from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db, log_operation
 from ..member_cache_service import add_member_watch, fetch_and_cache_members, get_cached_members
@@ -140,14 +140,26 @@ class RedemptionHistoryItem(BaseModel):
     created_at: str
 
 
+class MembershipTeamEntry(BaseModel):
+    status: Literal["joined", "pending"]
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
+    expires_at: Optional[str] = None
+    is_owner: bool = False
+    cache_updated_at: Optional[str] = None
+
+
 class QueryMembershipResponse(BaseModel):
     status: Literal["joined", "pending", "absent"]
     email: str
+    # 顶层 team_id/team_name/expires_at 保留为第一个命中的 Team（向后兼容）；
+    # 一人多 Team 时的完整列表在 memberships 里。
     team_id: Optional[str] = None
     team_name: Optional[str] = None
     expires_at: Optional[str] = None
     is_owner: bool = False
     message: str
+    memberships: list[MembershipTeamEntry] = Field(default_factory=list)
     redemption_history: list[RedemptionHistoryItem] = Field(default_factory=list)
     cache_updated_at: Optional[str] = None  # 缓存更新时间，None 表示数据不来自缓存
 
@@ -238,7 +250,15 @@ async def _get_redemption_history(email: str, limit: int = 20) -> list[dict[str,
             (email.lower(), limit),
         )
         rows = await cursor.fetchall()
-    return [dict(row) for row in rows]
+    # 这份历史会经匿名自助查询返回，error_message 里可能留有上游原始报错，先抹掉
+    # 其中的 token / cookie 值。
+    history: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        if item.get("error_message"):
+            item["error_message"] = mask_secrets(str(item["error_message"]))
+        history.append(item)
+    return history
 
 
 async def _get_token_by_raw(raw_token: str) -> Optional[dict[str, Any]]:
@@ -410,15 +430,17 @@ async def _load_token(raw_token: str) -> dict[str, Any]:
     return token_row
 
 
-async def _find_existing_membership(
+async def _find_all_memberships(
     email: str, teams: list[dict[str, Any]], use_cache_only: bool = False
-) -> Optional[dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
-    查找邮箱在哪个 Team 中的成员身份（已加入或待接受邀请）。
+    查找邮箱在全部 Team 中的成员身份（已加入或待接受邀请），每个 Team 至多一条，
+    同一 Team 内已加入优先于待接受。
 
     当 use_cache_only=True 时，仅读本地缓存，不触发实时 OpenAI 请求（用于公开查询路径）。
     当 use_cache_only=False 时，实时拉取成员列表（用于兑换/邀请等写操作）。
     """
+    hits: list[dict[str, Any]] = []
     for team in teams:
         if use_cache_only:
             # 只读缓存，不触发实时请求
@@ -449,9 +471,10 @@ async def _find_existing_membership(
                     detail="暂时无法确认全部 Team 的成员状态，请稍后重试",
                 ) from exc
 
+        team_hit = None
         for member in snapshot.get("members", []):
             if (member.get("email") or "").lower() == email:
-                return {
+                team_hit = {
                     "kind": "member",
                     "team": team,
                     "user_id": member.get("id") or "",
@@ -459,18 +482,32 @@ async def _find_existing_membership(
                     "expires_at": member.get("expires_at"),
                     "cache_updated_at": snapshot.get("updated_at"),
                 }
+                break
 
-        for invite in snapshot.get("pending_invites", []):
-            if (invite.get("email") or "").lower() == email:
-                return {
-                    "kind": "invite",
-                    "team": team,
-                    "user_id": "",
-                    "is_owner": False,
-                    "expires_at": invite.get("expires_at"),
-                    "cache_updated_at": snapshot.get("updated_at"),
-                }
-    return None
+        if team_hit is None:
+            for invite in snapshot.get("pending_invites", []):
+                if (invite.get("email") or "").lower() == email:
+                    team_hit = {
+                        "kind": "invite",
+                        "team": team,
+                        "user_id": "",
+                        "is_owner": False,
+                        "expires_at": invite.get("expires_at"),
+                        "cache_updated_at": snapshot.get("updated_at"),
+                    }
+                    break
+
+        if team_hit is not None:
+            hits.append(team_hit)
+    return hits
+
+
+async def _find_existing_membership(
+    email: str, teams: list[dict[str, Any]], use_cache_only: bool = False
+) -> Optional[dict[str, Any]]:
+    """单命中版包装：取第一个 Team 的身份。多 Team 场景要用 _find_all_memberships。"""
+    hits = await _find_all_memberships(email, teams, use_cache_only=use_cache_only)
+    return hits[0] if hits else None
 
 
 def _token_status(token_row: dict[str, Any]) -> str:
@@ -588,7 +625,8 @@ async def _query_token(raw_token: str) -> dict[str, Any]:
             "error_message": (
                 "结果确认中，兑换码已暂时锁定，请稍后查询"
                 if latest_use.get("result") in {"pending", "uncertain"}
-                else latest_use.get("error_message")
+                # 匿名可读，抹掉上游报错里可能夹带的 token / cookie。
+                else mask_secrets(str(latest_use.get("error_message") or "")) or None
             ),
             "expires_at": latest_use.get("expires_at") or email_status.get("expires_at"),
             "kicked_at": email_status.get("kicked_at"),
@@ -857,10 +895,21 @@ async def _invite_to_available_team(
                 "expires_at": expires_iso,
             }
 
-    detail = "没有可用 ChatGPT 席位"
+    # 这是匿名接口。上游 OpenAI 的原始报错可能夹带请求头（access token / session
+    # cookie）、内部路径或库名，一律不回给调用方；详情只写进操作日志供管理员排查。
     if last_error:
-        detail = f"{detail}: {last_error}"
-    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+        await log_operation(
+            None,
+            "self_service_redeem",
+            None,
+            "reason=no_available_seat",
+            "failed",
+            mask_secrets(str(last_error)),
+        )
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="没有可用 ChatGPT 席位，请联系管理员",
+    )
 
 
 async def reconcile_pending_redemptions() -> dict[str, int]:
@@ -1127,7 +1176,21 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             )
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="没有可用 Team")
 
-        existing = await _find_existing_membership(email, teams)
+        memberships = await _find_all_memberships(email, teams)
+        if len(memberships) > 1:
+            # 一个邮箱同时在多个 Team：续期该落到哪个 Team 无法替用户猜——
+            # 这是花钱的操作，猜错等于把时长记到别的队上。拒绝并退回兑换码，
+            # 让管理员在后台按正确的 Team 手动处理。
+            failure_recorded = await _fail_and_release_token_use(
+                token_use_id,
+                action="renew_multi_team_rejected",
+                error_message="multi_team_membership",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="该邮箱同时在多个 Team 中，无法自助续期。兑换码未使用，请联系管理员处理。",
+            )
+        existing = memberships[0] if memberships else None
         if existing:
             if existing["is_owner"]:
                 failure_recorded = await _fail_and_release_token_use(
@@ -1291,48 +1354,48 @@ async def _query_membership_status(email: str):
     """Membership lookup core; callers apply their public endpoint limiter once."""
     history = await _get_redemption_history(email)
     teams = await load_active_teams()
-    if not teams:
+    hits = (
+        await _find_all_memberships(email, teams, use_cache_only=True) if teams else []
+    )
+    if not hits:
         return {
             "status": "absent",
             "email": email,
             "message": "未找到记录",
+            "memberships": [],
             "redemption_history": history,
             "cache_updated_at": None,
         }
 
-    existing = await _find_existing_membership(email, teams, use_cache_only=True)
-    if not existing:
-        return {
-            "status": "absent",
-            "email": email,
-            "message": "未找到记录",
-            "redemption_history": history,
-            "cache_updated_at": None,
+    memberships = [
+        {
+            "status": "pending" if hit["kind"] == "invite" else "joined",
+            "team_id": hit["team"]["id"],
+            "team_name": hit["team"]["name"],
+            "expires_at": hit.get("expires_at"),
+            "is_owner": bool(hit.get("is_owner")),
+            "cache_updated_at": hit.get("cache_updated_at"),
         }
+        for hit in hits
+    ]
 
-    if existing["kind"] == "invite":
-        return {
-            "status": "pending",
-            "email": email,
-            "team_id": existing["team"]["id"],
-            "team_name": existing["team"]["name"],
-            "expires_at": existing.get("expires_at"),
-            "is_owner": False,
-            "message": "待接受邀请",
-            "redemption_history": history,
-            "cache_updated_at": existing.get("cache_updated_at"),
-        }
-
+    # 顶层字段沿用第一个命中的 Team，老调用方不受影响；完整列表在 memberships。
+    first = memberships[0]
+    if len(memberships) > 1:
+        message = f"在 {len(memberships)} 个 Team 中"
+    else:
+        message = "待接受邀请" if first["status"] == "pending" else "已加入"
     return {
-        "status": "joined",
+        "status": first["status"],
         "email": email,
-        "team_id": existing["team"]["id"],
-        "team_name": existing["team"]["name"],
-        "expires_at": existing.get("expires_at"),
-        "is_owner": bool(existing.get("is_owner")),
-        "message": "已加入",
+        "team_id": first["team_id"],
+        "team_name": first["team_name"],
+        "expires_at": first["expires_at"],
+        "is_owner": first["is_owner"],
+        "message": message,
+        "memberships": memberships,
         "redemption_history": history,
-        "cache_updated_at": existing.get("cache_updated_at"),
+        "cache_updated_at": first["cache_updated_at"],
     }
 
 

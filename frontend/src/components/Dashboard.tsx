@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, AlertCircle } from 'lucide-react';
+import { useMemo } from 'react';
+import { AlertCircle } from 'lucide-react';
 import type { Team, ShowToast } from '../types';
 import TeamCard from './TeamCard';
+import type { SortDirection, SortKey } from './DashboardSortControl';
 import { activeChatGptSeats } from '../lib/seatCapacity';
 
 interface DashboardProps {
@@ -15,16 +16,9 @@ interface DashboardProps {
   onTeamSyncSucceeded: (team: Team) => void;
   syncFailures: Record<string, string>;
   showToast: ShowToast;
+  sortKey: SortKey;
+  sortDirection: SortDirection;
 }
-
-type SortKey = 'name' | 'renewal' | 'idle';
-type SortDirection = 'asc' | 'desc';
-
-const SORT_LABELS: Record<SortKey, string> = {
-  name: '名称',
-  renewal: '距续费时间',
-  idle: 'GPT 空闲率',
-};
 
 function renewalTimestamp(team: Team): number | null {
   if (!team.active_until) return null;
@@ -76,10 +70,9 @@ export default function Dashboard({
   onTeamSyncSucceeded,
   syncFailures,
   showToast,
+  sortKey,
+  sortDirection,
 }: DashboardProps) {
-  const [sortKey, setSortKey] = useState<SortKey>('idle');
-  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const matched = q ? teams.filter(
@@ -92,9 +85,10 @@ export default function Dashboard({
     ) : teams;
 
     return [...matched].sort((a, b) => {
-      const invalidSessionComparison =
-        Number(b.status === 'token_expired') -
-        Number(a.status === 'token_expired');
+      // 用不了的 Team 永远排最前面：会话失效，以及会话还在但 token 已被上游吊销。
+      const unusable = (t: Team) =>
+        Number(t.status === 'token_expired' || t.auth_state === 'rejected');
+      const invalidSessionComparison = unusable(b) - unusable(a);
       if (invalidSessionComparison !== 0) return invalidSessionComparison;
 
       let comparison: number;
@@ -120,14 +114,6 @@ export default function Dashboard({
       return sortDirection === 'asc' ? comparison : -comparison;
     });
   }, [teams, search, sortKey, sortDirection]);
-
-  const directionLabel = sortKey === 'name'
-    ? (sortDirection === 'asc' ? 'A → Z' : 'Z → A')
-    : sortKey === 'renewal'
-      ? (sortDirection === 'asc' ? '近 → 远' : '远 → 近')
-      : sortDirection === 'asc'
-        ? '低 → 高'
-        : '高 → 低';
 
   if (loading && teams.length === 0) {
     return (
@@ -166,44 +152,19 @@ export default function Dashboard({
   }
 
   return (
-    <div>
-      <div className="flex flex-wrap items-center justify-end gap-2 px-6 pb-2">
-        <span className="text-xs font-medium text-gray-500 dark:text-gray-400">排序</span>
-        <select
-          value={sortKey}
-          onChange={(event) => setSortKey(event.target.value as SortKey)}
-          aria-label="Team 排序字段"
-          className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/20 dark:border-[#2a2d3a] dark:bg-[#1a1d27] dark:text-gray-200"
-        >
-          {Object.entries(SORT_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>{label}</option>
-          ))}
-        </select>
-        <button
-          type="button"
-          onClick={() => setSortDirection((current) => current === 'asc' ? 'desc' : 'asc')}
-          aria-label={`切换排序方向，当前 ${directionLabel}`}
-          title={`当前：${directionLabel}`}
-          className="inline-flex min-w-[4.75rem] items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition hover:border-blue-300 hover:text-blue-600 dark:border-[#2a2d3a] dark:bg-[#1a1d27] dark:text-gray-300 dark:hover:border-blue-500/50 dark:hover:text-blue-400"
-        >
-          {sortDirection === 'asc' ? <ArrowUp size={13} /> : <ArrowDown size={13} />}
-          {directionLabel}
-        </button>
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 p-6">
-        {filtered.map((team) => (
-          <TeamCard
-            key={team.id}
-            team={team}
-            onDelete={onDelete}
-            onReimport={onReimport}
-            onTeamSynced={onTeamSynced}
-            onSyncSucceeded={onTeamSyncSucceeded}
-            syncError={syncFailures[team.id]}
-            showToast={showToast}
-          />
-        ))}
-      </div>
+    <div className="grid grid-cols-1 gap-4 px-6 pb-6 lg:grid-cols-2 xl:grid-cols-3">
+      {filtered.map((team) => (
+        <TeamCard
+          key={team.id}
+          team={team}
+          onDelete={onDelete}
+          onReimport={onReimport}
+          onTeamSynced={onTeamSynced}
+          onSyncSucceeded={onTeamSyncSucceeded}
+          syncError={syncFailures[team.id]}
+          showToast={showToast}
+        />
+      ))}
     </div>
   );
 }

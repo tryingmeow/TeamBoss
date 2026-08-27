@@ -11,7 +11,7 @@ from ..member_cache_service import fetch_and_cache_members, get_cached_members
 from ..services.member_expiry import build_expiry_view, get_kick_policy
 from ..services.team_clients import get_team_client
 from ..services.user_display_names import load_display_name_map, set_display_name
-from ..services.subscription_status import subscription_status
+from ..services.subscription_status import subscription_status_display
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -66,8 +66,8 @@ def _billing_cycle(team: dict) -> dict:
         "active_until": team.get("active_until"),
         "days_remaining": _days_remaining(team.get("active_until")),
         "will_renew": will_renew,
-        "subscription_status": subscription_status(
-            team.get("active_until"), will_renew
+        "subscription_status": subscription_status_display(
+            team.get("active_until"), will_renew, team.get("last_full_sync_at")
         ),
     }
 

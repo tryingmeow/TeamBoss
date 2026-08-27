@@ -13,6 +13,7 @@
 """
 
 import json
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -22,6 +23,8 @@ from .database import get_db
 from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call
 from .services.seat_capacity import update_member_seat_usage_cache
+
+logger = logging.getLogger(__name__)
 
 
 # ── 缓存读写 ────────────────────────────────────────────────────────────────
@@ -226,11 +229,16 @@ def _raise_fetch_error(kind: str, data: dict) -> None:
         )
 
 
+# 上游返回满页且不给 total 时，翻页循环没有自然终点。给一个硬上限兜底，避免单次
+# 同步一直占着刷新信号量、items 无限增长。10000 条远超任何真实 Team 的规模。
+MAX_FETCH_PAGES = 100
+
+
 async def _fetch_all_pages(method, kind: str, *item_keys: str, limit: int = 100) -> list:
     items: list = []
     offset = 0
 
-    while True:
+    for _ in range(MAX_FETCH_PAGES):
         data = await run_chatgpt_call(method, offset, limit)
         _raise_fetch_error(kind, data)
 
@@ -244,6 +252,13 @@ async def _fetch_all_pages(method, kind: str, *item_keys: str, limit: int = 100)
             break
 
         offset += limit
+    else:
+        logger.warning(
+            "%s 分页在 %d 页后仍未结束，已停止翻页（已取 %d 条）",
+            kind,
+            MAX_FETCH_PAGES,
+            len(items),
+        )
 
     return items
 

@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, Fragment, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -47,7 +47,10 @@ function historyActionLabel(action: string): string {
     renewed_member: '续期成员',
     renewed_invite: '续期待接受',
     redeem_failed: '兑换失败',
+    redeem_aborted: '兑换中断',
     renew_owner_rejected: 'Owner 拒绝',
+    renew_permanent_rejected: '永久有效拒绝',
+    renew_multi_team_rejected: '多 Team 拒绝',
     none: '无可用 Team',
   };
   return labels[action] ?? action;
@@ -302,16 +305,33 @@ export default function JoinPage() {
                   <div className="grid grid-cols-[68px_1fr] gap-y-1 text-xs">
                     <span className={status.mutedClassName}>邮箱</span>
                     <span className="font-medium">{statusResult.membership.email}</span>
-                    {statusResult.membership.team_name && (
+                    {(statusResult.membership.memberships?.length ?? 0) > 1 ? (
+                      statusResult.membership.memberships.map(entry => (
+                        <Fragment key={entry.team_id ?? entry.team_name ?? ''}>
+                          <span className={status.mutedClassName}>Team</span>
+                          <span className="font-medium">
+                            {entry.team_name}
+                            <span className="ml-1.5 font-normal opacity-75">
+                              {entry.status === 'pending' ? '待接受 · ' : ''}
+                              到期 {formatExpiresAt(entry.expires_at)}
+                            </span>
+                          </span>
+                        </Fragment>
+                      ))
+                    ) : (
                       <>
-                        <span className={status.mutedClassName}>Team</span>
-                        <span className="font-medium">{statusResult.membership.team_name}</span>
-                      </>
-                    )}
-                    {statusResult.membership.status !== 'absent' && (
-                      <>
-                        <span className={status.mutedClassName}>到期</span>
-                        <span className="font-medium">{formatExpiresAt(statusResult.membership.expires_at)}</span>
+                        {statusResult.membership.team_name && (
+                          <>
+                            <span className={status.mutedClassName}>Team</span>
+                            <span className="font-medium">{statusResult.membership.team_name}</span>
+                          </>
+                        )}
+                        {statusResult.membership.status !== 'absent' && (
+                          <>
+                            <span className={status.mutedClassName}>到期</span>
+                            <span className="font-medium">{formatExpiresAt(statusResult.membership.expires_at)}</span>
+                          </>
+                        )}
                       </>
                     )}
                   </div>

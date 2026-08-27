@@ -20,6 +20,7 @@ import { useSettings } from '../hooks/useSettings';
 import { exportAllSessions, importSessions, inviteGptMembers, type InviteGptMembersResult } from '../api/client';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import Dashboard from './Dashboard';
+import DashboardSortControl, { type SortDirection, type SortKey } from './DashboardSortControl';
 import AddTeamDialog from './AddTeamDialog';
 import AddMemberDialog from './AddMemberDialog';
 import SettingsDialog from './SettingsDialog';
@@ -59,6 +60,8 @@ export default function Layout() {
   const [addGptMembersOpen, setAddGptMembersOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [dashboardSortKey, setDashboardSortKey] = useState<SortKey>('idle');
+  const [dashboardSortDirection, setDashboardSortDirection] = useState<SortDirection>('desc');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -193,6 +196,8 @@ export default function Layout() {
     }
     showToast(added > 0 ? `已添加 ${added} 个 GPT 成员` : '已提交 GPT 成员邀请');
   };
+
+  const isDashboard = location.pathname.replace(/\/+$/, '') === '/admin/dashboard';
 
   return (
     <Tooltip.Provider delayDuration={200}>
@@ -380,7 +385,8 @@ export default function Layout() {
         </header>
 
         <main className="flex-1 p-6">
-          <div ref={navRef} className="-mx-6 mb-6 flex gap-4 overflow-x-auto border-b border-gray-200 px-6 dark:border-[#2a2d3a] sm:mx-0 sm:px-4">
+          <div className="-mx-6 mb-6 flex items-end border-b border-gray-200 dark:border-[#2a2d3a] sm:mx-0">
+            <div ref={navRef} className="flex min-w-0 flex-1 gap-4 overflow-x-auto px-6 sm:px-4">
             <NavLink
               to="/admin/dashboard"
               className={({ isActive }) =>
@@ -451,9 +457,21 @@ export default function Layout() {
             >
               TG 机器人 & 巡逻
             </NavLink>
+            </div>
+
+            {isDashboard && (
+              <div className="shrink-0 pb-2 pl-2 pr-4">
+                <DashboardSortControl
+                  sortKey={dashboardSortKey}
+                  sortDirection={dashboardSortDirection}
+                  onSortKeyChange={setDashboardSortKey}
+                  onSortDirectionChange={setDashboardSortDirection}
+                />
+              </div>
+            )}
           </div>
 
-          {location.pathname.replace(/\/+$/, '') === '/admin/dashboard' ? (
+          {isDashboard ? (
             <Dashboard
               teams={teams}
               loading={loading}
@@ -465,6 +483,8 @@ export default function Layout() {
               onTeamSyncSucceeded={handleTeamSyncSucceeded}
               syncFailures={syncFailures}
               showToast={showToast}
+              sortKey={dashboardSortKey}
+              sortDirection={dashboardSortDirection}
             />
           ) : (
             <Outlet />

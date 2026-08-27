@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call_sync
 from .database import get_db_path
+from .services.invoices import refresh_invoices_if_stale_sync
 from .services.pricing import account_billing_updates, fetch_seat_pricing_sync
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
@@ -30,6 +31,29 @@ from .services.team_locks import member_operation_claim_sync
 
 scheduler = BackgroundScheduler()
 APP_LOCAL_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+# 纯展示字段的刷新间隔。余额、卡号、Team 名、折扣、默认席位类型、单席位价格都是
+# 周级慢变量，却占了每轮同步 9 个请求里的 5 个。按团队限流到这个间隔，把 chatgpt.com
+# 的请求量压掉一半以上。
+#
+# 明确不在限流范围内、仍然每轮实时拉取的：get_subscription（seats_entitled 是 patrol
+# 算 over_by 的分母）、get_seat_type_counts（codex/chatgpt 席位计数）、成员列表与待邀请
+# 列表（识别 source == 'detected' 的外部拉人）。这三样是超员判定与乱拉人检测的输入，
+# 拿旧值会直接削弱这个功能本身。
+DISPLAY_SYNC_INTERVAL_HOURS = 6
+
+
+def _display_sync_due(display_synced_at: str | None, now: datetime) -> bool:
+    """展示字段是否到期需要刷新。解析不了的时间戳一律当作到期，宁可多拉一次。"""
+    if not display_synced_at:
+        return True
+    try:
+        last = datetime.fromisoformat(display_synced_at)
+    except ValueError:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (now - last) >= timedelta(hours=DISPLAY_SYNC_INTERVAL_HOURS)
 
 
 def _merge_team_cached_data(
@@ -86,6 +110,21 @@ def _api_items(data, *fallback_keys):
     return []
 
 
+def _response_has_item_list(data, *fallback_keys):
+    """响应体里是否带一个可识别的列表键。
+
+    用来把"真的空队"（items=[]，键在、值是空列表）和"结构不认识的 200"（既无
+    items 也无 fallback 键，如网关 JSON 挑战 / 契约漂移 / 代理注入）区分开。
+    后者绝不能当成空队，否则反向检测会把整队付费成员标成缺席。
+    """
+    if not isinstance(data, dict):
+        return False
+    for key in ("items",) + fallback_keys:
+        if isinstance(data.get(key), list):
+            return True
+    return False
+
+
 def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000):
     items = []
     offset = 0
@@ -93,12 +132,20 @@ def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000
         data = run_chatgpt_call_sync(method, offset=offset, limit=limit)
         if "error" in data:
             return None, data["error"]
+        if not _response_has_item_list(data, *fallback_keys):
+            # 200 但结构不认识：fail closed，绝不当空队交给反向检测。
+            return None, "unrecognized member/invite response structure"
         page_items = _api_items(data, *fallback_keys)
         items.extend(page_items)
         total = data.get("total")
-        if len(page_items) < limit:
-            break
-        if isinstance(total, int) and len(items) >= total:
+        short_page = len(page_items) < limit
+        if isinstance(total, int):
+            if len(items) >= total:
+                break
+            if short_page:
+                # total 已知却提前收到短页 = 响应被截断，未见到的人不能判为缺席。
+                return None, "truncated member/invite response before reported total"
+        elif short_page:
             break
         offset += limit
     return items, None
@@ -604,7 +651,7 @@ def data_sync_job():
     try:
         conn = _get_sync_db()
         cursor = conn.execute(
-            "SELECT id, name, access_token, device_id, proxy_id, country_code "
+            "SELECT id, name, access_token, device_id, proxy_id, country_code, display_synced_at "
             "FROM teams WHERE status = 'active'"
         )
         teams = cursor.fetchall()
@@ -618,48 +665,65 @@ def data_sync_job():
 
             try:
                 client = ChatGPTClient(access_token, team_id, device_id, proxy_url=proxy_url)
-                subscription = run_chatgpt_call_sync(client.get_subscription)
-                balance_info = run_chatgpt_call_sync(client.get_remaining_balance)
-                seat_counts = run_chatgpt_call_sync(client.get_seat_type_counts)
-                payment_methods = run_chatgpt_call_sync(client.get_payment_methods)
-                account_info = run_chatgpt_call_sync(client.get_account_info)
-                workspace_settings = run_chatgpt_call_sync(client.get_workspace_settings)
+                now_dt = datetime.now(timezone.utc)
+                refresh_display = _display_sync_due(team["display_synced_at"], now_dt)
 
-                now = datetime.now(timezone.utc).isoformat()
+                # patrol 的输入，每轮必拉。
+                subscription = run_chatgpt_call_sync(client.get_subscription)
+                seat_counts = run_chatgpt_call_sync(client.get_seat_type_counts)
+
+                # 纯展示字段，限流。跳过时保持 None：下面每一处写库都以
+                # "is not None" 为前提，所以跳过的这一轮不会碰到对应的列，
+                # 既不会写旧值也不会写 NULL。
+                balance_info = None
+                payment_methods = None
+                account_info = None
+                workspace_settings = None
+                if refresh_display:
+                    balance_info = run_chatgpt_call_sync(client.get_remaining_balance)
+                    payment_methods = run_chatgpt_call_sync(client.get_payment_methods)
+                    account_info = run_chatgpt_call_sync(client.get_account_info)
+                    workspace_settings = run_chatgpt_call_sync(client.get_workspace_settings)
+
+                now = now_dt.isoformat()
 
                 # Track overview sub-interface failures for later notification
+                # 被限流跳过的接口不算失败，否则每轮都会误报 partial 并压着
+                # last_full_sync_at 不更新。
                 overview_failures = []
+                display_failures = []
                 if "error" in subscription:
                     overview_failures.append("subscription")
-                if "error" in balance_info:
+                if balance_info is not None and "error" in balance_info:
                     overview_failures.append("balance")
+                    display_failures.append("balance")
                 if "error" in seat_counts:
                     overview_failures.append("seat_counts")
-                if "error" in payment_methods:
+                if payment_methods is not None and "error" in payment_methods:
                     overview_failures.append("payment_methods")
-                if "error" in account_info:
+                    display_failures.append("payment_methods")
+                if account_info is not None and "error" in account_info:
                     overview_failures.append("account_info")
+                    display_failures.append("account_info")
 
                 updates = []
                 params = []
 
                 if "error" not in subscription:
-                    updates.extend([
-                        "seats_in_use = ?", "seats_entitled = ?",
-                        "billing_currency = ?", "active_start = ?",
-                        "active_until = ?", "will_renew = ?"
-                    ])
-                    will_renew_raw = subscription.get("will_renew")
-                    params.extend([
-                        subscription.get("seats_in_use"),
-                        subscription.get("seats_entitled"),
-                        subscription.get("billing_currency"),
-                        subscription.get("active_start"),
-                        subscription.get("active_until"),
-                        None if will_renew_raw is None else (1 if will_renew_raw else 0)
-                    ])
+                    # 缺字段就不写这一列，避免把原本正确的值覆盖成 NULL。seats_entitled
+                    # 尤其关键：被清成 NULL 会让 patrol 把 over_by 抬成全部席位，非严格
+                    # 模式没有批量刹车，一趟踢光。见 seat_capacity 的同款守卫。
+                    for col in ("seats_in_use", "seats_entitled", "billing_currency",
+                                "active_start", "active_until"):
+                        if col in subscription:
+                            updates.append(f"{col} = ?")
+                            params.append(subscription.get(col))
+                    if "will_renew" in subscription:
+                        will_renew_raw = subscription.get("will_renew")
+                        updates.append("will_renew = ?")
+                        params.append(None if will_renew_raw is None else (1 if will_renew_raw else 0))
 
-                if "error" not in balance_info:
+                if balance_info is not None and "error" not in balance_info:
                     balance_value = balance_info.get("balance")
                     updates.append("balance = ?")
                     params.append(str(balance_value) if balance_value is not None else None)
@@ -678,18 +742,19 @@ def data_sync_job():
                         updates.append("chatgpt_count = ?")
                         params.append(official_chatgpt)
 
-                if "error" not in payment_methods:
+                if payment_methods is not None and "error" not in payment_methods:
                     methods = payment_methods.get("payment_methods", [])
                     if methods:
                         card = methods[0].get("card", {})
                         updates.extend(["card_last4 = ?", "card_brand = ?", "payment_method_id = ?"])
                         params.extend([card.get("last4"), card.get("brand"), methods[0].get("id")])
 
-                for key, value in account_billing_updates(account_info, team_id).items():
-                    updates.append(f"{key} = ?")
-                    params.append(value)
+                if account_info is not None:
+                    for key, value in account_billing_updates(account_info, team_id).items():
+                        updates.append(f"{key} = ?")
+                        params.append(value)
 
-                if "error" not in subscription:
+                if refresh_display and "error" not in subscription:
                     pricing_updates = fetch_seat_pricing_sync(
                         client,
                         subscription,
@@ -712,20 +777,29 @@ def data_sync_job():
                 current_cache_row = conn.execute(
                     "SELECT cached_data FROM teams WHERE id = ?", (team_id,)
                 ).fetchone()
+                # 跳过的接口不进 merge，_merge_team_cached_data 保留上一轮的值。
+                fresh_payload = {"subscription": subscription, "seat_counts": seat_counts}
+                if balance_info is not None:
+                    fresh_payload["balance"] = balance_info
+                if payment_methods is not None:
+                    fresh_payload["payment_methods"] = payment_methods
+                if account_info is not None:
+                    fresh_payload["account_info"] = account_info
                 cached = _merge_team_cached_data(
                     current_cache_row["cached_data"] if current_cache_row else None,
-                    {
-                        "subscription": subscription,
-                        "balance": balance_info,
-                        "seat_counts": seat_counts,
-                        "payment_methods": payment_methods,
-                        "account_info": account_info,
-                    },
+                    fresh_payload,
                     workspace_settings,
                     now,
                 )
                 updates.extend(["cached_data = ?", "updated_at = ?"])
                 params.extend([cached, now])
+
+                # 只有真拉了展示接口、且它们都没报错，才推进限流时间戳；
+                # 拉失败就让下一轮继续重试，不要白等 6 小时。只看展示接口
+                # 自己的失败：subscription/seat_counts 抖一下不该把限流打回去。
+                if refresh_display and not display_failures:
+                    updates.append("display_synced_at = ?")
+                    params.append(now)
 
                 # Track sync result: only update last_full_sync_at if ALL overview interfaces succeeded
                 if not overview_failures:
@@ -811,6 +885,14 @@ def data_sync_job():
                              team_row["will_renew"], now)
                         )
                         conn.commit()
+                except Exception:
+                    pass
+
+                # ── 发票缓存：每团队最多一天拉一次，PII 在入库前就被丢掉 ──
+                try:
+                    refresh_invoices_if_stale_sync(
+                        conn, client, team_id, now, run_chatgpt_call_sync
+                    )
                 except Exception:
                     pass
 

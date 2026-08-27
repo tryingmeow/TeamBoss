@@ -37,11 +37,18 @@ class TeamResponse(BaseModel):
     active_start: Optional[str] = None
     active_until: Optional[str] = None
     will_renew: bool
-    subscription_status: Literal['renewing', 'nonrenewing', 'expired'] = 'renewing'
+    subscription_status: Literal['renewing', 'nonrenewing', 'expired', 'stale'] = 'renewing'
     card_last4: Optional[str] = None
     card_brand: Optional[str] = None
     days_remaining: Optional[int] = None
     proxy_id: Optional[int] = None
+    # 同步健康度。scheduler 一直在写这两个字段，但过去没有出接口，前端因此看不出
+    # 一个 Team 已经连续多久同步不上了。
+    last_full_sync_at: Optional[str] = None
+    last_sync_partial_failures: List[str] = []
+    # 'ok' | 'rejected'。rejected = 会话仍应答但交回的 token 已被上游吊销。
+    auth_state: Literal['ok', 'rejected'] = 'ok'
+    auth_state_since: Optional[str] = None
     cached_member_emails: List[str] = []
 
 

@@ -1,8 +1,9 @@
 # TeamBoss
 
-TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。用你自己的管理员账号登录后，它把多个团队的席位、成员、到期和账单集中到一个后台，并支持定时自动化与 Telegram 通知。
+TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。用你自己的管理员账号登录后，它把多个团队的席位、成员、到期和账单集中到一个后台，并支持定时自动化与 Telegram 通知。后台会定时巡检各团队，发现计划外加入的成员时按你设定的规则移除。
 
-## 免责声明
+<details>
+<summary><strong>免责声明</strong>（使用前请展开阅读）</summary>
 
 1. 本项目仅供学习与技术研究，请勿用于任何非法用途。
 2. 本项目与 OpenAI 无任何关联，并非其官方产品，相关商标归各自所有者所有。
@@ -12,6 +13,8 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
 6. 因使用本项目而产生的任何直接或间接后果，包括但不限于账号异常、财务损失、数据丢失，均由使用者自行承担，作者不承担任何责任。
 7. 使用本项目即视为已阅读并同意本声明全部内容；若不同意，请停止使用并删除相关文件。
 
+</details>
+
 ## 功能
 
 - **多团队总览** —— 一屏看所有团队的席位使用（ChatGPT / Codex）、成员数、到期情况。
@@ -20,9 +23,9 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
 - **自助兑换** —— 生成一次性 access token，成员凭邮箱 + token 自助加入 / 续期 / 查自己的状态，无需你手动操作。
 - **Session 管理** —— 导入 / 导出 ChatGPT 账号会话，access_token 过期自动用 session cookie 刷新。
 - **财务** —— 订阅、账单、汇率换算展示。
-- **巡检与告警** —— 定时巡检团队健康，异常通过 Telegram 告警。
-- **Telegram 机器人** —— 通知 + 常用命令（邀请 / 移除 / 查成员 / 查自己的到期等；管理命令仅限已配对管理员）。
-- **操作日志** —— 成员操作、团队管理、系统设置、代理、Telegram 配置、财务设置、巡逻武装等写操作均留痕可查；密钥类字段只记掩码，不落明文。
+- **巡检与告警** —— 定时巡检团队健康，异常通过 Telegram 告警；发现计划外成员时按设置自动移除。
+- **Telegram 机器人** —— 团队状态与异常通知 + 常用命令（邀请 / 移除 / 查成员 / 查自己的到期等；管理命令仅限已配对管理员）。
+- **操作日志** —— 成员操作、团队管理、系统设置、代理、Telegram 配置、财务设置、巡检自动移除开关等写操作均留痕可查；密钥类字段只记掩码，不落明文。
 
 ## 技术栈
 
@@ -48,12 +51,22 @@ FastAPI + SQLite（后端）· React + Vite（前端）· Nginx（静态托管 +
    docker compose up -d --build
    ```
 
-3. 打开 `http://<服务器地址>:8080`，用管理员密码登录。检查：
+3. 在服务器本机验证起来了：
 
    ```bash
    docker compose ps
    curl -fsS http://127.0.0.1:8080/api/health
    ```
+
+4. 打开后台 `http://127.0.0.1:8080/admin`，用 `.env` 里的管理员密码登录。
+
+   > 后台入口是 **`/admin`**。根路径 `/` 是给成员用的自助兑换页（填邮箱 + 兑换码），不是登录页。
+
+**默认只监听 `127.0.0.1`，外网访问不到——这是故意的。** 整条链路是明文 HTTP，直接挂公网等于把管理员密码、API Key 和 ChatGPT 会话裸奔。对外访问请在宿主机上用 Nginx / Caddy 配好 TLS 证书，再反代到 `127.0.0.1:8080`。
+
+如果本容器要藏在另一层反代后面，还需要改 `docker/nginx.conf`：把 `set_real_ip_from` / `real_ip_header` 两行取消注释并填上那层反代的来源网段，否则限流和登录失败锁定会把所有访客算成同一个 IP。文件里有说明。
+
+确实要临时直接对外（内网自测、已有防火墙兜底），设 `AUTO_TEAM_BIND=0.0.0.0`。
 
 维护：
 
@@ -108,26 +121,28 @@ docker compose start backend
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
-本机 systemd 部署：
+不走 Docker、直接用进程管理器（systemd 等）跑后端时，把下面的 `<服务名>` 换成你自己的：
 
 ```bash
 # 查看恢复用法
 ./scripts/restore.sh
 
 # 恢复数据库备份
-sudo systemctl stop auto-team.service
+sudo systemctl stop <服务名>
 ./scripts/restore.sh <项目目录>/backend/data/backups/app-20260723T063420Z.db
-sudo systemctl start auto-team.service
+sudo systemctl start <服务名>
 
 # 恢复会话备份
-sudo systemctl stop auto-team.service
+sudo systemctl stop <服务名>
 ./scripts/restore.sh <项目目录>/backend/data/backups/sessions-20260723T063420Z.tar.gz
-sudo systemctl start auto-team.service
+sudo systemctl start <服务名>
 ```
 
 脚本会在替换前保留现有数据库或会话目录的恢复前副本。
 
 ## 配置项
+
+环境变量、数据卷名沿用了项目早期的名字 `AUTO_TEAM_` / `auto_team_data`，改名会让现有部署的数据卷对不上，所以保留不动。
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
@@ -140,9 +155,19 @@ sudo systemctl start auto-team.service
 
 完整清单见 [`.env.example`](./.env.example)。
 
+## 接口文档
+
+- [`ADMIN_API.md`](./ADMIN_API.md) —— 一次性兑换码的管理方式：Telegram 指令出码、后台页面、以及写脚本时直接调的 HTTP 接口（需 `X-API-Key`）。
+- 成员自助接口挂在 `/api/self-service` 下，无需认证，供根路径的自助页调用，也可以自己接前端：
+  - `POST /api/self-service/redeem` —— 凭邮箱 + 兑换码加入或续期
+  - `POST /api/self-service/query` —— 凭邮箱查自己的成员状态与兑换历史
+  - `POST /api/self-service/status` —— 查某个邮箱当前是否还在团队里
+
+  这三个接口按来源 IP 限流。挂在反代后面时务必配好 `AUTO_TEAM_TRUSTED_PROXIES`，否则所有访客会被算成同一个 IP。
+
 ## 安全须知
 
-- **必须放在 TLS / 反向代理 / 防火墙后面。** 生产环境中后端只监听 127.0.0.1:18087（本地环回），由 Nginx 反向代理对外暴露；务必配置 HTTPS 并限制访问来源。
+- **必须放在 TLS / 反向代理 / 防火墙后面。** Docker Compose 部署默认只把 Web 端口绑到 `127.0.0.1:8080`，后端容器不发布任何宿主机端口；务必在宿主机配置 HTTPS 并限制访问来源后再对外。
 - **会话和密钥在数据卷里是明文存储**（ChatGPT 账号会话、API Key、Telegram token）。这是这类工具的固有风险：任何拿到数据卷 / 备份的人即可完全接管被管理的工作区。**请严格限制数据目录权限**：
   - 数据目录（`backend/data/`）：权限 `700`（仅所有者可访问）
   - 数据库文件（`backend/data/app.db`）：权限 `600`（仅所有者可读写）
@@ -153,9 +178,9 @@ sudo systemctl start auto-team.service
 - `.env`、数据库、会话文件、备份已被 git 和 Docker 构建上下文忽略，不会进仓库或镜像。
 - 首次启动后请通过后台修改密码 / 轮换 API Key，不要长期使用 `.env` 里的初始值。
 
-## 本地开发
+## 成熟度
 
-Windows 可用一键脚本 `start.ps1`（或 `start.bat`）；或手动：后端 `uvicorn app.main:app`，前端 `npm run dev`。详见脚本内注释与 `.env.example`。
+目前只有作者自己在生产环境跑，没有经过大范围真实使用的验证。涉及邀请、移除、到期、兑换的自动化都会直接改动你的工作区成员，接入前请先用一个不重要的团队跑一遍，确认行为符合预期再接生产。
 
 ## 许可证
 

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { X, ClipboardCheck, Globe } from 'lucide-react';
+import { X, ClipboardCheck, Globe, Copy, Check } from 'lucide-react';
 import { addTeam, fetchProxies, reimportTeam, type Proxy } from '../api/client';
 import type { Team } from '../types';
 import LoadingSpinner from './LoadingSpinner';
@@ -19,6 +19,7 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [selectedProxyId, setSelectedProxyId] = useState<number | null>(null);
 
@@ -27,13 +28,25 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
       setJson('');
       setError('');
       setSelectedProxyId(team?.proxy_id ?? null);
-      navigator.clipboard.writeText(SESSION_URL).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      }).catch(() => {});
+      void copySessionUrl();
       fetchProxies().then(setProxies).catch(() => {});
     }
+
+    return () => {
+      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+    };
   }, [open, team]);
+
+  const copySessionUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(SESSION_URL);
+      setCopied(true);
+      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+      copyResetTimer.current = setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   const handleSubmit = async () => {
     if (!json.trim()) {
@@ -88,8 +101,20 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
               </span>
             </div>
 
-            <div className="px-3 py-2 bg-gray-50 dark:bg-[#0f1117] rounded-lg border border-gray-200 dark:border-[#2a2d3a]">
-              <code className="text-xs text-blue-500 dark:text-blue-400 break-all">{SESSION_URL}</code>
+            <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-[#0f1117] rounded-lg border border-gray-200 dark:border-[#2a2d3a]">
+              <code className="min-w-0 flex-1 text-xs text-blue-500 dark:text-blue-400 break-all">{SESSION_URL}</code>
+              <button
+                type="button"
+                onClick={() => void copySessionUrl()}
+                className={`shrink-0 rounded-md p-1.5 transition-colors ${copied
+                  ? 'text-emerald-500 dark:text-emerald-400'
+                  : 'text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-[#2a2d3a] dark:hover:text-gray-200'
+                }`}
+                title="复制链接"
+                aria-label="复制 Session 链接"
+              >
+                {copied ? <Check size={15} /> : <Copy size={15} />}
+              </button>
             </div>
 
             <p className="text-xs text-gray-500 dark:text-gray-400">

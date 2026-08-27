@@ -32,7 +32,7 @@ interface BillingCycle {
   active_until: string | null;
   days_remaining: number | null;
   will_renew: boolean;
-  subscription_status: 'renewing' | 'nonrenewing' | 'expired';
+  subscription_status: 'renewing' | 'nonrenewing' | 'expired' | 'stale';
 }
 
 interface OwnerRow {
@@ -147,7 +147,9 @@ function formatBillingCycle(cycle: BillingCycle | string | null | undefined): st
   const days = cycle.days_remaining != null ? ` (${cycle.days_remaining}d)` : '';
   const renew = cycle.subscription_status === 'expired'
     ? ' · 已到期'
-    : cycle.will_renew ? '' : ' · 到期不续费';
+    : cycle.subscription_status === 'stale'
+      ? ' · 数据未同步'
+      : cycle.will_renew ? '' : ' · 到期不续费';
   return `${range}${days}${renew}`;
 }
 

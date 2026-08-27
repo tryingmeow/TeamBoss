@@ -9,7 +9,7 @@ recovery message and closes the incident.
 import asyncio
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from ..database import get_db_path
@@ -21,6 +21,10 @@ DB_PATH = None
 
 _INCIDENT_LOCK = threading.Lock()
 _MAX_ERROR_LENGTH = 500
+
+# 一个未恢复的故障每隔多久重新提醒一次。只发一次的话，故障发生在深夜就等于没发：
+# 消息被后来的通知顶走，第二天没人知道还坏着。
+REPEAT_ALERT_INTERVAL = timedelta(hours=6)
 
 _ALERT_LABELS = {
     "chatgpt_auth": "ChatGPT 鉴权",
@@ -66,6 +70,35 @@ def _ensure_table(conn: sqlite3.Connection) -> None:
                PRIMARY KEY (team_id, alert_key)
            )"""
     )
+    # 最近一次向管理员发出提醒的时间，用于按固定间隔重复提醒。
+    try:
+        conn.execute(
+            "ALTER TABLE team_health_incidents ADD COLUMN last_notified_at TEXT"
+        )
+    except sqlite3.OperationalError:
+        pass
+
+
+def _parse_iso(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _humanize_since(started_at: Optional[datetime], now: datetime) -> str:
+    if not started_at:
+        return ""
+    minutes = int((now - started_at).total_seconds() // 60)
+    if minutes < 60:
+        return f"{max(minutes, 1)} 分钟"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} 小时"
+    return f"{hours // 24} 天"
 
 
 def _team_name(conn: sqlite3.Connection, team_id: str) -> str:
@@ -120,9 +153,23 @@ def report_team_failure_sync(
                 "SELECT * FROM team_health_incidents WHERE team_id = ? AND alert_key = ?",
                 (team_id, alert_key),
             ).fetchone()
+            now_dt = _parse_iso(now) or datetime.now(timezone.utc)
+            first_failed_at = None
+            is_reminder = False
             if row and row["status"] == "open":
                 failure_count = int(row["failure_count"] or 0) + 1
+                first_failed_at = _parse_iso(row["first_failed_at"])
+                # 已经通知过的故障默认静音，但静音有期限：超过 REPEAT_ALERT_INTERVAL
+                # 仍未恢复就再提醒一次，免得一条深夜的告警被顶走后再无人知晓。
+                last_notified_at = _parse_iso(
+                    row["last_notified_at"] if "last_notified_at" in row.keys() else None
+                )
                 already_notified = bool(row["notified"])
+                if already_notified:
+                    reference = last_notified_at or first_failed_at
+                    if reference and now_dt - reference >= REPEAT_ALERT_INTERVAL:
+                        already_notified = False
+                        is_reminder = True
                 conn.execute(
                     """UPDATE team_health_incidents
                        SET last_failed_at = ?, last_error = ?, last_source = ?,
@@ -157,28 +204,34 @@ def report_team_failure_sync(
                 }
 
             label = _ALERT_LABELS.get(alert_key, alert_key)
+            lines = [
+                f"🏢 车队：{team_name}",
+                f"🏷️ 类型：{label}",
+                f"🔗 来源：{source}",
+                f"📝 错误：{error_text}",
+            ]
+            if is_reminder:
+                duration = _humanize_since(first_failed_at, now_dt)
+                lines.insert(1, f"⏰ 仍未恢复{f'，已持续 {duration}' if duration else ''}")
             text = detail_card(
-                "🚨 Team 异常",
-                (
-                    f"🏢 车队：{team_name}",
-                    f"🏷️ 类型：{label}",
-                    f"🔗 来源：{source}",
-                    f"📝 错误：{error_text}",
-                ),
+                "🔁 Team 异常仍未恢复" if is_reminder else "🚨 Team 异常",
+                tuple(lines),
             )
             sent = notify_admins_sync(text)
             if sent > 0:
                 conn.execute(
-                    """UPDATE team_health_incidents SET notified = 1, updated_at = ?
+                    """UPDATE team_health_incidents
+                       SET notified = 1, last_notified_at = ?, updated_at = ?
                        WHERE team_id = ? AND alert_key = ? AND status = 'open'""",
-                    (now, team_id, alert_key),
+                    (now, now, team_id, alert_key),
                 )
                 conn.commit()
                 _log_delivery(
                     conn,
                     team_id,
                     "team_health_alert",
-                    f"key={alert_key}, source={source}, delivered_to={sent}",
+                    f"key={alert_key}, source={source}, delivered_to={sent}"
+                    + (", reminder=1" if is_reminder else ""),
                     "success",
                 )
                 return {"notified": sent, "reason": "sent", "failure_count": failure_count}

@@ -121,13 +121,15 @@ async def upsert_team_from_session(
     updates: dict[str, Any] = {}
 
     if "error" not in subscription:
-        updates["seats_in_use"] = subscription.get("seats_in_use")
-        updates["seats_entitled"] = subscription.get("seats_entitled")
-        updates["billing_currency"] = subscription.get("billing_currency")
-        updates["active_start"] = subscription.get("active_start")
-        updates["active_until"] = subscription.get("active_until")
-        will_renew_raw = subscription.get("will_renew")
-        updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
+        # 缺字段就不写这一列，避免把原本正确的值覆盖成 NULL（seats_entitled 被清成
+        # NULL 会让 patrol 的 over_by 抬成全部席位，一趟踢光）。
+        for col in ("seats_in_use", "seats_entitled", "billing_currency",
+                    "active_start", "active_until"):
+            if col in subscription:
+                updates[col] = subscription.get(col)
+        if "will_renew" in subscription:
+            will_renew_raw = subscription.get("will_renew")
+            updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
 
     # fetch_seat_pricing itself only returns keys it could actually resolve
     # (country_code/billing_symbol/price_per_seat/billing_period); price_per_seat
@@ -195,6 +197,10 @@ async def upsert_team_from_session(
             row_updates: dict[str, Any] = dict(updates)
             row_updates.update(identity_fields)
             row_updates["status"] = "active"
+            # 能走到这里说明新 token 已经通过上面的 get_account_info 校验，授权是好的。
+            # 不清掉 auth_state，界面会在导入成功之后继续挂着「会话失效」。
+            row_updates["auth_state"] = "ok"
+            row_updates["auth_state_since"] = None
             row_updates["updated_at"] = now
             set_clause = ", ".join(f"{key} = ?" for key in row_updates)
             values = list(row_updates.values()) + [team_id]

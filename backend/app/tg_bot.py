@@ -303,8 +303,11 @@ def _pair(chat_id: str, username: Optional[str], code: str) -> str:
                 logger.exception("failed to sync Telegram commands after successful admin pairing")
         finally:
             conn.close()
-    except Exception as exc:
-        return f"注册失败：{exc}"
+    except Exception:
+        # 这条路径任何 Telegram 用户都能触达（还没配对成功就是陌生人）。裸异常会把
+        # 数据库绝对路径、表名列名带出去，只记服务端日志。
+        logger.exception("admin pairing failed")
+        return "注册失败，请联系管理员。"
 
     return "✅ 管理员注册成功。发送 /help 查看管理命令。"
 
@@ -636,6 +639,7 @@ def cmd_team(user: dict, args: str) -> str:
                 "renewing": "正常续费",
                 "nonrenewing": "到期不续费",
                 "expired": "已到期",
+                "stale": "数据未同步",
             }.get(fin.get("subscription_status"), "未知")
             rows.extend((
                 f"💳 Credit：{fin.get('balance') if fin.get('balance') is not None else '未知'} {currency}".rstrip(),

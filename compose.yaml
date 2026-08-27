@@ -34,7 +34,10 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "${AUTO_TEAM_PORT:-8080}:80"
+      # 默认只绑回环：全链路是明文 HTTP，直接挂公网等于把管理员密码和 API Key 裸奔。
+      # 正确做法是在宿主机上用 Nginx/Caddy 配好 TLS 再反代到这个端口。
+      # 确实要临时对外（内网自测、已有防火墙兜底），设 AUTO_TEAM_BIND=0.0.0.0。
+      - "${AUTO_TEAM_BIND:-127.0.0.1}:${AUTO_TEAM_PORT:-8080}:80"
     restart: unless-stopped
     init: true
     healthcheck:

@@ -25,11 +25,19 @@ export interface Team {
   active_start: string | null;
   active_until: string | null;
   will_renew: boolean;
-  subscription_status: 'renewing' | 'nonrenewing' | 'expired';
+  subscription_status: 'renewing' | 'nonrenewing' | 'expired' | 'stale';
   card_last4: string | null;
   card_brand: string | null;
   days_remaining: number | null;
   proxy_id: number | null;
+  /** 最近一次「全部接口都成功」的同步时间。同步一直失败时它会停在原地不动。 */
+  last_full_sync_at: string | null;
+  /** 最近一次同步中失败的接口名，例如 ["members", "subscription"]。 */
+  last_sync_partial_failures: string[];
+  /** 'rejected' = 会话仍能应答，但它交回的 access token 已被上游吊销。 */
+  auth_state: 'ok' | 'rejected';
+  /** 进入 rejected 的时间，用于显示「已持续 N 小时」。 */
+  auth_state_since: string | null;
   cached_member_emails: string[];
 }
 

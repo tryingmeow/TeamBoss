@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type FormEvent } from 'react';
-import { UserPlus, Trash2, KeyRound, DollarSign, CreditCard, Globe, Mail, Users, Zap, Calendar, ChevronDown, RefreshCw, Settings, Pencil, X, Loader2, CircleAlert } from 'lucide-react';
+import { UserPlus, Trash2, KeyRound, DollarSign, CreditCard, Globe, Mail, Users, Zap, Calendar, ChevronDown, RefreshCw, Settings, Pencil, X, Loader2, CircleAlert, Copy, Check } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import type { Team, TeamWorkspaceSettings, MembersData, ShowToast } from '../types';
@@ -68,21 +68,21 @@ function remainingPromoMonths(team: Team, now = new Date()): number | null {
     now.getUTCSeconds(),
     now.getUTCMilliseconds(),
   ];
-  let expiresLaterInMonth = false;
+  let expiresEarlierInMonth = false;
   for (let index = 0; index < expiryRemainder.length; index += 1) {
     if (expiryRemainder[index] === nowRemainder[index]) continue;
-    expiresLaterInMonth = expiryRemainder[index] > nowRemainder[index];
+    expiresEarlierInMonth = expiryRemainder[index] < nowRemainder[index];
     break;
   }
-  if (expiresLaterInMonth) months += 1;
+  if (expiresEarlierInMonth) months -= 1;
 
   const remaining = Math.max(0, months);
   return totalMonths ? Math.min(totalMonths, remaining) : remaining;
 }
 
 function promoLabel(team: Team): string {
-  const remainingMonths = remainingPromoMonths(team);
-  if (remainingMonths !== null) return `剩余 ${remainingMonths} 个月`;
+  const remainingCharges = remainingPromoMonths(team);
+  if (remainingCharges !== null) return `还剩 ${remainingCharges} 次折扣`;
   return '优惠中';
 }
 
@@ -108,6 +108,19 @@ function membersSignature(data: MembersData | null): string {
   return `m:${members.join(',')}|p:${pending.join(',')}`;
 }
 
+/** 把"从什么时候开始坏的"说成人话：已持续 3 小时 / 已持续 2 天。 */
+function brokenForLabel(since: string | null | undefined): string {
+  if (!since) return '';
+  const startedAt = new Date(since).getTime();
+  if (Number.isNaN(startedAt)) return '';
+  const minutes = Math.floor((Date.now() - startedAt) / 60000);
+  if (minutes < 1) return '刚刚开始';
+  if (minutes < 60) return `已持续 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `已持续 ${hours} 小时`;
+  return `已持续 ${Math.floor(hours / 24)} 天`;
+}
+
 export default function TeamCard({
   team,
   onDelete,
@@ -128,16 +141,24 @@ export default function TeamCard({
   const [savingRemark, setSavingRemark] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [ownerEmailCopied, setOwnerEmailCopied] = useState(false);
+  const ownerEmailCopyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [workspaceSettings, setWorkspaceSettings] = useState<TeamWorkspaceSettings | null>(null);
   const { data: membersData, loading: membersLoading, error: membersError, refresh: refreshMembers, setData: setMembersData } = useMembers(
     expanded ? team.id : null
   );
 
   const isAuthExpired = team.status === 'token_expired';
+  // 会话还能应答，但它交回的 token 已被上游吊销。表现和 Session 失效一样是"用不
+  // 了"，但原因和处理方式不同，所以文案分开写。
+  const isAuthRejected = team.auth_state === 'rejected';
+  const authBlocked = isAuthExpired || isAuthRejected;
+  const authBlockedSince = brokenForLabel(team.auth_state_since);
   const isSubscriptionExpired = team.subscription_status === 'expired';
+  const isSubscriptionStale = team.subscription_status === 'stale';
   const isNonRenewing = team.subscription_status === 'nonrenewing';
   const isWarning = (isNonRenewing || (team.days_remaining !== null && team.days_remaining <= 3))
-    && !isAuthExpired
+    && !authBlocked
     && !isSubscriptionExpired;
   const activeGptSeats = activeChatGptSeats(team);
   const monthlyTotal = discountedMonthlyTotal(team);
@@ -164,6 +185,17 @@ export default function TeamCard({
   const handleReimportInstead = () => {
     setConfirmDelete(false);
     onReimport(team);
+  };
+
+  const handleCopyOwnerEmail = async () => {
+    try {
+      await navigator.clipboard.writeText(team.owner_email);
+      setOwnerEmailCopied(true);
+      if (ownerEmailCopyTimer.current) clearTimeout(ownerEmailCopyTimer.current);
+      ownerEmailCopyTimer.current = setTimeout(() => setOwnerEmailCopied(false), 2000);
+    } catch {
+      showToast('复制邮箱失败', 'error');
+    }
   };
 
   const handleSyncTeam = async (force: boolean) => {
@@ -199,6 +231,7 @@ export default function TeamCard({
 
   useEffect(() => () => {
     if (settleTimer.current) clearTimeout(settleTimer.current);
+    if (ownerEmailCopyTimer.current) clearTimeout(ownerEmailCopyTimer.current);
   }, []);
 
   useEffect(() => {
@@ -309,7 +342,7 @@ export default function TeamCard({
 
   const statusDotClass = syncError
     ? 'bg-red-500 animate-pulse'
-    : isAuthExpired
+    : authBlocked
     ? 'bg-gray-400'
     : isSubscriptionExpired
       ? 'bg-red-500'
@@ -332,17 +365,40 @@ export default function TeamCard({
       <div
         className={`relative bg-white dark:bg-[#1a1d27] rounded-2xl border ${borderClass} ${hoverBorderClass} overflow-hidden transition-all duration-300 hover:shadow-lg group`}
       >
-        {isAuthExpired && (
+        {authBlocked && (
           <div className="absolute inset-0 bg-white/85 dark:bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-10 px-5 text-center">
             <div className="w-full space-y-1.5">
-              <div className="text-xs font-semibold text-red-500 dark:text-red-400">Session 失效</div>
+              <div className="text-xs font-semibold text-red-500 dark:text-red-400">
+                {isAuthExpired ? 'Session 失效' : '授权已被吊销'}
+              </div>
+              <div className="text-xs text-gray-600 dark:text-gray-400">
+                需重新导入 session
+                {!isAuthExpired && authBlockedSince && ` · ${authBlockedSince}`}
+              </div>
               <div className="break-words text-base font-bold text-gray-900 dark:text-gray-100">
                 {team.name}
                 {team.remark && (
                   <span className="font-semibold text-gray-500 dark:text-gray-400">（{team.remark}）</span>
                 )}
               </div>
-              <div className="break-all text-xs text-gray-600 dark:text-gray-400">{team.owner_email}</div>
+              <div className="inline-flex max-w-full items-center justify-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
+                <span className="break-all">{team.owner_email}</span>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void handleCopyOwnerEmail();
+                  }}
+                  className={`shrink-0 rounded-md p-1 transition-colors ${ownerEmailCopied
+                    ? 'text-emerald-500 dark:text-emerald-400'
+                    : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+                  }`}
+                  title="复制邮箱"
+                  aria-label={`复制 ${team.owner_email}`}
+                >
+                  {ownerEmailCopied ? <Check size={14} /> : <Copy size={14} />}
+                </button>
+              </div>
               <div className="inline-flex rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400" title={team.id}>
                 ID {shortTeamId(team.id)}
               </div>
@@ -506,7 +562,7 @@ export default function TeamCard({
                     isWarning ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400' 
                     : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
                   }`}>
-                    {isSubscriptionExpired ? '已到期' : `${team.days_remaining}d`}
+                    {isSubscriptionExpired ? '已到期' : isSubscriptionStale ? '未同步' : `${team.days_remaining}d`}
                   </span>
                 )}
               </div>
@@ -586,7 +642,7 @@ export default function TeamCard({
                       ? 'text-amber-500 dark:text-amber-400'
                       : 'text-gray-400 dark:text-gray-500'
                 }>
-                  {isSubscriptionExpired ? '订阅已到期' : isNonRenewing ? '到期不续费' : '正常续费'}
+                  {isSubscriptionExpired ? '订阅已到期' : isSubscriptionStale ? '数据未同步' : isNonRenewing ? '到期不续费' : '正常续费'}
                 </span>
               </div>
             </div>

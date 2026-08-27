@@ -7,6 +7,7 @@ access to administrator commands.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import re
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,8 @@ from typing import Callable, Optional
 from ..database import get_db_path
 from ..tg_format import detail_card
 from .tg_commands import sync_chat_commands_sync
+
+logger = logging.getLogger(__name__)
 
 # 向后兼容：模块级占位符，测试可能会 patch 它
 DB_PATH = None
@@ -163,8 +166,10 @@ def claim_member_pairing_code_sync(
                 sync_chat_commands_sync(previous_chat_id, conn=conn)
         finally:
             conn.close()
-    except Exception as exc:
-        return f"绑定失败：{exc}"
+    except Exception:
+        # 任何 Telegram 用户都能发起绑定，裸异常会带出数据库路径与表结构。
+        logger.exception("member binding failed")
+        return "绑定失败，请联系管理员。"
 
     return f"✅ 绑定成功：{email}\n发送 /info 查询自己的成员状态和服务到期时间。"
 

@@ -569,8 +569,19 @@ export interface RedemptionHistoryItem {
   created_at: string;
 }
 
+export interface MembershipTeamEntry {
+  status: 'joined' | 'pending';
+  team_id: string | null;
+  team_name: string | null;
+  expires_at: string | null;
+  is_owner: boolean;
+  cache_updated_at: string | null;
+}
+
 // Response body of GET-by-email queries, nested under `membership` in
 // MembershipStatusResult — do not flatten these onto the top level.
+// Top-level team fields mirror the first team only; the full per-team
+// list (one entry per team the email belongs to) is `memberships`.
 export interface MembershipInfo {
   status: 'joined' | 'pending' | 'absent';
   email: string;
@@ -579,6 +590,7 @@ export interface MembershipInfo {
   expires_at: string | null;
   is_owner: boolean;
   message: string;
+  memberships: MembershipTeamEntry[];
   redemption_history: RedemptionHistoryItem[];
 }
 
@@ -666,7 +678,37 @@ export interface FinanceTeamItem {
   active_until: string | null;
   days_left: number | null;
   will_renew: number;
-  subscription_status: 'renewing' | 'nonrenewing' | 'expired';
+  subscription_status: 'renewing' | 'nonrenewing' | 'expired' | 'stale';
+  latest_invoice: FinanceLatestInvoice | null;
+}
+
+export interface FinanceLatestInvoice {
+  invoice_id: string;
+  status: string | null;
+  currency: string | null;
+  amount_due: number | null;
+  amount_paid: number | null;
+  display_amount: number | null;
+  display_amount_base: number | null;
+  period_start: string | null;
+  period_end: string | null;
+  hosted_invoice_url: string | null;
+  reconciliation: 'match' | 'over' | 'under' | 'unpaid' | null;
+  diff_native: number | null;
+  diff_base: number | null;
+}
+
+export interface FinanceInvoiceRow {
+  invoice_id: string;
+  number: string | null;
+  status: string | null;
+  currency: string | null;
+  amount_due: number | null;
+  amount_paid: number | null;
+  period_start: string | null;
+  period_end: string | null;
+  description: string | null;
+  hosted_invoice_url: string | null;
 }
 
 export interface FinanceTimelineItem {
@@ -687,7 +729,8 @@ export interface FinanceTimelineItem {
 }
 
 export interface FinanceAlert {
-  type: 'low_balance' | 'discount_expiring' | 'token_expired' | 'subscription_expired';
+  type: 'low_balance' | 'discount_expiring' | 'token_expired' | 'subscription_expired'
+    | 'invoice_mismatch' | 'invoice_unpaid';
   team_id: string;
   team_name: string;
   detail: string;
@@ -700,6 +743,8 @@ export interface FinanceOverview {
   monthly_total_base: number;
   discount_total_base: number;
   excluded_teams_count: number;
+  last_paid_total_base: number | null;
+  last_paid_count: number;
   teams: FinanceTeamItem[];
   timeline: FinanceTimelineItem[];
   alerts: FinanceAlert[];
@@ -738,6 +783,12 @@ export async function getFinanceOverview(): Promise<FinanceOverview> {
 
 export async function getFinanceTrends(days: number = 90): Promise<FinanceTrends> {
   return request<FinanceTrends>(`/api/finance/trends?days=${days}`);
+}
+
+export async function getFinanceInvoices(teamId: string): Promise<{ team_id: string; invoices: FinanceInvoiceRow[] }> {
+  return request<{ team_id: string; invoices: FinanceInvoiceRow[] }>(
+    `/api/finance/invoices/${encodeURIComponent(teamId)}`,
+  );
 }
 
 export async function updateFinanceSettings(body: {

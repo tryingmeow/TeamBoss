@@ -10,7 +10,7 @@ from ..chatgpt_limiter import refresh_team_auth, run_chatgpt_call
 from ..database import get_db, log_operation, get_sessions_dir
 from ..models import DefaultSeatTypeRequest, TeamProxyUpdate, TeamRemarkUpdate, TeamSession, TeamResponse
 from ..services.pricing import discounted_monthly_total
-from ..services.subscription_status import subscription_status
+from ..services.subscription_status import subscription_status_display
 from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
 from ..services.tg_commands import sync_email_chat_commands_sync
 from ..services.team_clients import get_team_client
@@ -48,8 +48,8 @@ def _team_row_to_response(row) -> dict:
     # empty currency until the next successful sync fills it in.
     d["billing_currency"] = d.get("billing_currency") or ""
     d["will_renew"] = bool(d.get("will_renew", 1))
-    d["subscription_status"] = subscription_status(
-        d.get("active_until"), d["will_renew"]
+    d["subscription_status"] = subscription_status_display(
+        d.get("active_until"), d["will_renew"], d.get("last_full_sync_at")
     )
     d["is_codex_enabled"] = bool(d.get("is_codex_enabled", 0))
     d["default_seat_type"] = cached_default_seat_type(d.get("cached_data"))
@@ -82,9 +82,24 @@ def _team_row_to_response(row) -> dict:
         d["monthly_subtotal"] = None
         d["monthly_total"] = None
 
+    # 库里存的是 JSON 字符串，接口统一给数组，前端不必再解析一次。
+    raw_failures = d.get("last_sync_partial_failures")
+    parsed_failures: list[str] = []
+    if raw_failures:
+        try:
+            loaded = json.loads(raw_failures)
+            if isinstance(loaded, list):
+                parsed_failures = [str(item) for item in loaded]
+        except (ValueError, TypeError):
+            parsed_failures = []
+    d["last_sync_partial_failures"] = parsed_failures
+    # 迁移前建的行是 NULL，接口统一给 'ok'。
+    d["auth_state"] = "rejected" if d.get("auth_state") == "rejected" else "ok"
+
     fields = TeamResponse.model_fields.keys()
     team = {k: d.get(k) for k in fields}
     team["cached_member_emails"] = team.get("cached_member_emails") or []
+    team["last_sync_partial_failures"] = team.get("last_sync_partial_failures") or []
     return team
 
 

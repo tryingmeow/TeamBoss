@@ -20,6 +20,8 @@ from .services.team_health_alerts import (
 T = TypeVar("T")
 DEFAULT_API_CONCURRENCY = 4
 AUTH_REFRESH_COOLDOWN = timedelta(minutes=10)
+PROACTIVE_REFRESH_WINDOW = timedelta(hours=24)
+PROACTIVE_REFRESH_COOLDOWN = timedelta(hours=1)
 _NEGATIVE_REFRESH_RESULTS = {"failed", "partial", "unchanged"}
 
 _semaphore: threading.BoundedSemaphore | None = None
@@ -185,16 +187,32 @@ def _access_token_expired(access_token: str, now: datetime) -> bool:
     return bool(expires_at and expires_at <= now)
 
 
+def _access_token_due_for_refresh(access_token: str, now: datetime) -> bool:
+    expires_at = _parse_iso(_decode_token_expires(access_token))
+    return bool(expires_at and expires_at <= now + PROACTIVE_REFRESH_WINDOW)
+
+
 def _cooldown_until(
     conn: sqlite3.Connection,
     team_id: str,
     now: datetime,
+    trigger: str,
 ) -> datetime | None:
+    """冷却时长由**本次**尝试的 trigger 决定，不看上一条日志是什么。
+
+    主动刷新（``scheduled_expiry_refresh``）是机会性的，失败一次冷却 1 小时没问
+    题；但业务接口真的 401 时必须尽快救回来。按历史 action 取冷却时长会让一次
+    ``partial``（session 轮换、access token 未变，这是主动刷新的常见结果）把随后
+    一小时内的所有 401 重试一并挡掉，Team 会持续 401 且不再尝试自救。
+    """
     row = conn.execute(
-        """SELECT result, created_at
+        """SELECT action, result, created_at
            FROM operation_logs
            WHERE team_id = ?
-             AND action IN ('token_auto_refresh', 'refresh_token', 'token_refresh')
+             AND action IN (
+                 'token_auto_refresh', 'token_proactive_refresh',
+                 'refresh_token', 'token_refresh'
+             )
            ORDER BY id DESC
            LIMIT 1""",
         (team_id,),
@@ -204,7 +222,12 @@ def _cooldown_until(
     attempted_at = _parse_iso(row["created_at"])
     if not attempted_at:
         return None
-    until = attempted_at + AUTH_REFRESH_COOLDOWN
+    cooldown = (
+        PROACTIVE_REFRESH_COOLDOWN
+        if trigger == "scheduled_expiry_refresh"
+        else AUTH_REFRESH_COOLDOWN
+    )
+    until = attempted_at + cooldown
     return until if until > now else None
 
 
@@ -229,6 +252,8 @@ def _refresh_log_fields(
 def _refresh_log_identity(trigger: str) -> tuple[str, str]:
     if trigger == "api_401_retry":
         return "token_auto_refresh", "auto_refresh"
+    if trigger == "scheduled_expiry_refresh":
+        return "token_proactive_refresh", "auto_refresh"
     return "refresh_token", "manual"
 
 
@@ -236,6 +261,45 @@ def _mark_team_auth_expired(conn: sqlite3.Connection, team_id: str) -> None:
     conn.execute("UPDATE teams SET status = 'token_expired' WHERE id = ?", (team_id,))
     try:
         conn.execute("DELETE FROM patrol_team_baselines WHERE team_id = ?", (team_id,))
+    except sqlite3.OperationalError:
+        pass
+
+
+def _mark_team_auth_rejected(
+    conn: sqlite3.Connection,
+    team_id: str,
+    now: datetime,
+) -> None:
+    """标记「token 被上游吊销」。刻意不动 status，见 database.py 的迁移注释。
+
+    ``auth_state_since`` 只在第一次进入 rejected 时写入，后续重复检测不刷新它，
+    界面上的「已持续 N 小时」才是从头算起而不是每轮归零。
+    """
+    try:
+        conn.execute(
+            """UPDATE teams
+               SET auth_state = 'rejected',
+                   auth_state_since = COALESCE(auth_state_since, ?)
+               WHERE id = ? AND COALESCE(auth_state, 'ok') != 'rejected'""",
+            (now.isoformat(), team_id),
+        )
+        # 已经是 rejected 的行上面那条不会命中，补一次纯状态写入保证幂等。
+        conn.execute(
+            "UPDATE teams SET auth_state = 'rejected' WHERE id = ?",
+            (team_id,),
+        )
+    except sqlite3.OperationalError:
+        # 迁移尚未跑到的旧库：授权状态只是观测信息，不该让刷新流程失败。
+        pass
+
+
+def _clear_team_auth_rejected(conn: sqlite3.Connection, team_id: str) -> None:
+    """换到新的 access token 即视为恢复。"""
+    try:
+        conn.execute(
+            "UPDATE teams SET auth_state = 'ok', auth_state_since = NULL WHERE id = ?",
+            (team_id,),
+        )
     except sqlite3.OperationalError:
         pass
 
@@ -277,7 +341,7 @@ def refresh_team_auth_sync(
 
             now = datetime.now(timezone.utc)
             if not force:
-                cooldown_until = _cooldown_until(conn, team_id, now)
+                cooldown_until = _cooldown_until(conn, team_id, now, trigger)
                 if cooldown_until:
                     return AuthRefreshOutcome(
                         status="cooldown",
@@ -301,7 +365,17 @@ def refresh_team_auth_sync(
 
             if "error" in refresh_result:
                 error = str(refresh_result.get("error") or "Unknown auth refresh error")
-                _mark_team_auth_expired(conn, team_id)
+                # A transient refresh/network failure does not prove that the
+                # browser session is dead. Only an explicit session-endpoint
+                # 401 may invalidate a Team, and only when the current access
+                # token is already unusable (expired or rejected by an API).
+                session_rejected = refresh_result.get("status_code") == 401
+                access_unusable = (
+                    trigger == "api_401_retry"
+                    or _access_token_expired(db_access_token, now)
+                )
+                if session_rejected and access_unusable:
+                    _mark_team_auth_expired(conn, team_id)
                 _insert_operation_log(
                     conn,
                     team_id,
@@ -321,6 +395,7 @@ def refresh_team_auth_sync(
 
             new_access_token = refresh_result.get("accessToken") or row["access_token"]
             new_session_token = refresh_result.get("sessionToken") or row["session_token"]
+            session_has_access = bool(refresh_result.get("accessToken"))
             access_changed = new_access_token != row["access_token"]
             session_changed = new_session_token != row["session_token"]
             token_expires = _decode_token_expires(new_access_token)
@@ -357,11 +432,26 @@ def refresh_team_auth_sync(
                 result_status = "unchanged"
                 outcome_status = "unchanged"
 
-            if not access_changed and (
+            # A successful /api/auth/session response that returns the same
+            # access token is still a live rolling browser session. Do not
+            # confuse "no new short-lived token yet" with session expiry.
+            # An empty auth-session response is conclusive only after the
+            # current access token is unusable.
+            if not session_has_access and (
                 trigger == "api_401_retry"
                 or _access_token_expired(new_access_token, now)
             ):
                 _mark_team_auth_expired(conn, team_id)
+
+            # 第三种情况：会话端点正常应答、也确实交回了 access token，但那个 token
+            # 和库里那个一模一样，而业务接口刚刚 401。此时 token 本身往往还没到
+            # 期（JWT exp 还在未来），是上游把它吊销了，滚动会话已经换不出新的。
+            # 既不是"会话还活着"也不是"会话已死"，单独记一个授权状态，
+            # status 保持 active 以免掉出 scheduler 的扫描范围。
+            if trigger == "api_401_retry" and session_has_access and not access_changed:
+                _mark_team_auth_rejected(conn, team_id, now)
+            elif access_changed:
+                _clear_team_auth_rejected(conn, team_id)
 
             _insert_operation_log(
                 conn,
@@ -428,6 +518,26 @@ def run_chatgpt_call_sync(func: Callable[..., T], *args: Any, **kwargs: Any) -> 
     with semaphore:
         client = _bound_chatgpt_client(func)
         stale_access_token = client.access_token if client is not None else None
+
+        # The access token is short-lived while the browser session can roll
+        # for months. Refresh from that long-lived session before access-token
+        # expiry instead of waiting for a business API to return 401.
+        if (
+            client is not None
+            and stale_access_token
+            and _access_token_due_for_refresh(
+                stale_access_token,
+                datetime.now(timezone.utc),
+            )
+        ):
+            refresh_team_auth_sync(
+                client.team_id,
+                trigger="scheduled_expiry_refresh",
+                client=client,
+                stale_access_token=stale_access_token,
+            )
+            stale_access_token = client.access_token
+
         result = func(*args, **kwargs)
         if _is_unauthorized_result(result):
             refresh_outcome = (

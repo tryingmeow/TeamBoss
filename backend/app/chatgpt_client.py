@@ -1,4 +1,31 @@
+import re
+
 import requests
+
+# 上游异常的字符串形式有可能把请求头原样带出来（例如 requests 在 header 值非法时
+# 会把 `authorization: Bearer <token>` 整段拼进 InvalidHeader 的消息里）。这些文本
+# 会流向操作日志、Telegram 告警，甚至匿名接口的错误响应，所以在源头就抹掉。
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-._~+/]{8,}=*"),
+    re.compile(r"(?i)(__Secure-next-auth\.session-token\s*=\s*)[^\s;,'\"]{8,}"),
+    re.compile(r"(?i)(authorization\s*[:=]\s*)[^\s,'\"]{8,}"),
+    re.compile(r"(?i)(cookie\s*[:=]\s*)[^\s,'\"]{8,}"),
+    # 裸 JWT（三段 base64url）。session token 与 access token 都是这个形状。
+    re.compile(r"\beyJ[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{8,}"),
+)
+
+
+def mask_secrets(text: str) -> str:
+    """把文本里的 token / cookie / Authorization 值替换成 ``***``。"""
+    if not text:
+        return text
+    masked = text
+    for pattern in _SECRET_PATTERNS:
+        if pattern.groups:
+            masked = pattern.sub(lambda m: f"{m.group(1)}***", masked)
+        else:
+            masked = pattern.sub("***", masked)
+    return masked
 
 
 class ChatGPTClient:
@@ -25,7 +52,7 @@ class ChatGPTClient:
     def _error(exc: Exception) -> dict:
         response = getattr(exc, "response", None)
         status_code = getattr(response, "status_code", None)
-        result = {"error": str(exc)}
+        result = {"error": mask_secrets(str(exc))}
         if status_code is not None:
             result["status_code"] = status_code
         return result
@@ -182,6 +209,17 @@ class ChatGPTClient:
         try:
             resp = self.session.get(
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/users/seat_type_counts",
+                timeout=60
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            return self._error(e)
+
+    def get_invoices(self, limit: int = 6) -> dict:
+        try:
+            resp = self.session.get(
+                f"{self.base_url}/backend-api/invoices?limit={limit}&account_id={self.team_id}",
                 timeout=60
             )
             resp.raise_for_status()

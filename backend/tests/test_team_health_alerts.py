@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +55,46 @@ class TeamHealthAlertsTest(unittest.TestCase):
         ).fetchone()
         conn.close()
         return dict(row) if row else None
+
+    def test_unrecovered_incident_is_reminded_after_the_repeat_interval(self):
+        """静音有期限：超过间隔仍未恢复必须再提醒一次。
+
+        只发一次的话，深夜发生的故障会被后来的消息顶走，第二天没人知道还坏着。
+        """
+        team_health_alerts.report_team_failure_sync(
+            "team-1", "chatgpt_auth", "401 Unauthorized", source="test"
+        )
+        self.assertEqual(len(self.messages), 1)
+
+        # 间隔内的重复失败仍然静音。
+        team_health_alerts.report_team_failure_sync(
+            "team-1", "chatgpt_auth", "401 Unauthorized", source="test"
+        )
+        self.assertEqual(len(self.messages), 1)
+
+        # 把上次提醒时间往前拨到超过间隔，再来一次失败就该提醒了。
+        stale = (
+            datetime.now(timezone.utc)
+            - team_health_alerts.REPEAT_ALERT_INTERVAL
+            - timedelta(minutes=1)
+        ).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """UPDATE team_health_incidents
+               SET last_notified_at = ?, first_failed_at = ?
+               WHERE team_id='team-1' AND alert_key='chatgpt_auth'""",
+            (stale, stale),
+        )
+        conn.commit()
+        conn.close()
+
+        reminded = team_health_alerts.report_team_failure_sync(
+            "team-1", "chatgpt_auth", "401 Unauthorized", source="test"
+        )
+
+        self.assertEqual(reminded["notified"], 1)
+        self.assertEqual(len(self.messages), 2)
+        self.assertIn("仍未恢复", self.messages[1])
 
     def test_failure_is_deduplicated_and_recovery_is_sent_once(self):
         first = team_health_alerts.report_team_failure_sync(

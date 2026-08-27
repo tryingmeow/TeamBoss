@@ -9,8 +9,9 @@ from pydantic import BaseModel
 
 from ..database import get_db, log_operation
 from ..services.fx import DEFAULT_FX_RATES, convert, get_fx_config, save_fx_rates
+from ..services.invoices import classify_latest_invoice, refresh_invoices_for_team_blocking
 from ..services.pricing import discounted_monthly_total
-from ..services.subscription_status import subscription_status
+from ..services.subscription_status import subscription_status_display
 
 router = APIRouter(prefix="/api/finance", tags=["finance"])
 
@@ -48,6 +49,17 @@ async def get_overview():
         teams_rows = await cursor.fetchall()
         cursor = await db.execute("SELECT card_key, note FROM finance_card_notes")
         card_note_rows = await cursor.fetchall()
+        # 每团队取最新一期真实发票（void/draft 不算数），用于和推算月费对账。
+        cursor = await db.execute(
+            """SELECT * FROM invoices
+               WHERE COALESCE(status, '') NOT IN ('void', 'draft')
+               ORDER BY COALESCE(period_end, created_at) DESC, created_at DESC"""
+        )
+        invoice_rows = await cursor.fetchall()
+
+    latest_invoice_by_team = {}
+    for invoice_row in invoice_rows:
+        latest_invoice_by_team.setdefault(invoice_row["team_id"], invoice_row)
 
     card_notes = {row["card_key"]: row["note"] or "" for row in card_note_rows}
     card_team_counts = {}
@@ -61,6 +73,8 @@ async def get_overview():
     discount_total_base = 0.0
     timeline_data = []
     excluded_teams_count = 0
+    last_paid_total_base = 0.0
+    last_paid_count = 0
 
     for team_row in teams_rows:
         team_id = team_row["id"]
@@ -85,7 +99,9 @@ async def get_overview():
         will_renew_raw = team_row["will_renew"]
         will_renew = bool(will_renew_raw)
         renewal_known = will_renew_raw is not None
-        subscription_state = subscription_status(active_until, bool(will_renew))
+        subscription_state = subscription_status_display(
+            active_until, bool(will_renew), team_row["last_full_sync_at"]
+        )
         billing_period = team_row["billing_period"]
 
         # Calculate native monthly total only if billing_period is monthly and price is available
@@ -102,6 +118,44 @@ async def get_overview():
             balance_float = float(balance_str) if balance_str not in (None, "") else None
         except (ValueError, TypeError):
             balance_float = None
+
+        # 最新一期发票：金额定性在原币种内完成，换算成基准币只为了展示。
+        latest_invoice = None
+        inv_row = latest_invoice_by_team.get(team_id)
+        if inv_row is not None:
+            inv = dict(inv_row)
+            reconciliation, display_amount, diff_native = classify_latest_invoice(
+                inv, monthly_total_native, billing_currency
+            )
+            invoice_currency = inv["currency"] or ""
+            display_amount_base = (
+                convert(display_amount, invoice_currency, base_currency, rates)
+                if display_amount is not None and invoice_currency
+                else None
+            )
+            diff_base = (
+                convert(diff_native, invoice_currency, base_currency, rates)
+                if diff_native is not None and invoice_currency
+                else None
+            )
+            latest_invoice = {
+                "invoice_id": inv["invoice_id"],
+                "status": inv["status"],
+                "currency": inv["currency"],
+                "amount_due": inv["amount_due"],
+                "amount_paid": inv["amount_paid"],
+                "display_amount": display_amount,
+                "display_amount_base": display_amount_base,
+                "period_start": inv["period_start"],
+                "period_end": inv["period_end"],
+                "hosted_invoice_url": inv["hosted_invoice_url"],
+                "reconciliation": reconciliation,
+                "diff_native": diff_native,
+                "diff_base": diff_base,
+            }
+            if inv["status"] == "paid" and display_amount_base is not None:
+                last_paid_total_base += display_amount_base
+                last_paid_count += 1
 
         # Calculate days left
         days_left = None
@@ -147,6 +201,7 @@ async def get_overview():
             "days_left": days_left,
             "will_renew": 1 if will_renew else 0,
             "subscription_status": subscription_state,
+            "latest_invoice": latest_invoice,
         }
         teams_data.append(team_dict)
 
@@ -249,6 +304,48 @@ async def get_overview():
                 "detail": "团队订阅已到期",
             })
 
+        # 发票对账：差额用基准币说严重程度，原币证据在明细展开区。
+        invoice_info = team.get("latest_invoice")
+        if invoice_info:
+            reconciliation = invoice_info["reconciliation"]
+            if reconciliation in ("over", "under"):
+                word = "多" if (invoice_info["diff_native"] or 0) > 0 else "少"
+                if invoice_info["diff_base"] is not None:
+                    detail = (
+                        f"上期实付比推算{word}约 "
+                        f"{base_currency} {abs(invoice_info['diff_base']):.2f}"
+                    )
+                else:
+                    detail = (
+                        f"上期实付比推算{word} "
+                        f"{invoice_info['currency']} {abs(invoice_info['diff_native'] or 0):.2f}"
+                    )
+                alerts.append({
+                    "type": "invoice_mismatch",
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "detail": detail,
+                })
+            elif reconciliation == "unpaid":
+                if invoice_info["display_amount_base"] is not None:
+                    detail = (
+                        f"上期账单约 {base_currency} "
+                        f"{invoice_info['display_amount_base']:.2f} 尚未支付"
+                    )
+                elif invoice_info["display_amount"] is not None:
+                    detail = (
+                        f"上期账单 {invoice_info['currency']} "
+                        f"{invoice_info['display_amount']:.2f} 尚未支付"
+                    )
+                else:
+                    detail = "上期账单尚未支付"
+                alerts.append({
+                    "type": "invoice_unpaid",
+                    "team_id": team_id,
+                    "team_name": team_name,
+                    "detail": detail,
+                })
+
     return {
         "base_currency": base_currency,
         "fx_updated_at": fx_updated_at,
@@ -256,10 +353,47 @@ async def get_overview():
         "monthly_total_base": monthly_total_base,
         "discount_total_base": discount_total_base,
         "excluded_teams_count": excluded_teams_count,
+        "last_paid_total_base": last_paid_total_base if last_paid_count else None,
+        "last_paid_count": last_paid_count,
         "teams": teams_data,
         "timeline": timeline_data,
         "alerts": alerts,
     }
+
+
+_TEAM_INVOICES_SQL = """
+    SELECT invoice_id, number, status, currency, amount_due, amount_paid,
+           period_start, period_end, description, hosted_invoice_url
+    FROM invoices
+    WHERE team_id = ?
+    ORDER BY COALESCE(period_end, created_at) DESC, created_at DESC
+    LIMIT 6
+"""
+
+
+@router.get("/invoices/{team_id}")
+async def get_team_invoices(team_id: str):
+    """最近 6 期发票，给明细行展开的对账子表用。金额保持原币种。"""
+    async with get_db() as db:
+        cursor = await db.execute("SELECT id FROM teams WHERE id = ?", (team_id,))
+        team = await cursor.fetchone()
+        if team is None:
+            raise HTTPException(status_code=404, detail="Team not found")
+        cursor = await db.execute(_TEAM_INVOICES_SQL, (team_id,))
+        rows = await cursor.fetchall()
+
+    if not rows:
+        # 库里一条都没有就现场拉一次（内部仍受 24 小时缓存约束）。失败不
+        # 报错，照常返回空列表，界面显示「暂无账单数据」。
+        try:
+            await asyncio.to_thread(refresh_invoices_for_team_blocking, team_id)
+        except Exception:
+            pass
+        async with get_db() as db:
+            cursor = await db.execute(_TEAM_INVOICES_SQL, (team_id,))
+            rows = await cursor.fetchall()
+
+    return {"team_id": team_id, "invoices": [dict(row) for row in rows]}
 
 
 @router.get("/trends")

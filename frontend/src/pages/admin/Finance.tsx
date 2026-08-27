@@ -1,13 +1,16 @@
-import { useState, useEffect, useMemo, type FormEvent } from 'react';
+import { Fragment, useState, useEffect, useMemo, type FormEvent } from 'react';
 import {
   getFinanceOverview,
+  getFinanceInvoices,
   updateFinanceSettings,
   updateFinanceCardNote,
   refreshFxRates,
+  type FinanceInvoiceRow,
   type FinanceOverview,
+  type FinanceTeamItem,
   type FinanceTimelineItem,
 } from '../../api/client';
-import { AlertTriangle, Clock, CreditCard, KeyRound, Loader2, Mail, Pencil, Plus, Wallet, TrendingUp, Zap } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Clock, CreditCard, ExternalLink, KeyRound, Loader2, Mail, Pencil, Plus, Wallet, TrendingUp, Zap } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 
@@ -57,6 +60,177 @@ function timelineDaysBadgeClass(daysUntil: number) {
     return 'bg-amber-50 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300';
   }
   return 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300';
+}
+
+// 上期实付：日常扫读用基准币，原币精确值留给展开的对账子表。
+function LatestInvoiceCell({
+  team,
+  baseCurrency,
+  expanded,
+}: {
+  team: FinanceTeamItem;
+  baseCurrency: string;
+  expanded: boolean;
+}) {
+  const inv = team.latest_invoice;
+  const chevron = (
+    <ChevronDown
+      className={`h-3.5 w-3.5 shrink-0 text-gray-400 transition-transform dark:text-slate-500 ${
+        expanded ? 'rotate-180' : ''
+      }`}
+    />
+  );
+
+  if (!inv || inv.display_amount === null) {
+    return (
+      <div className="flex items-center justify-end gap-1.5 whitespace-nowrap text-gray-400 dark:text-slate-500">
+        <span>—</span>
+        {chevron}
+      </div>
+    );
+  }
+
+  const nativeText = `${inv.currency || ''} ${inv.display_amount.toFixed(2)}`.trim();
+  const primary =
+    inv.display_amount_base !== null
+      ? `≈ ${baseCurrency} ${inv.display_amount_base.toFixed(2)}`
+      : nativeText;
+  const deviating = inv.reconciliation === 'over' || inv.reconciliation === 'under';
+
+  let diffLine: string | null = null;
+  if (deviating) {
+    const word = (inv.diff_native ?? 0) > 0 ? '多' : '少';
+    diffLine =
+      inv.diff_base !== null
+        ? `比推算${word} ≈ ${baseCurrency} ${Math.abs(inv.diff_base).toFixed(2)}`
+        : `比推算${word} ${inv.currency || ''} ${Math.abs(inv.diff_native ?? 0).toFixed(2)}`;
+  }
+
+  return (
+    <div title={nativeText}>
+      <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+        <span
+          className={
+            deviating
+              ? 'font-semibold text-gray-900 dark:text-slate-100'
+              : 'text-gray-500 dark:text-slate-400'
+          }
+        >
+          {primary}
+        </span>
+        {inv.reconciliation === 'unpaid' && (
+          <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+            未支付
+          </span>
+        )}
+        {chevron}
+      </div>
+      {diffLine ? (
+        <div className="mt-0.5 whitespace-nowrap text-right text-xs text-amber-600 dark:text-amber-400">
+          {diffLine}
+        </div>
+      ) : (
+        inv.display_amount_base !== null && (
+          <div className="mt-0.5 whitespace-nowrap text-right text-xs text-gray-400 dark:text-slate-500">
+            {nativeText}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+function invoiceStatusCell(status: string | null) {
+  if (status === 'open') {
+    return (
+      <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+        未支付
+      </span>
+    );
+  }
+  const label =
+    status === 'paid' ? '已支付' : status === 'void' ? '已作废' : status === 'draft' ? '草稿' : status || '—';
+  return <span className="text-gray-500 dark:text-slate-400">{label}</span>;
+}
+
+function formatInvoicePeriod(row: FinanceInvoiceRow) {
+  if (!row.period_start && !row.period_end) return '—';
+  const fmt = (value: string | null) => (value ? format(parseISO(value), 'MM-dd') : '?');
+  return `${fmt(row.period_start)} ~ ${fmt(row.period_end)}`;
+}
+
+// 展开的对账子表：金额保持原币种，和 Stripe 发票页逐行核对用。
+function InvoiceSubTable({ state }: { state: FinanceInvoiceRow[] | 'loading' | 'error' | undefined }) {
+  if (state === undefined || state === 'loading') {
+    return (
+      <div className="flex items-center gap-2 py-1 text-xs text-gray-500 dark:text-slate-400">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        加载账单...
+      </div>
+    );
+  }
+  if (state === 'error') {
+    return <div className="py-1 text-xs text-rose-500 dark:text-rose-400">账单载入失败</div>;
+  }
+  if (state.length === 0) {
+    return <div className="py-1 text-xs text-gray-500 dark:text-slate-400">暂无账单数据</div>;
+  }
+
+  const headerCurrency = state[0].currency || '';
+  return (
+    <table className="w-full text-xs">
+      <thead className="text-gray-500 dark:text-slate-500">
+        <tr>
+          <th className="py-1.5 pr-3 text-left font-medium">账期</th>
+          <th className="py-1.5 pr-3 text-left font-medium">状态</th>
+          <th className="py-1.5 pr-3 text-right font-medium">应付 ({headerCurrency})</th>
+          <th className="py-1.5 pr-3 text-right font-medium">实付 ({headerCurrency})</th>
+          <th className="py-1.5 pr-3 text-left font-medium">说明</th>
+          <th className="py-1.5 text-right font-medium" />
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-gray-100 dark:divide-slate-800/50">
+        {state.map(row => {
+          const amount = (value: number | null) => {
+            if (value === null) return '—';
+            const text = value.toFixed(2);
+            return row.currency && row.currency !== headerCurrency ? `${row.currency} ${text}` : text;
+          };
+          return (
+            <tr key={row.invoice_id} className={row.status === 'void' ? 'opacity-60' : ''}>
+              <td className="whitespace-nowrap py-1.5 pr-3 text-gray-700 dark:text-slate-300" title={row.number || undefined}>
+                {formatInvoicePeriod(row)}
+              </td>
+              <td className="whitespace-nowrap py-1.5 pr-3">{invoiceStatusCell(row.status)}</td>
+              <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums text-gray-700 dark:text-slate-300">
+                {amount(row.amount_due)}
+              </td>
+              <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums text-gray-700 dark:text-slate-300">
+                {amount(row.amount_paid)}
+              </td>
+              <td className="max-w-[18rem] truncate py-1.5 pr-3 text-gray-400 dark:text-slate-500" title={row.description || undefined}>
+                {row.description || '—'}
+              </td>
+              <td className="py-1.5 text-right">
+                {row.hosted_invoice_url && (
+                  <a
+                    href={row.hosted_invoice_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={event => event.stopPropagation()}
+                    className="inline-flex rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-slate-500 dark:hover:bg-slate-700/70 dark:hover:text-slate-200"
+                    title="在 Stripe 查看发票"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
 }
 
 function CardNoteEditor({
@@ -246,6 +420,8 @@ export default function Finance() {
   const [fxError, setFxError] = useState('');
   const [activeBillingTab, setActiveBillingTab] = useState<'timeline' | 'cards' | 'details'>('timeline');
   const [timelineSort, setTimelineSort] = useState<'date' | 'card'>('date');
+  const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null);
+  const [invoicesByTeam, setInvoicesByTeam] = useState<Record<string, FinanceInvoiceRow[] | 'loading' | 'error'>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -307,6 +483,17 @@ export default function Finance() {
     const updated = await getFinanceOverview();
     setOverview(updated);
     setOverviewError('');
+  };
+
+  const handleToggleInvoices = (teamId: string) => {
+    const opening = expandedTeamId !== teamId;
+    setExpandedTeamId(opening ? teamId : null);
+    if (opening && invoicesByTeam[teamId] === undefined) {
+      setInvoicesByTeam(prev => ({ ...prev, [teamId]: 'loading' }));
+      getFinanceInvoices(teamId)
+        .then(res => setInvoicesByTeam(prev => ({ ...prev, [teamId]: res.invoices })))
+        .catch(() => setInvoicesByTeam(prev => ({ ...prev, [teamId]: 'error' })));
+    }
   };
 
   // Calculate 30-day renewal count
@@ -538,6 +725,11 @@ export default function Finance() {
                   {overview.excluded_teams_count} 个团队未计入
                 </div>
               ) : null}
+              {overview?.last_paid_total_base != null && (
+                <div className="mt-1.5 text-xs text-gray-500 dark:text-slate-400">
+                  上期实付合计 ≈ {overview.base_currency} {overview.last_paid_total_base.toFixed(2)}
+                </div>
+              )}
             </>
           )}
         </div>
@@ -780,24 +972,25 @@ export default function Finance() {
 
         {activeBillingTab === 'details' && (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[48rem] text-left text-sm text-gray-700 dark:text-slate-300">
+            <table className="w-full min-w-[56rem] text-left text-sm text-gray-700 dark:text-slate-300">
               <thead className="border-b border-gray-200 text-xs text-gray-500 dark:border-slate-800 dark:text-slate-500">
                 <tr>
                   <th className="px-4 py-2 font-medium">Team</th>
                   <th className="px-4 py-2 font-medium">席位</th>
                   <th className="px-4 py-2 font-medium text-right">计费</th>
                   <th className="px-4 py-2 font-medium text-right">预计月费</th>
+                  <th className="px-4 py-2 font-medium text-right">上期实付</th>
                   <th className="px-4 py-2 font-medium text-right">Credit 余额</th>
                   <th className="px-4 py-2 font-medium">到期日</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-slate-800/50">
                 {overviewLoading ? (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">加载中...</td></tr>
+                  <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">加载中...</td></tr>
                 ) : overview?.teams.length === 0 ? (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">暂无团队</td></tr>
+                  <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">暂无团队</td></tr>
                 ) : (
-                  overview!.teams.map((team, i) => {
+                  overview!.teams.map((team) => {
                     const sym = team.billing_symbol || team.billing_currency;
                     let daysBadge = 'bg-gray-100 text-gray-600 dark:bg-slate-800 dark:text-slate-300';
                     if (team.days_left !== null) {
@@ -805,9 +998,10 @@ export default function Finance() {
                       else if (team.days_left <= 14) daysBadge = 'bg-amber-50 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300';
                     }
                     return (
+                      <Fragment key={team.team_id}>
                       <tr
-                        key={i}
-                        className={`transition-colors hover:bg-gray-50 dark:hover:bg-slate-800/30 ${
+                        onClick={() => handleToggleInvoices(team.team_id)}
+                        className={`cursor-pointer transition-colors hover:bg-gray-50 dark:hover:bg-slate-800/30 ${
                           team.status === 'token_expired' ? 'bg-rose-500/5' : ''
                         }`}
                       >
@@ -833,12 +1027,16 @@ export default function Finance() {
                               <div className={`mt-1 inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium ${
                                 team.subscription_status === 'expired'
                                   ? 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300'
+                                  : team.subscription_status === 'stale'
+                                    ? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-slate-400'
                                   : team.subscription_status === 'nonrenewing'
                                     ? 'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
                                     : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
                               }`}>
                                 {team.subscription_status === 'expired'
                                   ? '已到期'
+                                  : team.subscription_status === 'stale'
+                                    ? '数据未同步'
                                   : team.subscription_status === 'nonrenewing' ? '到期不续费' : '正常续费'}
                               </div>
                             </div>
@@ -877,9 +1075,11 @@ export default function Finance() {
                         </td>
                         <td className="px-4 py-3.5 text-right">
                           <div className="whitespace-nowrap font-medium text-gray-900 dark:text-slate-100">
-                            {team.monthly_total_native !== null
-                              ? `${sym} ${team.monthly_total_native.toFixed(2)}`
-                              : `${sym} —`}
+                            {team.monthly_total_base !== null
+                              ? `≈ ${overview!.base_currency} ${team.monthly_total_base.toFixed(2)}`
+                              : team.monthly_total_native !== null
+                                ? `${sym} ${team.monthly_total_native.toFixed(2)}`
+                                : `${sym} —`}
                           </div>
                           {team.billing_period === null ? (
                             <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-slate-400">
@@ -890,10 +1090,17 @@ export default function Finance() {
                               年付，月费暂不计算
                             </div>
                           ) : team.monthly_total_base !== null && (
-                            <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-slate-400">
-                              ≈ {overview!.base_currency} {team.monthly_total_base.toFixed(2)}
+                            <div className="mt-0.5 whitespace-nowrap text-xs text-gray-400 dark:text-slate-500">
+                              {sym} {team.monthly_total_native.toFixed(2)}
                             </div>
                           )}
+                        </td>
+                        <td className="px-4 py-3.5 text-right">
+                          <LatestInvoiceCell
+                            team={team}
+                            baseCurrency={overview!.base_currency}
+                            expanded={expandedTeamId === team.team_id}
+                          />
                         </td>
                         <td className="px-4 py-3.5 text-right font-mono text-gray-500 dark:text-slate-400">
                           {team.balance ?? '—'}
@@ -915,6 +1122,14 @@ export default function Finance() {
                           )}
                         </td>
                       </tr>
+                      {expandedTeamId === team.team_id && (
+                        <tr className="bg-gray-50/60 dark:bg-slate-900/40">
+                          <td colSpan={7} className="px-4 py-3">
+                            <InvoiceSubTable state={invoicesByTeam[team.team_id]} />
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })
                 )}
