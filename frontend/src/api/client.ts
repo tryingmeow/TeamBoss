@@ -438,11 +438,13 @@ export async function fetchAllMembers(params?: {
   q?: string;
   status?: string;
   refresh?: boolean;
+  includeOwners?: boolean;
 }): Promise<AllMembersResult> {
   const search = new URLSearchParams();
   if (params?.q) search.set('q', params.q);
   if (params?.status) search.set('status', params.status);
   if (params?.refresh) search.set('refresh', 'true');
+  if (params?.includeOwners) search.set('include_owners', 'true');
   const qs = search.toString();
   return request<AllMembersResult>(`/api/users/members${qs ? `?${qs}` : ''}`);
 }
@@ -574,6 +576,12 @@ export interface RedeemTeamChoice {
   team_name: string | null;
   status: 'joined' | 'pending';
   expires_at: string | null;
+  /** false 时点了必然 409（Owner / 永久成员），按钮要禁用。 */
+  renewable: boolean;
+  is_owner: boolean;
+  /** dated=有到期时间；permanent=永久（不可续）；unmanaged=本地无到期记录。 */
+  expiry_state: 'dated' | 'permanent' | 'unmanaged';
+  blocked_reason: string | null;
 }
 
 export interface RedemptionHistoryItem {

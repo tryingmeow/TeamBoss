@@ -49,6 +49,43 @@ class PermanentMembershipError(Exception):
     """
 
 
+async def get_active_expiry_state(team_id: str, user_id: str, email: str) -> str:
+    """这个人在这个 Team 里当前的到期管理状态。
+
+    返回值三选一，与 ``extend_member_expiry`` 内部走的分支一一对应：
+
+    * ``"dated"``      —— 有未踢出的记录且带到期时间：续期就是往后加。
+    * ``"permanent"``  —— 有未踢出的记录但 expires_at 为 NULL：续期会抛
+      ``PermanentMembershipError``。
+    * ``"unmanaged"``  —— 本地没有未踢出的记录：续期会新建一条
+      ``auto_kick=1`` 的记录，把原本不受自动踢人管的人变成到期即踢。
+
+    展示层必须能区分后两者：两者的 ``expires_at`` 都是 NULL，但一个不能续、
+    另一个一续就会给人装上踢人倒计时。
+    """
+    normalized_email = (email or "").strip().lower()
+    normalized_user_id = user_id or ""
+    if not normalized_user_id and not normalized_email:
+        return "unmanaged"
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            _ACTIVE_EXPIRY_ROW_SQL,
+            (
+                team_id,
+                normalized_user_id,
+                normalized_user_id,
+                normalized_email,
+                normalized_email,
+            ),
+        )
+        row = await cursor.fetchone()
+
+    if row is None:
+        return "unmanaged"
+    return "permanent" if row["expires_at"] is None else "dated"
+
+
 def expires_in_to_datetime(expires_in: str) -> Optional[datetime]:
     duration = normalize_duration(expires_in, allow_never=True)
     return expiry_from_duration(duration)

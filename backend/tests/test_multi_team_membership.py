@@ -219,6 +219,80 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "joined")
         self.assertIn("2 个 Team", result["message"])
 
+    async def test_email_status_is_scoped_to_the_team_the_code_landed_on(self):
+        """一张码的状态只能按它实际落到的那个队算，不能跨队取第一命中。"""
+        async def fake_cached_members(team_id):
+            if team_id == "team-b":
+                return {
+                    "members": [{"email": EMAIL, "id": "u-shared", "is_owner": False,
+                                 "expires_at": "2026-10-01T00:00:00+00:00"}],
+                    "pending_invites": [],
+                    "updated_at": "2026-08-17T00:00:00+00:00",
+                }
+            return {"members": [], "pending_invites": [], "updated_at": None}
+
+        with patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(access_tokens, "get_cached_members", new=fake_cached_members):
+            scoped = await access_tokens._resolve_email_status(
+                EMAIL, None, team_id="team-b"
+            )
+            other = await access_tokens._resolve_email_status(
+                EMAIL, None, team_id="team-a"
+            )
+
+        self.assertEqual(scoped["status"], "joined")
+        self.assertEqual(scoped["team_id"], "team-b")
+        # A 队那张码不能借 B 队的成员身份显示成"已加入"。
+        self.assertEqual(other["status"], "absent")
+
+    async def test_a_paused_team_makes_the_status_unknown_not_absent(self):
+        """限定的车队已经不在活跃列表里时，只能说"未知"。
+
+        说"未找到"等于告诉一个正常缴过费的成员：你的会员不存在。我们只是没有
+        数据源可查——既不能跨队去别的队取答案，也不该把没数据说成没会员。
+        """
+        with patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A])
+        ), patch.object(
+            access_tokens,
+            "get_cached_members",
+            new=AsyncMock(return_value={"members": [], "pending_invites": [], "updated_at": None}),
+        ):
+            resolved = await access_tokens._resolve_email_status(
+                EMAIL, "2026-12-01T00:00:00+00:00", team_id="team-b"
+            )
+
+        self.assertEqual(resolved["status"], "unknown")
+        self.assertEqual(resolved["status_label"], "未知")
+        self.assertEqual(resolved["expires_at"], "2026-12-01T00:00:00+00:00")
+
+    async def test_a_legacy_kick_row_without_a_team_still_answers_a_scoped_query(self):
+        """per-team 到期之前留下的 team_id 为空的踢出记录，仍然是唯一的答案。"""
+        async with app_database.get_db() as db:
+            await db.execute(
+                """INSERT INTO member_expiry
+                   (team_id, user_id, email, expires_at, auto_kick, kicked, kicked_at,
+                    source, created_at)
+                   VALUES (NULL, 'u-shared', ?, '2026-07-01T00:00:00+00:00', 1, 1,
+                           '2026-07-02T00:00:00+00:00', 'system', '2026-06-01T00:00:00+00:00')""",
+                (EMAIL,),
+            )
+            await db.commit()
+
+        with patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens,
+            "get_cached_members",
+            new=AsyncMock(return_value={"members": [], "pending_invites": [], "updated_at": None}),
+        ):
+            resolved = await access_tokens._resolve_email_status(
+                EMAIL, None, team_id="team-b"
+            )
+
+        self.assertEqual(resolved["status"], "expired_removed")
+
     async def _make_token(self, raw_token: str) -> int:
         async with app_database.get_db() as db:
             cursor = await db.execute(
@@ -240,7 +314,8 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
             use_row = await (
                 await db.execute(
-                    "SELECT action, result, error_message FROM access_token_uses WHERE token_id = ?",
+                    """SELECT action, result, error_message, team_id, expires_at
+                       FROM access_token_uses WHERE token_id = ?""",
                     (token_id,),
                 )
             ).fetchone()
@@ -260,6 +335,22 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
              "expires_at": "2026-10-01T00:00:00+00:00", "cache_updated_at": None},
         ]
 
+    @classmethod
+    def _lookup(cls, hits=None):
+        """_find_all_memberships 的替身：只返回调用方真正传进来的那些 Team 的命中。
+
+        真实实现是按传入的 teams 逐个拉的。用一个"无论传什么都返回全部命中"的
+        AsyncMock 会把"只查用户选中的那个队"这件事整个盖掉——测试会绿，代码却
+        可能在拿全量列表做决定。
+        """
+        source = hits if hits is not None else cls._hits()
+
+        async def _fake(email, teams, use_cache_only=False):
+            wanted = {team["id"] for team in teams}
+            return [hit for hit in source if hit["team"]["id"] in wanted]
+
+        return _fake
+
     async def test_redeem_without_a_choice_asks_which_team_and_returns_the_token(self):
         raw_token = "atm_multiteamtest"
         token_id = await self._make_token(raw_token)
@@ -269,7 +360,7 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
         ), patch.object(
-            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=self._hits())
+            access_tokens, "_find_all_memberships", new=self._lookup()
         ):
             result = await access_tokens.redeem_access_token(
                 access_tokens.RedeemAccessTokenRequest(email=EMAIL, token=raw_token),
@@ -289,30 +380,80 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         # 兑换码没有被消耗，占用记录如实留痕，邮箱占位释放，用户可以带 team_id 再提交。
         self.assertEqual(token_row["used_count"], 0)
         self.assertEqual(use_row["action"], "renew_multi_team_prompt")
-        self.assertEqual(use_row["result"], "failed")
-        self.assertEqual(use_row["error_message"], "team_selection_required")
+        # 这一步不是失败：码退回了、什么都没变，用户只是还要补一个选择。写成
+        # failed 会在公开兑换历史里给一次成功的续期挂上一条红色失败记录。
+        self.assertEqual(use_row["result"], "notice")
+        self.assertIsNone(use_row["error_message"])
+        # 名义到期是这张码的面额，这次并没有授出去；留着它历史里就会显示一个
+        # 从未发生过的到期时间。
+        self.assertIsNone(use_row["expires_at"])
         self.assertEqual(claim_count, 0)
 
-    async def test_redeem_with_a_chosen_team_renews_only_that_team(self):
-        raw_token = "atm_multiteamchoice"
+    async def test_team_choices_mark_teams_that_cannot_be_renewed(self):
+        """Owner 和永久成员点下去必然 409，选项里必须先标出来。
+
+        还要把"永久"和"本地没有到期记录"分开：两者的 expires_at 都是 NULL，但
+        前者续期会被拒，后者一续就会给这个人新建一条到期即自动踢出的记录。
+        """
+        raw_token = "atm_multiteamflags"
         await self._make_token(raw_token)
         hits = self._hits()
-        renew = AsyncMock(
-            return_value={
-                "existing": hits[1],
-                "action": "renewed_member",
-                "expires_at": "2026-11-01T00:00:00+00:00",
-            }
-        )
+        hits[0]["is_owner"] = True
+        async with app_database.get_db() as db:
+            # team-b：有记录但 expires_at 为 NULL —— 真·永久成员。
+            await db.execute(
+                """INSERT INTO member_expiry
+                   (team_id, user_id, email, expires_at, auto_kick, kicked, source, created_at)
+                   VALUES ('team-b', 'u-shared', ?, NULL, 0, 0, 'manual',
+                           '2026-08-17T00:00:00+00:00')""",
+                (EMAIL,),
+            )
+            await db.commit()
 
         with patch.object(
             access_tokens, "_check_rate_limit", new=AsyncMock()
         ), patch.object(
             access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
         ), patch.object(
-            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=hits)
+            access_tokens, "_find_all_memberships", new=self._lookup(hits)
+        ):
+            result = await access_tokens.redeem_access_token(
+                access_tokens.RedeemAccessTokenRequest(email=EMAIL, token=raw_token),
+                Mock(),
+            )
+
+        choices = {c["team_id"]: c for c in result["choices"]}
+        self.assertTrue(choices["team-a"]["is_owner"])
+        self.assertFalse(choices["team-a"]["renewable"])
+        self.assertEqual(choices["team-a"]["blocked_reason"], "owner_email")
+        # team-a 本地没有到期记录：续期会新建一条，不能显示成"永不过期"。
+        self.assertEqual(choices["team-a"]["expiry_state"], "unmanaged")
+
+        self.assertFalse(choices["team-b"]["renewable"])
+        self.assertEqual(choices["team-b"]["blocked_reason"], "permanent_membership")
+        self.assertEqual(choices["team-b"]["expiry_state"], "permanent")
+
+    async def test_redeem_with_a_chosen_team_renews_only_that_team(self):
+        """选中 B 队的完整兑换：只查 B 队、只续 B 队、码真的被扣掉。
+
+        这里刻意不 mock _renew_existing_membership —— 扣码/写收据/释放邮箱占位
+        全都发生在它内部的 extend_member_expiry 里。把它整个替换掉，测试就再也
+        看不见"这张付过钱的码到底有没有被消耗"。
+        """
+        raw_token = "atm_multiteamchoice"
+        token_id = await self._make_token(raw_token)
+        hits = self._hits()
+        lookup = AsyncMock(side_effect=self._lookup(hits))
+        single = AsyncMock(return_value=hits[1])
+
+        with patch.object(
+            access_tokens, "_check_rate_limit", new=AsyncMock()
         ), patch.object(
-            access_tokens, "_renew_existing_membership", new=renew
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens, "_find_all_memberships", new=lookup
+        ), patch.object(
+            access_tokens, "_find_existing_membership", new=single
         ):
             result = await access_tokens.redeem_access_token(
                 access_tokens.RedeemAccessTokenRequest(
@@ -322,10 +463,73 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["action"], "renewed_member")
         self.assertEqual(result["team_id"], "team-b")
-        self.assertEqual(result["expires_at"], "2026-11-01T00:00:00+00:00")
-        # 续期只能落到用户点的那个车队。
-        self.assertIs(renew.await_args.args[0], hits[1])
+        # 已经选定车队后，只实时拉这一个队：多拉的每个队都是一次多余的上游请求，
+        # 而且任何一个无关车队的会话失效都会把这次续期一起打成 503。
+        self.assertEqual(
+            [team["id"] for team in lookup.await_args.args[1]], ["team-b"]
+        )
+        # 拿到 claim 后的复核也只对着选中的队。
+        self.assertEqual(
+            [team["id"] for team in single.await_args.args[1]], ["team-b"]
+        )
+
+        # 钱的部分：码必须被扣掉、收据落到选中的队、邮箱占位释放。
+        token_row, use_row, claim_count = await self._token_state(token_id)
+        self.assertEqual(token_row["used_count"], 1)
+        self.assertEqual(use_row["action"], "renewed_member")
+        self.assertEqual(use_row["result"], "success")
+        self.assertEqual(use_row["team_id"], "team-b")
+        self.assertEqual(claim_count, 0)
+
+        # 到期只写进了 B 队，A 队一行都没有。
+        async with app_database.get_db() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT team_id FROM member_expiry WHERE lower(email) = ?", (EMAIL,)
+                )
+            ).fetchall()
+        self.assertEqual([row["team_id"] for row in rows], ["team-b"])
+
+    async def test_a_chosen_team_that_vanishes_returns_the_token_instead_of_inviting(self):
+        """选中的成员身份在拿锁期间没了 —— 只能退码，绝不能改邀请。
+
+        _renew_existing_membership 拿到 claim 后重新确认，发现人已被巡检/到期任务
+        踢掉时返回 None。此时若继续往下走，就会进新邀请分支，而那个分支是按空位
+        多少挑队的：用户花钱指定了 B 队，结果被塞进当时最空的 A 队。
+        """
+        raw_token = "atm_multiteamvanish"
+        token_id = await self._make_token(raw_token)
+        invite = AsyncMock()
+
+        with patch.object(
+            access_tokens, "_check_rate_limit", new=AsyncMock()
+        ), patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens, "_find_all_memberships", new=self._lookup()
+        ), patch.object(
+            access_tokens, "_renew_existing_membership", new=AsyncMock(return_value=None)
+        ), patch.object(
+            access_tokens, "_invite_to_available_team", new=invite
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await access_tokens.redeem_access_token(
+                    access_tokens.RedeemAccessTokenRequest(
+                        email=EMAIL, token=raw_token, team_id="team-b"
+                    ),
+                    Mock(),
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        invite.assert_not_awaited()
+        token_row, use_row, claim_count = await self._token_state(token_id)
+        self.assertEqual(token_row["used_count"], 0)
+        self.assertEqual(use_row["action"], "renew_team_choice_invalid")
+        self.assertEqual(use_row["error_message"], "team_choice_vanished")
+        self.assertEqual(use_row["team_id"], "team-b")
+        self.assertEqual(claim_count, 0)
 
     async def test_redeem_with_a_stale_team_choice_is_rejected_and_returns_the_token(self):
         raw_token = "atm_multiteamstale"
@@ -336,7 +540,7 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
         ), patch.object(
-            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=self._hits())
+            access_tokens, "_find_all_memberships", new=self._lookup()
         ), patch.object(
             access_tokens, "_renew_existing_membership", new=AsyncMock()
         ):
@@ -352,7 +556,37 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         token_row, use_row, claim_count = await self._token_state(token_id)
         self.assertEqual(token_row["used_count"], 0)
         self.assertEqual(use_row["action"], "renew_team_choice_invalid")
+        self.assertEqual(use_row["error_message"], "team_choice_unknown")
+        # 这个 id 不属于任何活跃车队，不能原样写进审计行：之后的查询会拿这一列
+        # 当作"这张码落在哪个队"的定位键读回去。
+        self.assertIsNone(use_row["team_id"])
+        self.assertEqual(claim_count, 0)
+
+    async def test_a_still_active_team_the_email_left_is_rejected_as_not_found(self):
+        """车队还在、人不在了：这是"选择已失效"，与"车队不存在"要分开留痕。"""
+        raw_token = "atm_multiteamleft"
+        token_id = await self._make_token(raw_token)
+
+        with patch.object(
+            access_tokens, "_check_rate_limit", new=AsyncMock()
+        ), patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens, "_find_all_memberships", new=self._lookup([self._hits()[0]])
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await access_tokens.redeem_access_token(
+                    access_tokens.RedeemAccessTokenRequest(
+                        email=EMAIL, token=raw_token, team_id="team-b"
+                    ),
+                    Mock(),
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        _, use_row, claim_count = await self._token_state(token_id)
+        self.assertEqual(use_row["action"], "renew_team_choice_invalid")
         self.assertEqual(use_row["error_message"], "team_choice_not_found")
+        self.assertEqual(use_row["team_id"], "team-b")
         self.assertEqual(claim_count, 0)
 
 

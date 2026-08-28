@@ -25,6 +25,24 @@ import {
 
 type Tab = 'redeem' | 'query';
 
+function choiceExpiryText(choice: RedeemTeamChoice): string {
+  // expires_at 为空有两种完全不同的含义，绝不能都写成"永不过期"：
+  // permanent 是真的永久（续期会被拒），unmanaged 是本地压根没有到期记录，
+  // 续下去会给这个人新建一条到期即自动踢出的记录。
+  if (choice.expiry_state === 'permanent') return '永久有效 · 无需续期';
+  if (choice.expiry_state === 'unmanaged') return '未纳入到期管理';
+  return `到期 ${formatExpiresAt(choice.expires_at)}`;
+}
+
+function choiceBlockedText(choice: RedeemTeamChoice): string | null {
+  // 只在后端明确说了"不能续"时才禁用。字段缺失（前端已更新、后端还没重启的
+  // 那几秒）必须按可续处理，否则会把所有车队按钮一起变灰，谁都续不了。
+  if (choice.renewable !== false) return null;
+  if (choice.blocked_reason === 'owner_email') return 'Owner 邮箱不支持自助续期';
+  if (choice.blocked_reason === 'permanent_membership') return '永久有效，无需续期';
+  return '该车队暂不支持续期';
+}
+
 function formatExpiresAt(value: string | null): string {
   if (!value) return '永不过期';
   return new Date(value).toLocaleString('zh-CN', {
@@ -51,7 +69,6 @@ function historyActionLabel(action: string): string {
     redeem_aborted: '兑换中断',
     renew_owner_rejected: 'Owner 拒绝',
     renew_permanent_rejected: '永久有效拒绝',
-    renew_multi_team_rejected: '多 Team 拒绝',
     renew_multi_team_prompt: '待选择车队',
     renew_team_choice_invalid: '车队选择已失效',
     none: '无可用 Team',
@@ -94,36 +111,55 @@ export default function JoinPage() {
   const [error, setError] = useState('');
   const [redeemResult, setRedeemResult] = useState<RedeemAccessTokenResult | null>(null);
   const [statusResult, setStatusResult] = useState<MembershipStatusResult | null>(null);
+  // 车队选择提示是针对某一对（邮箱, 兑换码）算出来的。之后用户可能在输入框里
+  // 把邮箱改了，所以提交选择时必须用生成这份列表时的那对值，不能读当前表单。
+  const [promptContext, setPromptContext] = useState<{ email: string; token: string } | null>(null);
+  const [pendingTeamId, setPendingTeamId] = useState<string | null>(null);
 
   const switchTab = (next: Tab) => {
     setTab(next);
     setError('');
     setRedeemResult(null);
     setStatusResult(null);
+    setPromptContext(null);
   };
 
   const submitRedeem = async (teamId?: string) => {
+    // 选车队的提交必须先校验、再发请求，全程保留已有的 choices：这份列表只存在
+    // 于 redeemResult 里，提前清掉的话任何一次失败（409/429/503）都会让用户连
+    // 可点的车队都没有了，只能把整个表单重填一遍。
+    const submitEmail = (teamId && promptContext ? promptContext.email : email).trim();
+    const submitToken = (teamId && promptContext ? promptContext.token : token).trim();
+
     setError('');
-    setRedeemResult(null);
+    if (!teamId) {
+      setRedeemResult(null);
+      setPromptContext(null);
+    }
     setStatusResult(null);
 
-    if (!email.trim() || !token.trim()) {
+    if (!submitEmail || !submitToken) {
       setError('请输入邮箱和 Token');
       return;
     }
 
     setRedeemLoading(true);
+    if (teamId) setPendingTeamId(teamId);
     try {
       const data = await redeemAccessToken({
-        email: email.trim(),
-        token: token.trim(),
+        email: submitEmail,
+        token: submitToken,
         ...(teamId ? { team_id: teamId } : {}),
       });
       setRedeemResult(data);
+      setPromptContext(
+        data.status === 'team_selection_required' ? { email: submitEmail, token: submitToken } : null
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : '操作失败');
     } finally {
       setRedeemLoading(false);
+      setPendingTeamId(null);
     }
   };
 
@@ -247,25 +283,41 @@ export default function JoinPage() {
                   {redeemResult.message}
                 </p>
                 <div className="space-y-1.5 pt-0.5">
-                  {redeemResult.choices.map((choice: RedeemTeamChoice) => (
-                    <button
-                      key={choice.team_id}
-                      type="button"
-                      disabled={redeemLoading}
-                      onClick={() => submitRedeem(choice.team_id)}
-                      className="w-full flex items-center justify-between gap-2 rounded-lg border border-blue-200 dark:border-blue-800/50 bg-white/70 dark:bg-[#0f1117]/70 px-3 py-2 text-left transition-colors hover:border-blue-400 hover:bg-white dark:hover:bg-[#0f1117] disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <span className="min-w-0">
-                        <span className="block font-medium truncate">{choice.team_name ?? choice.team_id}</span>
-                        <span className="block text-xs text-blue-700/70 dark:text-blue-300/70">
-                          {choice.status === 'pending' ? '待接受 · ' : ''}
-                          到期 {formatExpiresAt(choice.expires_at)}
+                  {redeemResult.choices.map((choice: RedeemTeamChoice) => {
+                    const blocked = choiceBlockedText(choice);
+                    return (
+                      <button
+                        key={choice.team_id}
+                        type="button"
+                        disabled={redeemLoading || Boolean(blocked)}
+                        onClick={() => submitRedeem(choice.team_id)}
+                        title={blocked ?? undefined}
+                        className="w-full flex items-center justify-between gap-2 rounded-lg border border-blue-200 dark:border-blue-800/50 bg-white/70 dark:bg-[#0f1117]/70 px-3 py-2 text-left transition-colors hover:border-blue-400 hover:bg-white dark:hover:bg-[#0f1117] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-blue-200 dark:disabled:hover:border-blue-800/50"
+                      >
+                        <span className="min-w-0">
+                          <span className="block font-medium truncate">{choice.team_name ?? choice.team_id}</span>
+                          <span className="block text-xs text-blue-700/70 dark:text-blue-300/70">
+                            {choice.status === 'pending' ? '待接受 · ' : ''}
+                            {choiceExpiryText(choice)}
+                          </span>
+                          {blocked && (
+                            <span className="block text-xs text-gray-500 dark:text-gray-400">{blocked}</span>
+                          )}
                         </span>
-                      </span>
-                      <ArrowRight size={15} className="shrink-0 opacity-60" />
-                    </button>
-                  ))}
+                        {pendingTeamId === choice.team_id ? (
+                          <Loader2 size={15} className="shrink-0 animate-spin opacity-60" />
+                        ) : (
+                          !blocked && <ArrowRight size={15} className="shrink-0 opacity-60" />
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
+                {redeemResult.choices.some((choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged') && (
+                  <p className="text-xs text-blue-700/80 dark:text-blue-300/80">
+                    标记为「未纳入到期管理」的车队目前没有到期记录，续期会给该车队的成员身份新建一条到期时间，到期后自动移出。
+                  </p>
+                )}
               </div>
             )}
 
@@ -400,10 +452,12 @@ export default function JoinPage() {
                               className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
                                 item.result === 'success'
                                   ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
-                                  : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
+                                  : item.result === 'notice'
+                                    ? 'bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300'
+                                    : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
                               }`}
                             >
-                              {item.result === 'success' ? '成功' : '失败'}
+                              {item.result === 'success' ? '成功' : item.result === 'notice' ? '提示' : '失败'}
                             </span>
                           </div>
                           <div className="mt-1 grid grid-cols-[52px_1fr] gap-y-0.5 text-[11px] text-gray-500 dark:text-gray-500">
@@ -421,8 +475,15 @@ export default function JoinPage() {
                                 <span className="font-mono">{item.token_prefix}...</span>
                               </>
                             )}
-                            <span>到期</span>
-                            <span>{formatExpiresAt(item.expires_at)}</span>
+                            {/* 只有真正授出去的那次才有"到期"可言。失败/提示行里的
+                                到期是这张码的名义面额，显示出来等于给用户一个从
+                                未发生过的到期时间。成功且为空则是真的永久。 */}
+                            {(item.result === 'success' || item.expires_at) && (
+                              <>
+                                <span>到期</span>
+                                <span>{formatExpiresAt(item.expires_at)}</span>
+                              </>
+                            )}
                             {item.error_message && (
                               <>
                                 <span>错误</span>

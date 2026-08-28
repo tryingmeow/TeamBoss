@@ -68,6 +68,7 @@ interface AdminMemberRow {
   team_id: string;
   team_name: string;
   owner_email: string;
+  is_owner?: boolean;
   user_id: string;
   email: string;
   name?: string | null;
@@ -830,20 +831,24 @@ function OwnerList({
 
 function MemberList({
   search,
-  onSearchChange,
   sortOrder,
   seatFilter,
   statusFilters,
   showToast,
 }: {
   search: string;
-  onSearchChange: (value: string) => void;
   sortOrder: SortOrder;
   seatFilter: SeatFilter;
   statusFilters: Set<MemberStatus>;
   showToast: ShowToast;
 }) {
   const [members, setMembers] = useState<AdminMemberRow[]>([]);
+  // Owner 行不进表格（表格是"成员"视图），但必须参与多车队角标的统计：
+  // 一个邮箱在 A 队是成员、在 B 队是 Owner，正是最需要人工确认的那种情况。
+  const [ownerTeamsByEmail, setOwnerTeamsByEmail] = useState<Map<string, number>>(new Map());
+  // 角标点开的是"就这一个邮箱"，不是把邮箱塞进全文搜索——后者会把
+  // owner_email 命中的整队人也一起捞出来。
+  const [focusEmail, setFocusEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [copyingBindingEmail, setCopyingBindingEmail] = useState<string | null>(null);
@@ -852,8 +857,28 @@ function MemberList({
 
   const fetchMembers = (showLoading = true) => {
     if (showLoading) setLoading(true);
-    return fetchAllMembers()
-      .then((res) => setMembers(res.items))
+    return fetchAllMembers({ includeOwners: true })
+      .then((res) => {
+        const items = res.items as AdminMemberRow[];
+        // 老后端不返回 is_owner，也就不会因为 include_owners 多给 Owner 行；
+        // 这里按"没标就是成员"处理，版本错位时列表内容与改动前一致。
+        setMembers(items.filter((item) => item.is_owner !== true));
+        const owners = new Map<string, number>();
+        items.forEach((item) => {
+          if (!item.is_owner) return;
+          const email = (item.email || '').trim().toLowerCase();
+          if (!email) return;
+          owners.set(email, (owners.get(email) ?? 0) + 1);
+        });
+        setOwnerTeamsByEmail(owners);
+        // 拉不到缓存的车队会被服务端跳过。不说出来的话，多车队角标会少算，
+        // 而管理员看到的是一个"完整"的列表。
+        const failed = (res.errors ?? []) as Array<{ team_name?: string | null; team_id?: string }>;
+        if (failed.length) {
+          const names = failed.map((e) => e.team_name || e.team_id).filter(Boolean).join('、');
+          showToast(`${failed.length} 个车队的成员数据未能载入（${names}），列表与角标可能不完整`, 'error');
+        }
+      })
       .catch(console.error)
       .finally(() => {
         if (showLoading) setLoading(false);
@@ -875,7 +900,7 @@ function MemberList({
 
   // 一个邮箱同时在多个车队时，每个车队各自一行、各自的到期时间。行按到期排序会
   // 把同一个人的几行拆得很远，所以这里算一个"在册车队数"，在行上给个可点的角标。
-  const multiTeamCounts = useMemo(() => {
+  const memberTeamCounts = useMemo(() => {
     const teamsByEmail = new Map<string, Set<string>>();
     members.forEach((member) => {
       if (member.status === 'kicked') return;
@@ -887,13 +912,18 @@ function MemberList({
     });
     const counts = new Map<string, number>();
     teamsByEmail.forEach((teams, email) => {
-      if (teams.size > 1) counts.set(email, teams.size);
+      counts.set(email, teams.size);
     });
     return counts;
   }, [members]);
 
   const filteredMembers = useMemo(() => {
     const matched = members.filter((member) => {
+      // 角标下钻：精确到这一个邮箱，并且跳过席位/状态筛选——角标上的数字是
+      // 这个邮箱在册的车队数，点开却被筛掉几行的话，数字和行数对不上。
+      if (focusEmail) {
+        return (member.email || '').trim().toLowerCase() === focusEmail;
+      }
       if (!statusFilters.has(member.status)) return false;
       if (seatFilter !== 'all' && normalizeSeatType(member.seat_type) !== seatFilter) {
         return false;
@@ -910,7 +940,7 @@ function MemberList({
         ),
       sortOrder
     );
-  }, [members, search, sortOrder, seatFilter, statusFilters]);
+  }, [members, search, sortOrder, seatFilter, statusFilters, focusEmail]);
 
   const handleUpdateExpiry = async (
     teamId: string,
@@ -992,6 +1022,20 @@ function MemberList({
 
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-slate-800">
+      {focusEmail && (
+        <div className="flex items-center gap-2 border-b border-gray-200 dark:border-slate-800 bg-amber-50 dark:bg-amber-950/30 px-6 py-2 text-xs text-amber-800 dark:text-amber-200">
+          <span>只看邮箱</span>
+          <span className="font-mono font-medium">{focusEmail}</span>
+          <span className="text-amber-700/70 dark:text-amber-300/70">（已忽略搜索与筛选）</span>
+          <button
+            type="button"
+            onClick={() => setFocusEmail(null)}
+            className="ml-auto rounded-full border border-amber-300 dark:border-amber-700/60 px-2 py-px font-medium transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/50"
+          >
+            取消
+          </button>
+        </div>
+      )}
       <table className="w-full text-left text-sm text-gray-700 dark:text-slate-300">
         <thead className="bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-400">
           <tr>
@@ -1027,16 +1071,24 @@ function MemberList({
                     <span className="flex items-center gap-1.5">
                       <span className="font-medium text-gray-700 dark:text-slate-300">{member.team_name}</span>
                       {(() => {
-                        const teamCount = multiTeamCounts.get((member.email || '').trim().toLowerCase());
-                        if (!teamCount) return null;
+                        // 已踢出的行不挂角标：角标数的是"当前在册"的车队数，
+                        // 挂在一条已经不在册的行上只会两边对不上。
+                        if (member.status === 'kicked') return null;
+                        const emailKey = (member.email || '').trim().toLowerCase();
+                        const teamCount = memberTeamCounts.get(emailKey) ?? 0;
+                        const ownerCount = ownerTeamsByEmail.get(emailKey) ?? 0;
+                        if (teamCount <= 1 && ownerCount === 0) return null;
+                        const title = ownerCount
+                          ? `该邮箱在 ${teamCount} 个车队为成员，另有 ${ownerCount} 个车队的 Owner 身份（Owner 行不在本列表中）；点击只看这个邮箱`
+                          : `该邮箱同时在 ${teamCount} 个车队，点击只看这个邮箱`;
                         return (
                           <button
                             type="button"
-                            onClick={() => onSearchChange(member.email)}
-                            title={`该邮箱同时在 ${teamCount} 个车队，点击筛选出全部车队`}
+                            onClick={() => setFocusEmail(emailKey)}
+                            title={title}
                             className="rounded-full border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-px text-[11px] font-medium leading-4 text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/50"
                           >
-                            ×{teamCount} 队
+                            ×{teamCount} 队{ownerCount ? ` · Owner×${ownerCount}` : ''}
                           </button>
                         );
                       })()}
@@ -1324,7 +1376,6 @@ export default function UserManagement() {
         ) : activeTab === 'members' ? (
           <MemberList
             search={search}
-            onSearchChange={setSearch}
             sortOrder={memberSortOrder}
             seatFilter={seatFilter}
             statusFilters={statusFilters}

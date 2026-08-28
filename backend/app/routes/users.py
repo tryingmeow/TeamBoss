@@ -315,6 +315,9 @@ async def list_members(
                 "team_name": team.get("name"),
                 "owner_email": team.get("owner_email"),
                 "owner_name": owner_name,
+                # include_owners=true 时 Owner 行也会进来，调用方要能把它们分出去，
+                # 不能靠 email == owner_email 各自再判一遍。
+                "is_owner": bool(member.get("is_owner")) or email == owner_email,
                 "user_id": user_id,
                 "invite_id": None,
                 "email": member.get("email") or "",
@@ -342,6 +345,7 @@ async def list_members(
                 "team_name": team.get("name"),
                 "owner_email": team.get("owner_email"),
                 "owner_name": owner_name,
+                "is_owner": False,
                 "user_id": "",
                 "invite_id": invite.get("id") or "",
                 "email": email,
@@ -377,6 +381,7 @@ async def list_members(
             "team_name": team.get("name"),
             "owner_email": team.get("owner_email"),
             "owner_name": team.get("owner_email") or "",
+            "is_owner": False,
             "user_id": user_id,
             "invite_id": None,
             "email": email,
