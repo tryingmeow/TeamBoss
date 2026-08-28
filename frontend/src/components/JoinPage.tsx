@@ -19,6 +19,7 @@ import {
   type MembershipInfo,
   type MembershipStatusResult,
   type RedeemAccessTokenResult,
+  type RedeemTeamChoice,
   type RedemptionHistoryItem,
 } from '../api/client';
 
@@ -51,6 +52,8 @@ function historyActionLabel(action: string): string {
     renew_owner_rejected: 'Owner 拒绝',
     renew_permanent_rejected: '永久有效拒绝',
     renew_multi_team_rejected: '多 Team 拒绝',
+    renew_multi_team_prompt: '待选择车队',
+    renew_team_choice_invalid: '车队选择已失效',
     none: '无可用 Team',
   };
   return labels[action] ?? action;
@@ -99,8 +102,7 @@ export default function JoinPage() {
     setStatusResult(null);
   };
 
-  const handleRedeem = async (event: FormEvent) => {
-    event.preventDefault();
+  const submitRedeem = async (teamId?: string) => {
     setError('');
     setRedeemResult(null);
     setStatusResult(null);
@@ -115,6 +117,7 @@ export default function JoinPage() {
       const data = await redeemAccessToken({
         email: email.trim(),
         token: token.trim(),
+        ...(teamId ? { team_id: teamId } : {}),
       });
       setRedeemResult(data);
     } catch (err) {
@@ -122,6 +125,11 @@ export default function JoinPage() {
     } finally {
       setRedeemLoading(false);
     }
+  };
+
+  const handleRedeem = async (event: FormEvent) => {
+    event.preventDefault();
+    await submitRedeem();
   };
 
   const handleQuery = async (event: FormEvent) => {
@@ -226,6 +234,38 @@ export default function JoinPage() {
               <div className="flex items-start gap-2 rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">
                 <AlertCircle size={16} className="mt-0.5 shrink-0" />
                 <span>{error}</span>
+              </div>
+            )}
+
+            {redeemResult?.status === 'team_selection_required' && (
+              <div className="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-800 dark:text-blue-200 space-y-2">
+                <div className="flex items-center gap-2 font-semibold">
+                  <Users size={16} />
+                  请选择要续期的车队
+                </div>
+                <p className="text-xs text-blue-700/80 dark:text-blue-300/80">
+                  {redeemResult.message}
+                </p>
+                <div className="space-y-1.5 pt-0.5">
+                  {redeemResult.choices.map((choice: RedeemTeamChoice) => (
+                    <button
+                      key={choice.team_id}
+                      type="button"
+                      disabled={redeemLoading}
+                      onClick={() => submitRedeem(choice.team_id)}
+                      className="w-full flex items-center justify-between gap-2 rounded-lg border border-blue-200 dark:border-blue-800/50 bg-white/70 dark:bg-[#0f1117]/70 px-3 py-2 text-left transition-colors hover:border-blue-400 hover:bg-white dark:hover:bg-[#0f1117] disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <span className="min-w-0">
+                        <span className="block font-medium truncate">{choice.team_name ?? choice.team_id}</span>
+                        <span className="block text-xs text-blue-700/70 dark:text-blue-300/70">
+                          {choice.status === 'pending' ? '待接受 · ' : ''}
+                          到期 {formatExpiresAt(choice.expires_at)}
+                        </span>
+                      </span>
+                      <ArrowRight size={15} className="shrink-0 opacity-60" />
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 

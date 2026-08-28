@@ -555,7 +555,26 @@ export type RedeemAccessTokenResult =
       email: string;
       expires_at: null;
       message: string;
+    }
+  | {
+      // 同一邮箱在多个车队：续期落到哪个队必须由用户点，不能替他猜。
+      // 兑换码在这一步没有被消耗，用户带上 team_id 重新提交即可。
+      status: 'team_selection_required';
+      action: null;
+      team_id: null;
+      team_name: null;
+      email: string;
+      expires_at: null;
+      message: string;
+      choices: RedeemTeamChoice[];
     };
+
+export interface RedeemTeamChoice {
+  team_id: string;
+  team_name: string | null;
+  status: 'joined' | 'pending';
+  expires_at: string | null;
+}
 
 export interface RedemptionHistoryItem {
   action: string;
@@ -633,6 +652,7 @@ export type MembershipStatusResult =
 export async function redeemAccessToken(data: {
   email: string;
   token: string;
+  team_id?: string;
 }): Promise<RedeemAccessTokenResult> {
   return request<RedeemAccessTokenResult>('/api/self-service/redeem', {
     method: 'POST',

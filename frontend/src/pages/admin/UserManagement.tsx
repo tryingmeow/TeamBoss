@@ -830,12 +830,14 @@ function OwnerList({
 
 function MemberList({
   search,
+  onSearchChange,
   sortOrder,
   seatFilter,
   statusFilters,
   showToast,
 }: {
   search: string;
+  onSearchChange: (value: string) => void;
   sortOrder: SortOrder;
   seatFilter: SeatFilter;
   statusFilters: Set<MemberStatus>;
@@ -870,6 +872,25 @@ function MemberList({
     await updateUserDisplayName(email, systemDisplayName);
     setRefreshTrigger((v) => v + 1);
   };
+
+  // 一个邮箱同时在多个车队时，每个车队各自一行、各自的到期时间。行按到期排序会
+  // 把同一个人的几行拆得很远，所以这里算一个"在册车队数"，在行上给个可点的角标。
+  const multiTeamCounts = useMemo(() => {
+    const teamsByEmail = new Map<string, Set<string>>();
+    members.forEach((member) => {
+      if (member.status === 'kicked') return;
+      const email = (member.email || '').trim().toLowerCase();
+      if (!email || !member.team_id) return;
+      const teams = teamsByEmail.get(email) ?? new Set<string>();
+      teams.add(member.team_id);
+      teamsByEmail.set(email, teams);
+    });
+    const counts = new Map<string, number>();
+    teamsByEmail.forEach((teams, email) => {
+      if (teams.size > 1) counts.set(email, teams.size);
+    });
+    return counts;
+  }, [members]);
 
   const filteredMembers = useMemo(() => {
     const matched = members.filter((member) => {
@@ -1003,7 +1024,23 @@ function MemberList({
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex flex-col items-start gap-1">
-                    <span className="font-medium text-gray-700 dark:text-slate-300">{member.team_name}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="font-medium text-gray-700 dark:text-slate-300">{member.team_name}</span>
+                      {(() => {
+                        const teamCount = multiTeamCounts.get((member.email || '').trim().toLowerCase());
+                        if (!teamCount) return null;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => onSearchChange(member.email)}
+                            title={`该邮箱同时在 ${teamCount} 个车队，点击筛选出全部车队`}
+                            className="rounded-full border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-px text-[11px] font-medium leading-4 text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/50"
+                          >
+                            ×{teamCount} 队
+                          </button>
+                        );
+                      })()}
+                    </span>
                     <span className="text-gray-400 dark:text-slate-500 text-xs">{member.owner_email}</span>
                     <CodexBadge isCodexEnabled={member.is_codex_enabled} />
                   </div>
@@ -1287,6 +1324,7 @@ export default function UserManagement() {
         ) : activeTab === 'members' ? (
           <MemberList
             search={search}
+            onSearchChange={setSearch}
             sortOrder={memberSortOrder}
             seatFilter={seatFilter}
             statusFilters={statusFilters}

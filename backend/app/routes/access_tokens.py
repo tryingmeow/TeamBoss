@@ -108,16 +108,28 @@ class AccessTokenListItem(BaseModel):
 class RedeemAccessTokenRequest(BaseModel):
     email: str
     token: str
+    # 一人多车队时由前端回传用户选中的车队；服务端会重新核对这个车队仍然在
+    # 该邮箱的成员列表里，不信任前端给的值。
+    team_id: Optional[str] = None
+
+
+class RedeemTeamChoice(BaseModel):
+    team_id: str
+    team_name: Optional[str] = None
+    status: Literal["joined", "pending"]
+    expires_at: Optional[str] = None
 
 
 class RedeemAccessTokenResponse(BaseModel):
-    status: Literal["ok", "pending_confirmation"]
+    status: Literal["ok", "pending_confirmation", "team_selection_required"]
     action: Optional[Literal["invited", "renewed_member", "renewed_invite"]] = None
     team_id: Optional[str] = None
     team_name: Optional[str] = None
     email: str
     expires_at: Optional[str]
     message: str
+    # 仅 team_selection_required 时非空：让用户点一个车队再重新提交。
+    choices: list[RedeemTeamChoice] = Field(default_factory=list)
 
 
 class QueryMembershipRequest(BaseModel):
@@ -531,12 +543,25 @@ def _email_status_label(status_value: str) -> str:
     }.get(status_value, status_value)
 
 
-async def _resolve_email_status(email: str, expires_at: Optional[str]) -> dict[str, Any]:
+async def _resolve_email_status(
+    email: str,
+    expires_at: Optional[str],
+    *,
+    team_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """这张兑换码对应邮箱的当前状态。
+
+    ``team_id`` 是这次兑换实际落到的车队。一人多车队时必须按它限定范围，否则
+    跨车队取第一命中会把别的队的状态/到期时间贴到这张码上。
+    """
     if not email:
         return {"status": "unknown", "status_label": _email_status_label("unknown")}
 
+    scoped_team_id = (team_id or "").strip()
     try:
         teams = await load_active_teams()
+        if scoped_team_id:
+            teams = [team for team in teams if team["id"] == scoped_team_id]
         # 公开查询路径，只读缓存不触发实时请求
         existing = await _find_existing_membership(email, teams, use_cache_only=True)
     except Exception:
@@ -567,9 +592,10 @@ async def _resolve_email_status(email: str, expires_at: Optional[str]) -> dict[s
                FROM member_expiry me
                LEFT JOIN teams t ON t.id = me.team_id
                WHERE lower(me.email) = ? AND me.kicked = 1
+                 AND (? = '' OR me.team_id = ?)
                ORDER BY me.kicked_at DESC, me.created_at DESC
                LIMIT 1""",
-            (email.lower(),),
+            (email.lower(), scoped_team_id, scoped_team_id),
         )
         kicked_row = await cursor.fetchone()
     if kicked_row:
@@ -612,7 +638,11 @@ async def _query_token(raw_token: str) -> dict[str, Any]:
         status_value = "pending_confirmation"
     usage = None
     if latest_use:
-        email_status = await _resolve_email_status(latest_use.get("email") or "", latest_use.get("expires_at"))
+        email_status = await _resolve_email_status(
+            latest_use.get("email") or "",
+            latest_use.get("expires_at"),
+            team_id=latest_use.get("team_id"),
+        )
         usage = {
             "email": latest_use.get("email"),
             "email_status": email_status.get("status"),
@@ -1177,19 +1207,51 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="没有可用 Team")
 
         memberships = await _find_all_memberships(email, teams)
+
+        # 一个邮箱同时在多个 Team：续期落到哪个 Team 不能替用户猜——这是花钱的
+        # 操作，猜错等于把时长记到别的队上。让用户自己选，选完的车队在这里按刚拉到
+        # 的实时成员列表重新核对一遍；不匹配（比如选完之前刚被踢）就退回兑换码。
+        selected_team_id = (req.team_id or "").strip()
+        if selected_team_id:
+            chosen = [m for m in memberships if m["team"]["id"] == selected_team_id]
+            if not chosen:
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="renew_team_choice_invalid",
+                    team_id=selected_team_id,
+                    error_message="team_choice_not_found",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="所选车队已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。",
+                )
+            memberships = chosen
+
         if len(memberships) > 1:
-            # 一个邮箱同时在多个 Team：续期该落到哪个 Team 无法替用户猜——
-            # 这是花钱的操作，猜错等于把时长记到别的队上。拒绝并退回兑换码，
-            # 让管理员在后台按正确的 Team 手动处理。
             failure_recorded = await _fail_and_release_token_use(
                 token_use_id,
-                action="renew_multi_team_rejected",
-                error_message="multi_team_membership",
+                action="renew_multi_team_prompt",
+                error_message="team_selection_required",
             )
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="该邮箱同时在多个 Team 中，无法自助续期。兑换码未使用，请联系管理员处理。",
-            )
+            return {
+                "status": "team_selection_required",
+                "action": None,
+                "team_id": None,
+                "team_name": None,
+                "email": email,
+                "expires_at": None,
+                "message": "该邮箱同时在多个车队中，请选择要续期的车队后再提交。兑换码未使用。",
+                "choices": [
+                    {
+                        "team_id": m["team"]["id"],
+                        "team_name": m["team"].get("name"),
+                        "status": "joined" if m["kind"] == "member" else "pending",
+                        "expires_at": m.get("expires_at"),
+                    }
+                    for m in memberships
+                ],
+            }
+
         existing = memberships[0] if memberships else None
         if existing:
             if existing["is_owner"]:

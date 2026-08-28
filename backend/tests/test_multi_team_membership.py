@@ -174,7 +174,8 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
     """自助端的多团队裁决（2026-08-17 用户拍板）：
 
     - 查询：列出邮箱所在的全部 Team，各自的状态和到期时间；
-    - 兑换续期：多 Team 时拒绝并退回兑换码——续到哪个队不能替用户猜。
+    - 兑换续期：多 Team 时返回车队选项让用户自己点，兑换码不消耗；用户带
+      team_id 重新提交后，服务端按实时成员列表重新核对该车队再续期。
     """
 
     async def asyncSetUp(self):
@@ -218,8 +219,7 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "joined")
         self.assertIn("2 个 Team", result["message"])
 
-    async def test_redeem_rejects_multi_team_email_and_returns_the_token(self):
-        raw_token = "atm_multiteamtest"
+    async def _make_token(self, raw_token: str) -> int:
         async with app_database.get_db() as db:
             cursor = await db.execute(
                 """INSERT INTO access_tokens
@@ -229,30 +229,9 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
                 (access_tokens._hash_token(raw_token),),
             )
             await db.commit()
-            token_id = int(cursor.lastrowid)
+            return int(cursor.lastrowid)
 
-        hits = [
-            {"kind": "member", "team": TEAM_A, "user_id": "u-shared", "is_owner": False,
-             "expires_at": "2026-09-01T00:00:00+00:00", "cache_updated_at": None},
-            {"kind": "member", "team": TEAM_B, "user_id": "u-shared", "is_owner": False,
-             "expires_at": "2026-10-01T00:00:00+00:00", "cache_updated_at": None},
-        ]
-        with patch.object(
-            access_tokens, "_check_rate_limit", new=AsyncMock()
-        ), patch.object(
-            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
-        ), patch.object(
-            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=hits)
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                await access_tokens.redeem_access_token(
-                    access_tokens.RedeemAccessTokenRequest(email=EMAIL, token=raw_token),
-                    Mock(),
-                )
-
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("多个 Team", raised.exception.detail)
-
+    async def _token_state(self, token_id: int):
         async with app_database.get_db() as db:
             token_row = await (
                 await db.execute(
@@ -270,12 +249,110 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
                     await db.execute("SELECT COUNT(*) AS n FROM redemption_email_claims")
                 ).fetchone()
             )["n"]
+        return token_row, use_row, claim_count
 
-        # 兑换码退回可重试，占用记录如实标为多团队拒绝，邮箱占位释放。
+    @staticmethod
+    def _hits():
+        return [
+            {"kind": "member", "team": TEAM_A, "user_id": "u-shared", "is_owner": False,
+             "expires_at": "2026-09-01T00:00:00+00:00", "cache_updated_at": None},
+            {"kind": "member", "team": TEAM_B, "user_id": "u-shared", "is_owner": False,
+             "expires_at": "2026-10-01T00:00:00+00:00", "cache_updated_at": None},
+        ]
+
+    async def test_redeem_without_a_choice_asks_which_team_and_returns_the_token(self):
+        raw_token = "atm_multiteamtest"
+        token_id = await self._make_token(raw_token)
+
+        with patch.object(
+            access_tokens, "_check_rate_limit", new=AsyncMock()
+        ), patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=self._hits())
+        ):
+            result = await access_tokens.redeem_access_token(
+                access_tokens.RedeemAccessTokenRequest(email=EMAIL, token=raw_token),
+                Mock(),
+            )
+
+        self.assertEqual(result["status"], "team_selection_required")
+        self.assertEqual(
+            [(c["team_id"], c["status"], c["expires_at"]) for c in result["choices"]],
+            [
+                ("team-a", "joined", "2026-09-01T00:00:00+00:00"),
+                ("team-b", "joined", "2026-10-01T00:00:00+00:00"),
+            ],
+        )
+
+        token_row, use_row, claim_count = await self._token_state(token_id)
+        # 兑换码没有被消耗，占用记录如实留痕，邮箱占位释放，用户可以带 team_id 再提交。
         self.assertEqual(token_row["used_count"], 0)
-        self.assertEqual(use_row["action"], "renew_multi_team_rejected")
+        self.assertEqual(use_row["action"], "renew_multi_team_prompt")
         self.assertEqual(use_row["result"], "failed")
-        self.assertEqual(use_row["error_message"], "multi_team_membership")
+        self.assertEqual(use_row["error_message"], "team_selection_required")
+        self.assertEqual(claim_count, 0)
+
+    async def test_redeem_with_a_chosen_team_renews_only_that_team(self):
+        raw_token = "atm_multiteamchoice"
+        await self._make_token(raw_token)
+        hits = self._hits()
+        renew = AsyncMock(
+            return_value={
+                "existing": hits[1],
+                "action": "renewed_member",
+                "expires_at": "2026-11-01T00:00:00+00:00",
+            }
+        )
+
+        with patch.object(
+            access_tokens, "_check_rate_limit", new=AsyncMock()
+        ), patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=hits)
+        ), patch.object(
+            access_tokens, "_renew_existing_membership", new=renew
+        ):
+            result = await access_tokens.redeem_access_token(
+                access_tokens.RedeemAccessTokenRequest(
+                    email=EMAIL, token=raw_token, team_id="team-b"
+                ),
+                Mock(),
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["team_id"], "team-b")
+        self.assertEqual(result["expires_at"], "2026-11-01T00:00:00+00:00")
+        # 续期只能落到用户点的那个车队。
+        self.assertIs(renew.await_args.args[0], hits[1])
+
+    async def test_redeem_with_a_stale_team_choice_is_rejected_and_returns_the_token(self):
+        raw_token = "atm_multiteamstale"
+        token_id = await self._make_token(raw_token)
+
+        with patch.object(
+            access_tokens, "_check_rate_limit", new=AsyncMock()
+        ), patch.object(
+            access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])
+        ), patch.object(
+            access_tokens, "_find_all_memberships", new=AsyncMock(return_value=self._hits())
+        ), patch.object(
+            access_tokens, "_renew_existing_membership", new=AsyncMock()
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await access_tokens.redeem_access_token(
+                    access_tokens.RedeemAccessTokenRequest(
+                        email=EMAIL, token=raw_token, team_id="team-gone"
+                    ),
+                    Mock(),
+                )
+
+        self.assertEqual(raised.exception.status_code, 409)
+        token_row, use_row, claim_count = await self._token_state(token_id)
+        self.assertEqual(token_row["used_count"], 0)
+        self.assertEqual(use_row["action"], "renew_team_choice_invalid")
+        self.assertEqual(use_row["error_message"], "team_choice_not_found")
         self.assertEqual(claim_count, 0)
 
 
