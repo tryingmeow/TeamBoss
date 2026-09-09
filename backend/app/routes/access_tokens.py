@@ -21,6 +21,8 @@ from ..services.member_expiry import (
     extend_member_expiry,
     get_active_expiry_state,
     record_confirmed_invite_extension,
+    record_uncertain_invite,
+    resolve_invite_barrier,
 )
 from ..services.team_clients import get_proxy_url as _get_proxy_url
 from ..services.seat_capacity import (
@@ -140,6 +142,13 @@ class RedeemAccessTokenResponse(BaseModel):
     message: str
     # 仅 team_selection_required 时非空：让用户点一个车队再重新提交。
     choices: list[RedeemTeamChoice] = Field(default_factory=list)
+
+
+class ResolvePendingConfirmationRequest(BaseModel):
+    # "success"：管理员已核实原 Team 确实有这个成员/邀请，兑换按面额补齐期限，码保持已用。
+    # "released"：管理员已核实原 Team 里既没有成员也没有邀请，把码退回未使用。
+    outcome: Literal["success", "released"]
+    note: Optional[str] = None
 
 
 class QueryMembershipRequest(BaseModel):
@@ -326,6 +335,16 @@ class _TokenConsumption:
 
     def confirm(self) -> None:
         self.confirmed = True
+
+    def revert_for_rejected(self) -> None:
+        """撤回消耗标记。**只有上游明确拒绝时可以调用。**
+
+        ``confirm()`` 在发出远端写操作之前就打上，因为请求一旦发出就无法证明
+        远端没有副作用。而 ``rejected`` 是上游给出的明确否定答复——这一次调用
+        没有创建任何成员或邀请，码理应还给用户（接着换下一个 Team 重试）。
+        超时、断网、取消都不是 ``rejected``，绝不能走这里。
+        """
+        self.confirmed = False
 
 
 async def _reserve_token_use(
@@ -769,14 +788,18 @@ async def _invite_to_available_team(
     *,
     token_use_id: int,
     on_invite_confirmed: Optional[Callable[[], None]] = None,
+    on_invite_rejected: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     """给 email 在第一个有空位的 Team 上发邀请。
 
-    ``on_invite_confirmed``：OpenAI 侧邀请**真正成功、不可回滚**的那一刻会被同步
-    调用一次。调用方用它来标记"这次兑换的消耗已经确定"，而不是等本函数返回——
-    返回之前还有落库、审计日志、缓存刷新、占位、TG 通知这些步骤（其中有网络请求），
-    任何一步抛异常（包括 systemd 停服时的 CancelledError 这类 BaseException）都
-    不能再让兑换码被退回。
+    ``on_invite_confirmed``：在**向 OpenAI 发出这个不可幂等的写操作之前**同步调用
+    一次，把这次兑换标记为已消耗。请求一旦发出就没有任何办法证明远端没有副作用，
+    所以之后的超时、断网、落库失败、systemd 停服时的 CancelledError，一律不再退码
+    ——异常兑换由管理员收尾，绝不能让同一张码有机会用第二次。
+
+    ``on_invite_rejected``：仅在上游给出**明确否定答复**（``rejected``）时调用，
+    把上面的标记撤回。那一次调用确实没有创建任何成员或邀请，码要还给用户，函数
+    接着换下一个 Team 重试。
     """
     last_error: Optional[str] = None
 
@@ -796,6 +819,12 @@ async def _invite_to_available_team(
                 "invite_pending",
                 team_id=team["id"],
             )
+
+            # 跨过这一行就算已消耗：下面这个请求一旦发出，就再也无法证明 OpenAI
+            # 侧没有副作用。明确被拒时下面会撤回。
+            if on_invite_confirmed is not None:
+                on_invite_confirmed()
+
             mutation_task = asyncio.create_task(
                 run_chatgpt_call(client.invite_member, email, "default")
             )
@@ -829,9 +858,28 @@ async def _invite_to_available_team(
                     team_id=team["id"],
                     error_message=error,
                 )
-                if on_invite_confirmed is not None:
-                    # 这里不是确认邀请成功，而是确认这张码绝不能再释放。
-                    on_invite_confirmed()
+                # 结果未定的邀请也必须先在 pending_invite_reconciliations 里立一道
+                # 屏障，否则同步任务会把远端那个对象当成"陌生邀请"，巡逻随后撤销
+                # 我们自己刚发出去的邀请。kind='barrier' + expires_at=None：这行只
+                # 挡巡逻，时长结算走 reconcile_pending_redemptions 的累加语义。
+                try:
+                    await record_uncertain_invite(
+                        team["id"],
+                        "",
+                        email,
+                        None,
+                        source="self_service",
+                        reason=error,
+                        token_use_id=token_use_id,
+                        kind="barrier",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to arm patrol barrier for uncertain invite "
+                        "team=%s token_use_id=%s",
+                        team["id"],
+                        token_use_id,
+                    )
                 try:
                     await log_operation(
                         team["id"],
@@ -856,6 +904,10 @@ async def _invite_to_available_team(
                 }
 
             if mutation_status == "rejected" or "error" in result:
+                # 上游明确拒绝：这一次调用没有任何远端副作用，把消耗标记撤回，
+                # 换下一个 Team 重试；全部失败时 finally 才能把码退给用户。
+                if on_invite_rejected is not None:
+                    on_invite_rejected()
                 last_error = str(result.get("error") or "OpenAI rejected the invite")
                 try:
                     await log_operation(
@@ -876,9 +928,7 @@ async def _invite_to_available_team(
                 continue
 
             # ↓↓↓ 从这一行往后，OpenAI 侧的邀请已经生效且无法回滚 ↓↓↓
-            # 先把"消耗已确认"标记打上，再做任何可能失败的收尾动作。
-            if on_invite_confirmed is not None:
-                on_invite_confirmed()
+            # 消耗标记在发出请求之前就已经打上，这里不需要再补。
 
             # OpenAI 邀请已在上面成功，本地记录必须最终落地，见
             # record_confirmed_invite_extension 注释；它不会抛异常，所以下面这段
@@ -1053,6 +1103,9 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
         )
         latest = await _get_latest_token_use_by_id(token_use_id)
         if latest and latest.get("result") == "success":
+            # 这次兑换已经有终态，屏障可以撤了：这个人现在有正式的 member_expiry
+            # 记录，巡逻不会再把他当陌生对象。
+            await resolve_invite_barrier(token_use_id)
             counts["confirmed"] += 1
             try:
                 await log_operation(
@@ -1126,8 +1179,17 @@ async def _renew_existing_membership(
     email: str,
     grant_duration: str,
     token_use_id: int,
+    *,
+    rescan_teams: Optional[list[dict[str, Any]]] = None,
 ) -> Optional[dict[str, Any]]:
-    """续期前与踢人任务互斥，并在拿锁后重新确认远端成员仍存在。"""
+    """续期前与踢人任务互斥，并在拿锁后重新确认远端成员仍存在。
+
+    ``rescan_teams``：只有"用户没有指定车队"的路径需要传。第一次全量扫描发生在
+    拿锁之前，这中间用户可能又进了第二个车队；续期是花钱操作，落到哪个队不能替
+    用户猜，所以拿锁后要按这份车队列表重新全量扫一遍。扫出多个身份就退回选择提示
+    （返回 ``{"needs_selection": [...]}``）。用户已经显式选过车队的路径不传，继续
+    只复查目标队。
+    """
     team = existing["team"]
     async with member_operation_claim(
         team["id"],
@@ -1143,7 +1205,21 @@ async def _renew_existing_membership(
 
         # 可能在第一次查询后、claim 拿到前已被自动踢出。必须重新拉原 Team；
         # 若已不在，则退出续期分支，后续按新邀请处理。
-        refreshed = await _find_existing_membership(email, [team])
+        if rescan_teams is not None:
+            memberships = await _find_all_memberships(email, rescan_teams)
+            if len(memberships) > 1:
+                return {"needs_selection": memberships}
+            refreshed = memberships[0] if memberships else None
+            if refreshed and refreshed["team"]["id"] != team["id"]:
+                # 原队的身份没了、别处又出现一个。这个 claim 锁的是原队，拿它去写
+                # 另一个队的记录是错的；也不能往下走新邀请分支（人已经在别的队里，
+                # 那会变成第二份成员身份）。按"状态刚变化"退回重试，码不消耗。
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="成员状态刚刚发生变化，请重新查询后再兑换。兑换码未使用。",
+                )
+        else:
+            refreshed = await _find_existing_membership(email, [team])
         if not refreshed:
             return None
         if refreshed["is_owner"]:
@@ -1248,6 +1324,188 @@ async def disable_access_token(token_id: int):
         if cursor.rowcount != 1:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
     return {"status": "ok"}
+
+
+@admin_router.get("/pending-confirmations")
+async def list_pending_confirmations():
+    """所有卡在"结果确认中"的兑换。
+
+    这些是远端邀请结果无法自动判定的兑换：码已锁死，人可能进去了也可能没进去。
+    系统绝不按时间自动退码——只有管理员核实后从下面那个接口给出终态。
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT atu.id, atu.email, atu.action, atu.team_id, atu.user_id,
+                      atu.error_message, atu.created_at,
+                      at.token_prefix, at.grant_expires_in,
+                      t.name AS team_name
+               FROM access_token_uses atu
+               JOIN access_tokens at ON at.id = atu.token_id
+               LEFT JOIN teams t ON t.id = atu.team_id
+               WHERE atu.result = 'uncertain'
+               ORDER BY atu.id DESC"""
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+
+    for row in rows:
+        # 缓存快照只是给管理员的参考，不作为判定依据：真正的核实由管理员在
+        # OpenAI 后台完成，这里绝不替他下结论。
+        snapshot = await get_cached_members(row["team_id"]) if row["team_id"] else None
+        row["seen_in_cached_snapshot"] = _snapshot_contains_email(snapshot, row["email"])
+        row["cache_updated_at"] = (snapshot or {}).get("updated_at")
+    return rows
+
+
+@admin_router.post("/pending-confirmations/{token_use_id}/resolve")
+async def resolve_pending_confirmation(
+    token_use_id: int, req: ResolvePendingConfirmationRequest
+):
+    """给一笔"结果确认中"的兑换一个终态。管理员专用，永远不会自动触发。"""
+    attempt = await _get_latest_token_use_by_id(token_use_id)
+    if not attempt:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="兑换记录不存在")
+    if attempt.get("result") != "uncertain":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"这笔兑换当前不是结果确认中（{attempt.get('result')}），无需处理",
+        )
+
+    team_id = attempt.get("team_id") or ""
+    email = attempt.get("email") or ""
+    if not team_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="这笔兑换没有记录目标 Team，无法收尾，请查审计日志人工处理",
+        )
+
+    token_row = await _get_token_row_by_use(token_use_id)
+    grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
+
+    if req.outcome == "success":
+        # 累加语义：绝不覆盖成员已有的到期时间。
+        expires_iso = await record_confirmed_invite_extension(
+            team_id,
+            attempt.get("user_id") or "",
+            email,
+            grant_duration,
+            source="self_service",
+            token_use_id=token_use_id,
+            token_action="invited",
+        )
+        await resolve_invite_barrier(token_use_id)
+        await log_operation(
+            team_id,
+            "self_service_invite_admin_confirmed",
+            email,
+            f"token_use_id={token_use_id}, expires_at={expires_iso}, note={req.note or ''}",
+            "success",
+            None,
+            "admin",
+        )
+        return {"status": "ok", "outcome": "success", "expires_at": expires_iso}
+
+    # outcome == "released"：把码退回未使用。
+    # 安全网：本地记录或实时名单里只要还看得见这个人，就不许退——退码等于宣布
+    # 远端什么都没发生，而这两处任何一处看得见都直接推翻了这个判断。
+    if await get_active_expiry_state(team_id, attempt.get("user_id") or "", email) != "unmanaged":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="本地已有这个成员的授权记录，不能退码；请改选「确认成功」",
+        )
+    teams = await load_active_teams()
+    team = next((t for t in teams if t["id"] == team_id), None)
+    if team is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="原 Team 当前不可用，无法核实远端状态，暂不能退码",
+        )
+    proxy_url = await _get_proxy_url(team.get("proxy_id"))
+    client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=proxy_url)
+    try:
+        snapshot = await fetch_and_cache_members(team_id, client)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="暂时拉不到原 Team 的实时名单，无法确认远端确实没有这个人，暂不能退码",
+        ) from exc
+    if _snapshot_contains_email(snapshot, email):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="原 Team 里仍能看到这个成员或邀请，不能退码；请改选「确认成功」",
+        )
+
+    released = await _release_uncertain_token_use(
+        token_use_id,
+        error_message=f"admin_released: {req.note or 'verified absent on OpenAI side'}",
+    )
+    if not released:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="这笔兑换刚刚被其他流程收尾了，请刷新后再看",
+        )
+    # 屏障必须最后撤：撤掉之后巡逻才可以按常规规则处理远端可能残留的对象。
+    await resolve_invite_barrier(token_use_id)
+    await log_operation(
+        team_id,
+        "self_service_invite_admin_released",
+        email,
+        f"token_use_id={token_use_id}, note={req.note or ''}",
+        "success",
+        None,
+        "admin",
+    )
+    return {"status": "ok", "outcome": "released"}
+
+
+async def _get_token_row_by_use(token_use_id: int) -> dict[str, Any]:
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT at.* FROM access_tokens at
+               JOIN access_token_uses atu ON atu.token_id = at.id
+               WHERE atu.id = ?""",
+            (token_use_id,),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="兑换码不存在")
+    return dict(row)
+
+
+async def _release_uncertain_token_use(token_use_id: int, *, error_message: str) -> bool:
+    """把一笔"结果确认中"的兑换退回未使用。**只允许管理员显式核实后调用。**
+
+    与 ``_fail_and_release_token_use`` 的区别只有一个：那个函数刻意拒绝释放
+    ``uncertain``，因为任何自动流程都无权在结果不明时退码。这里是人工出口。
+    """
+    async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT token_id, result FROM access_token_uses WHERE id = ?",
+            (token_use_id,),
+        )
+        row = await cursor.fetchone()
+        if not row or row["result"] != "uncertain":
+            await db.rollback()
+            return False
+        await db.execute(
+            """UPDATE access_token_uses
+               SET action = 'redeem_admin_released', result = 'failed',
+                   error_message = ?, expires_at = NULL
+               WHERE id = ? AND result = 'uncertain'""",
+            (error_message, token_use_id),
+        )
+        await db.execute(
+            "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
+            (token_use_id,),
+        )
+        await db.execute(
+            """UPDATE access_tokens
+               SET used_count = 0, last_used_at = NULL
+               WHERE id = ? AND used_count = 1""",
+            (row["token_id"],),
+        )
+        await db.commit()
+        return True
 
 
 @public_router.post("/redeem", response_model=RedeemAccessTokenResponse)
@@ -1361,6 +1619,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                     email,
                     grant_duration,
                     token_use_id,
+                    rescan_teams=None if selected_team_id else teams,
                 )
             except PermanentMembershipError:
                 # 当前成员没有到期时间（永久）。给他续一段有限时长只会是降级，
@@ -1376,6 +1635,27 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                     status_code=status.HTTP_409_CONFLICT,
                     detail="该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。",
                 )
+            if renewed and renewed.get("needs_selection"):
+                # 拿锁后重扫才出现的第二个车队：与拿锁前发现多队走完全一样的出口。
+                choices = await _build_team_choices(email, renewed["needs_selection"])
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="renew_multi_team_prompt",
+                    error_message=None,
+                    result_value="notice",
+                    clear_expires_at=True,
+                )
+                return {
+                    "status": "team_selection_required",
+                    "action": None,
+                    "team_id": None,
+                    "team_name": None,
+                    "email": email,
+                    "expires_at": None,
+                    "message": "该邮箱同时在多个车队中，请选择要续期的车队后再提交。兑换码未使用。",
+                    "choices": choices,
+                }
+
             if renewed:
                 existing = renewed["existing"]
                 action = renewed["action"]
@@ -1433,6 +1713,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             teams,
             token_use_id=token_use_id,
             on_invite_confirmed=consumption.confirm,
+            on_invite_rejected=consumption.revert_for_rejected,
         )
         if joined["status"] == "pending_confirmation":
             return {

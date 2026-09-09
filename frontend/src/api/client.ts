@@ -1091,3 +1091,33 @@ export async function disableAccessToken(tokenId: number): Promise<{ status: str
     method: 'DELETE',
   });
 }
+
+export interface PendingConfirmationItem {
+  id: number;
+  email: string;
+  action: string | null;
+  team_id: string | null;
+  team_name: string | null;
+  user_id: string | null;
+  error_message: string | null;
+  created_at: string;
+  token_prefix: string;
+  grant_expires_in: string;
+  seen_in_cached_snapshot: boolean;
+  cache_updated_at: string | null;
+}
+
+export async function listPendingConfirmations(): Promise<PendingConfirmationItem[]> {
+  return request<PendingConfirmationItem[]>('/api/access-tokens/pending-confirmations');
+}
+
+export async function resolvePendingConfirmation(
+  tokenUseId: number,
+  outcome: 'success' | 'released',
+  note?: string,
+): Promise<{ status: string; outcome: string; expires_at?: string | null }> {
+  return request(`/api/access-tokens/pending-confirmations/${tokenUseId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ outcome, note }),
+  });
+}

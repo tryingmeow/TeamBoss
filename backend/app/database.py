@@ -248,13 +248,30 @@ async def init_database():
                 reason TEXT,
                 resolved INTEGER DEFAULT 0,
                 resolved_at TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                token_use_id INTEGER,
+                kind TEXT DEFAULT 'backfill'
             )
         """)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_pending_invite_reconciliations_resolved "
             "ON pending_invite_reconciliations(resolved, created_at)"
         )
+
+        # migrate: 兑换凭据与行类型。
+        # ``token_use_id`` 让这条兜底行和它对应的那次兑换绑定，使"调度器回填"与
+        # "兑换对账"共用同一张一次性凭据——两条恢复路径不会把同一张码的时长加两次。
+        # ``kind``：'backfill' 是原有语义（远端邀请已确认、本地落库失败，需要按
+        # 行内 expires_at 回填）；'barrier' 是结果未定的自助邀请只借这张表挡住巡逻，
+        # 调度器不得据此写任何到期时间，结算一律走 reconcile_pending_redemptions。
+        for stmt in (
+            "ALTER TABLE pending_invite_reconciliations ADD COLUMN token_use_id INTEGER",
+            "ALTER TABLE pending_invite_reconciliations ADD COLUMN kind TEXT DEFAULT 'backfill'",
+        ):
+            try:
+                await db.execute(stmt)
+            except Exception:
+                pass
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS proxies (

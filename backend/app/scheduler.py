@@ -317,10 +317,14 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
     the target is visible in a successful live snapshot; until then the row
     remains an explicit patrol safety barrier.
     """
+    # kind='barrier' 的行只是"结果未定的自助邀请"借这张表挡巡逻：它的 expires_at
+    # 是 NULL，按下面的回填语义会被当成永久直接落库。这类行的时长结算只能走
+    # access_tokens.reconcile_pending_redemptions 的累加语义，这里必须原样留着。
     rows = conn.execute(
-        """SELECT id, user_id, email, expires_at, source
+        """SELECT id, user_id, email, expires_at, source, token_use_id
            FROM pending_invite_reconciliations
            WHERE team_id = ? AND resolved = 0
+             AND COALESCE(kind, 'backfill') != 'barrier'
            ORDER BY id""",
         (team_id,),
     ).fetchall()
@@ -407,6 +411,7 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                 ),
             )
         else:
+            resolved_expires = row["expires_at"]
             auto_kick = 1 if row["expires_at"] else 0
             conn.execute(
                 """INSERT INTO member_expiry
@@ -423,6 +428,24 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                     source,
                     now,
                 ),
+            )
+
+        # 这条兜底行对应的那次兑换必须在同一个事务里结清。否则它仍是
+        # pending/uncertain，reconcile_pending_redemptions 会再累加一次时长——
+        # 同一张码被两条恢复路径各加一遍。凭据一次性：WHERE 只认还没结清的行。
+        token_use_id = row["token_use_id"]
+        if token_use_id is not None:
+            conn.execute(
+                """UPDATE access_token_uses
+                   SET action = COALESCE(NULLIF(action, ''), 'invited'),
+                       team_id = ?, user_id = ?, expires_at = ?,
+                       result = 'success', error_message = NULL
+                   WHERE id = ? AND result IN ('pending', 'uncertain')""",
+                (team_id, live_user_id, resolved_expires, token_use_id),
+            )
+            conn.execute(
+                "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
+                (token_use_id,),
             )
 
         conn.execute(

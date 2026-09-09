@@ -30,7 +30,7 @@ _EXTEND_WRITE_ATTEMPTS = 3
 # 定位"当前这个人在这个 Team 里还没被踢掉的那条记录"。与 upsert_member_expiry
 # 里的子查询、scheduler 的检测逻辑逐字一致，避免两处选到不同的行。
 _ACTIVE_EXPIRY_ROW_SQL = """
-    SELECT id, expires_at
+    SELECT id, expires_at, source
     FROM member_expiry
     WHERE team_id = ?
       AND kicked = 0
@@ -57,11 +57,15 @@ async def get_active_expiry_state(team_id: str, user_id: str, email: str) -> str
     * ``"dated"``      —— 有未踢出的记录且带到期时间：续期就是往后加。
     * ``"permanent"``  —— 有未踢出的记录但 expires_at 为 NULL：续期会抛
       ``PermanentMembershipError``。
-    * ``"unmanaged"``  —— 本地没有未踢出的记录：续期会新建一条
-      ``auto_kick=1`` 的记录，把原本不受自动踢人管的人变成到期即踢。
+    * ``"unmanaged"``  —— 本地没有未踢出的记录，或者只有一条 ``source='detected'``
+      且没有到期时间的记录：续期会给它装上到期时间和 ``auto_kick=1``。
 
     展示层必须能区分后两者：两者的 ``expires_at`` 都是 NULL，但一个不能续、
     另一个一续就会给人装上踢人倒计时。
+
+    ``detected + NULL`` 不是永久授权，只是"巡逻发现了一个不是本系统邀请进来的人，
+    还没有任何授权"。把它当永久会拒收一张本该正常使用的兑换码，而巡逻那边同时仍
+    把这个人当未授权对象——两个模块对同一行的理解必须一致。
     """
     normalized_email = (email or "").strip().lower()
     normalized_user_id = user_id or ""
@@ -83,7 +87,9 @@ async def get_active_expiry_state(team_id: str, user_id: str, email: str) -> str
 
     if row is None:
         return "unmanaged"
-    return "permanent" if row["expires_at"] is None else "dated"
+    if row["expires_at"] is not None:
+        return "dated"
+    return "unmanaged" if (row["source"] or "") == "detected" else "permanent"
 
 
 def expires_in_to_datetime(expires_in: str) -> Optional[datetime]:
@@ -276,7 +282,10 @@ async def extend_member_expiry(
                 await db.commit()
                 return None
 
-            if current_raw is None:
+            # detected + NULL 不是永久授权（见 get_active_expiry_state）：这里必须
+            # 落到下面的常规分支，给它写上到期时间和 auto_kick=1，而不是拒收兑换码
+            # （keep_permanent=False）或核销后原样保留永久（keep_permanent=True）。
+            if current_raw is None and (row["source"] or "") != "detected":
                 if not keep_permanent:
                     await db.rollback()
                     raise PermanentMembershipError(
@@ -379,13 +388,26 @@ async def _insert_pending_invite_reconciliation(
     expires_iso: Optional[str],
     source: str,
     reason: str,
+    *,
+    token_use_id: Optional[int] = None,
+    kind: str = "backfill",
 ) -> None:
+    """写一条巡逻屏障行。
+
+    ``kind='backfill'``：远端邀请已确认成功、本地 member_expiry 落库失败，调度器
+    看到人出现后按行内 ``expires_at`` 回填，并顺带结清 ``token_use_id`` 这次兑换。
+
+    ``kind='barrier'``：远端结果未定的自助邀请，只借这张表挡住巡逻撤销。调度器
+    绝不能据此写到期时间——结算必须走 ``reconcile_pending_redemptions`` 的累加
+    语义，否则同一张码会被两条恢复路径各加一次时长。
+    """
     now = utc_now().isoformat()
     async with get_db() as db:
         await db.execute(
             """INSERT INTO pending_invite_reconciliations
-               (team_id, user_id, email, expires_at, source, reason, resolved, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, 0, ?)""",
+               (team_id, user_id, email, expires_at, source, reason, resolved, created_at,
+                token_use_id, kind)
+               VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
             (
                 team_id,
                 user_id or "",
@@ -394,6 +416,8 @@ async def _insert_pending_invite_reconciliation(
                 source,
                 reason,
                 now,
+                token_use_id,
+                kind,
             ),
         )
         await db.commit()
@@ -407,8 +431,15 @@ async def record_uncertain_invite(
     *,
     source: str = "system",
     reason: str = "remote invite result uncertain",
+    token_use_id: Optional[int] = None,
+    kind: str = "backfill",
 ) -> None:
-    """为结果不确定的邀请建立巡逻安全屏障，等待实时快照确认。"""
+    """为结果不确定的邀请建立巡逻安全屏障，等待实时快照确认。
+
+    自助兑换必须传 ``kind='barrier'`` 且 ``expires_at=None``：这条行只用来挡住
+    巡逻，时长结算走 ``reconcile_pending_redemptions`` 的累加语义。若按
+    ``backfill`` 写入，调度器会把 NULL 到期时间当成"永久"直接落库。
+    """
     await _insert_pending_invite_reconciliation(
         team_id,
         user_id,
@@ -416,7 +447,26 @@ async def record_uncertain_invite(
         expires_at.isoformat() if expires_at is not None else None,
         source,
         reason,
+        token_use_id=token_use_id,
+        kind=kind,
     )
+
+
+async def resolve_invite_barrier(token_use_id: int) -> None:
+    """结清某次兑换立下的巡逻屏障行。
+
+    只在这次兑换已经有终态（远端确认成功、或管理员判定失败退码）之后调用：屏障
+    在这之前是唯一挡住巡逻撤销我们自己那个邀请的东西。
+    """
+    async with get_db() as db:
+        await db.execute(
+            """UPDATE pending_invite_reconciliations
+               SET resolved = 1, resolved_at = ?
+               WHERE token_use_id = ? AND resolved = 0
+                 AND COALESCE(kind, 'backfill') = 'barrier'""",
+            (utc_now().isoformat(), token_use_id),
+        )
+        await db.commit()
 
 
 async def record_confirmed_invite(
@@ -499,6 +549,7 @@ async def record_confirmed_invite_extension(
         # 时长不少于这次购买的时长。
         _nominal_expiry_iso(duration),
         source,
+        token_use_id,
     )
 
 
@@ -517,6 +568,7 @@ async def _persist_confirmed_membership(
     email: str,
     expires_iso: Optional[str],
     source: str,
+    token_use_id: Optional[int] = None,
 ) -> Optional[str]:
     """执行 ``writer``（本地成员记录写入），带重试 + 持久化兜底，且永不抛异常。
 
@@ -551,6 +603,7 @@ async def _persist_confirmed_membership(
     try:
         await _insert_pending_invite_reconciliation(
             team_id, user_id, email, expires_iso, source, error_text,
+            token_use_id=token_use_id,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.error(

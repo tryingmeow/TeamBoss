@@ -214,11 +214,29 @@ async def get_pending_watches() -> list[dict]:
 # ── 实时拉取并写缓存（供 GET /members 首次调用） ─────────────────────────────
 
 def _api_items(data: dict, *fallback_keys: str) -> list:
+    """取出上游返回里的列表字段，取不到就失败关闭。
+
+    空 Team 返回的是 ``{"items": []}``——列表存在、只是没有元素。而 ``{}``、
+    ``{"items": null}``、被截断的 JSON 里根本没有这个字段：那是"没拿到名单"，
+    不是"名单为空"。以前这里返回 ``[]``，上层据此判定"这个邮箱不在任何 Team"，
+    可能拿用户花钱的兑换码把人邀请到另一个 Team 去。宁可 502 让他重试。
+    """
+    if not isinstance(data, dict):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Upstream returned a non-object response",
+        )
     for key in ("items",) + fallback_keys:
         items = data.get(key)
         if isinstance(items, list):
             return items
-    return []
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=(
+            "Upstream response has no usable list field "
+            f"(expected one of {('items',) + fallback_keys})"
+        ),
+    )
 
 
 def _raise_fetch_error(kind: str, data: dict) -> None:
@@ -253,11 +271,17 @@ async def _fetch_all_pages(method, kind: str, *item_keys: str, limit: int = 100)
 
         offset += limit
     else:
-        logger.warning(
-            "%s 分页在 %d 页后仍未结束，已停止翻页（已取 %d 条）",
+        # 翻到硬上限还没结束 = 这份名单是截断的。返回它等于对上层撒谎说"就这些人"，
+        # 而"人不在名单里"会被当作可以另外发邀请的依据。同样失败关闭。
+        logger.error(
+            "%s 分页在 %d 页后仍未结束，判定为不完整名单（已取 %d 条）",
             kind,
             MAX_FETCH_PAGES,
             len(items),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch {kind}: pagination did not terminate",
         )
 
     return items
