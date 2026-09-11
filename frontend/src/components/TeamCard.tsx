@@ -154,6 +154,9 @@ export default function TeamCard({
   const isAuthRejected = team.auth_state === 'rejected';
   const authBlocked = isAuthExpired || isAuthRejected;
   const authBlockedSince = brokenForLabel(team.auth_state_since);
+  // 连续 24 小时同步失败后后端已经停发定时请求，只按 6 小时探活一次。
+  const isSyncSuspended = Boolean(team.sync_suspended_at);
+  const syncFailingFor = brokenForLabel(team.sync_failing_since);
   const isSubscriptionExpired = team.subscription_status === 'expired';
   const isSubscriptionStale = team.subscription_status === 'stale';
   const isNonRenewing = team.subscription_status === 'nonrenewing';
@@ -375,6 +378,11 @@ export default function TeamCard({
                 需重新导入 session
                 {!isAuthExpired && authBlockedSince && ` · ${authBlockedSince}`}
               </div>
+              {isSyncSuspended && (
+                <div className="text-xs text-gray-500 dark:text-gray-500">
+                  已停止定时同步 · 每 6 小时探活一次
+                </div>
+              )}
               <div className="break-words text-base font-bold text-gray-900 dark:text-gray-100">
                 {team.name}
                 {team.remark && (
@@ -644,6 +652,14 @@ export default function TeamCard({
                 }>
                   {isSubscriptionExpired ? '订阅已到期' : isSubscriptionStale ? '数据未同步' : isNonRenewing ? '到期不续费' : '正常续费'}
                 </span>
+                {isSyncSuspended && !authBlocked && (
+                  <span
+                    className="ml-2 rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400"
+                    title={`连续同步失败${syncFailingFor ? ` · ${syncFailingFor}` : ''}，已停止定时请求，每 6 小时探活一次`}
+                  >
+                    同步已暂停
+                  </span>
+                )}
               </div>
             </div>
           </div>

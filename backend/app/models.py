@@ -49,6 +49,9 @@ class TeamResponse(BaseModel):
     # 'ok' | 'rejected'。rejected = 会话仍应答但交回的 token 已被上游吊销。
     auth_state: Literal['ok', 'rejected'] = 'ok'
     auth_state_since: Optional[str] = None
+    # 定时同步挂起：连续失败满 24 小时后停止定时请求，只按低频探活。
+    sync_failing_since: Optional[str] = None
+    sync_suspended_at: Optional[str] = None
     cached_member_emails: List[str] = []
 
 

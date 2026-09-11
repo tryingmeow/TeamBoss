@@ -56,6 +56,93 @@ def _display_sync_due(display_synced_at: str | None, now: datetime) -> bool:
     return (now - last) >= timedelta(hours=DISPLAY_SYNC_INTERVAL_HOURS)
 
 
+# 连续同步失败达到这个小时数，就把这个 Team 的定时同步挂起：不再每 15 分钟
+# 打一轮 chatgpt.com 请求，也不再重复播报同一条失败。上游把 token 吊销以后，
+# 重试改变不了任何结果，只是每天上千次注定 401 的请求和上百条重复告警。
+SYNC_FAILURE_SUSPEND_HOURS = 24
+
+# 挂起期间的探活间隔。完全不打请求就永远发现不了上游恢复，所以保留这一根
+# 最低频的探针：恢复正常的那一轮会自动解除挂起。
+SYNC_SUSPENDED_PROBE_HOURS = 6
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _sync_probe_due(sync_probe_at: str | None, now: datetime) -> bool:
+    """挂起的 Team 这一轮要不要探活。解析不了的时间戳一律当作到期。"""
+    last = _parse_ts(sync_probe_at)
+    if last is None:
+        return True
+    return (now - last) >= timedelta(hours=SYNC_SUSPENDED_PROBE_HOURS)
+
+
+def _record_team_sync_outcome(
+    conn,
+    team_id: str,
+    *,
+    ok: bool,
+    now: datetime,
+    failing_since: str | None,
+    suspended_at: str | None,
+    last_full_sync_at: str | None,
+) -> str | None:
+    """记录这一轮这个 Team 的同步成败，返回 'suspended' / 'resumed' / None。
+
+    失败起点优先用已有的 ``sync_failing_since``；没有就回填 ``last_full_sync_at``
+    ——那就是"最后一次全部接口都成功"的时刻，本来就是这条连续失败的起点。少了
+    这一步，升级上线会把一个已经坏了半个月的 Team 的计时器归零，再白等一天。
+    """
+    try:
+        if ok:
+            if failing_since or suspended_at:
+                conn.execute(
+                    "UPDATE teams SET sync_failing_since = NULL, sync_suspended_at = NULL, "
+                    "sync_probe_at = NULL WHERE id = ?",
+                    (team_id,),
+                )
+                conn.commit()
+                return "resumed" if suspended_at else None
+            return None
+
+        if suspended_at:
+            conn.execute(
+                "UPDATE teams SET sync_probe_at = ? WHERE id = ?",
+                (now.isoformat(), team_id),
+            )
+            conn.commit()
+            return None
+
+        since = _parse_ts(failing_since) or _parse_ts(last_full_sync_at) or now
+        if (now - since) >= timedelta(hours=SYNC_FAILURE_SUSPEND_HOURS):
+            conn.execute(
+                "UPDATE teams SET sync_failing_since = ?, sync_suspended_at = ?, "
+                "sync_probe_at = ? WHERE id = ?",
+                (since.isoformat(), now.isoformat(), now.isoformat(), team_id),
+            )
+            conn.commit()
+            return "suspended"
+
+        conn.execute(
+            "UPDATE teams SET sync_failing_since = COALESCE(sync_failing_since, ?) WHERE id = ?",
+            (since.isoformat(), team_id),
+        )
+        conn.commit()
+        return None
+    except sqlite3.OperationalError:
+        # 迁移还没跑到的旧库：同步挂起只是节流，不该让同步流程本身失败。
+        return None
+
+
 def _merge_team_cached_data(
     raw: str | None,
     overview: dict,
@@ -670,11 +757,17 @@ def auto_kick_job():
 def data_sync_job():
     sync_completed = False
     failed_team_ids: set[str] = set()
+    # 已挂起的 Team：本轮根本没打请求，既不算失败（不能一直压着摘要不发），
+    # 也不能让 patrol 拿着冻住的快照去判超员。
+    suspended_team_ids: set[str] = set()
+    newly_suspended: list[tuple[str, str]] = []  # (team_id, team_name)
+    resumed_from_suspension: list[tuple[str, str]] = []
     teams_with_overview_failures: list[tuple[str, str, list[str]]] = []  # (team_id, team_name, failed_keys)
     try:
         conn = _get_sync_db()
         cursor = conn.execute(
-            "SELECT id, name, access_token, device_id, proxy_id, country_code, display_synced_at "
+            "SELECT id, name, access_token, device_id, proxy_id, country_code, display_synced_at, "
+            "sync_failing_since, sync_suspended_at, sync_probe_at, last_full_sync_at "
             "FROM teams WHERE status = 'active'"
         )
         teams = cursor.fetchall()
@@ -684,6 +777,17 @@ def data_sync_job():
             team_name = team["name"] or team_id
             access_token = team["access_token"]
             device_id = team["device_id"]
+
+            failing_since = team["sync_failing_since"]
+            suspended_at = team["sync_suspended_at"]
+            last_full_sync_at = team["last_full_sync_at"]
+            round_ok = False
+
+            # 挂起中且没到探活点：这一轮对这个 Team 一个请求都不发。
+            if suspended_at and not _sync_probe_due(team["sync_probe_at"], datetime.now(timezone.utc)):
+                suspended_team_ids.add(team_id)
+                continue
+
             proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
 
             try:
@@ -1149,6 +1253,8 @@ def data_sync_job():
                         "chatgpt_auth",
                         source="scheduled_data_sync",
                     )
+                    # 成员快照拉到了，overview 也一个没漏，才算这一轮成功。
+                    round_ok = not overview_failures
                 else:
                     failed_team_ids.add(team_id)
                     sync_error = "; ".join(
@@ -1174,6 +1280,25 @@ def data_sync_job():
                         source="scheduled_data_sync",
                     )
 
+                event = _record_team_sync_outcome(
+                    conn,
+                    team_id,
+                    ok=round_ok,
+                    now=datetime.now(timezone.utc),
+                    failing_since=failing_since,
+                    suspended_at=suspended_at,
+                    last_full_sync_at=last_full_sync_at,
+                )
+                if event == "suspended":
+                    newly_suspended.append((team_id, team_name))
+                elif event == "resumed":
+                    resumed_from_suspension.append((team_id, team_name))
+                if suspended_at and event != "resumed":
+                    # 探活失败只是"还没好"，不算本轮同步失败：否则每 6 小时
+                    # 一次的探针会把日报摘要一并掐掉。
+                    failed_team_ids.discard(team_id)
+                    suspended_team_ids.add(team_id)
+
             except Exception as e:
                 try:
                     conn.rollback()
@@ -1187,27 +1312,65 @@ def data_sync_job():
                     e,
                     source="scheduled_data_sync",
                 )
+                if _record_team_sync_outcome(
+                    conn,
+                    team_id,
+                    ok=False,
+                    now=datetime.now(timezone.utc),
+                    failing_since=failing_since,
+                    suspended_at=suspended_at,
+                    last_full_sync_at=last_full_sync_at,
+                ) == "suspended":
+                    newly_suspended.append((team_id, team_name))
+                if suspended_at:
+                    failed_team_ids.discard(team_id)
+                    suspended_team_ids.add(team_id)
 
         conn.close()
-        succeeded = len(teams) - len(failed_team_ids)
+        skipped = len(suspended_team_ids)
+        succeeded = len(teams) - len(failed_team_ids) - skipped
+        # 挂起的 Team 不进这个判定：它本来就是"已知坏了、已经停手"的状态，
+        # 再让它一直把整轮标成失败，日报摘要会跟着永远发不出去。
         sync_completed = not failed_team_ids
         _log_operation_sync(
             None,
             "data_sync",
             None,
-            f"Synced {succeeded}/{len(teams)} teams; failed={len(failed_team_ids)}",
+            f"Synced {succeeded}/{len(teams)} teams; failed={len(failed_team_ids)}; "
+            f"suspended={skipped}",
             "success" if sync_completed else "failed",
             ",".join(sorted(failed_team_ids)) or None,
         )
 
+        for team_id, _team_name in newly_suspended:
+            _log_operation_sync(
+                team_id,
+                "data_sync_suspended",
+                None,
+                f"sync suspended after {SYNC_FAILURE_SUSPEND_HOURS}h of continuous failure; "
+                f"probing every {SYNC_SUSPENDED_PROBE_HOURS}h",
+                "success",
+            )
+        for team_id, _team_name in resumed_from_suspension:
+            _log_operation_sync(
+                team_id, "data_sync_resumed", None, "sync recovered; suspension lifted", "success",
+            )
+
+        # 挂起中的 Team 不再重复播报同一条失败：它的失败已经用「同步已暂停」
+        # 播报过一次，恢复时也会播报一次，中间的每一轮都是同一句废话。
+        suspended_ids = suspended_team_ids | {tid for tid, _ in newly_suspended}
+        pending_failure_alerts = [
+            item for item in teams_with_overview_failures if item[0] not in suspended_ids
+        ]
+
         # Send consolidated Telegram notification for overview sync failures
-        if teams_with_overview_failures:
+        if pending_failure_alerts:
             try:
                 from .services.tg_notify import notify_admins_sync
                 from .tg_format import detail_card
 
                 rows = ["🔴 定时数据同步检测到部分数据源失败："]
-                for team_id, team_name, failures in teams_with_overview_failures:
+                for team_id, team_name, failures in pending_failure_alerts:
                     failed_sources = ", ".join(failures)
                     rows.append(f"• {team_name} (id: {team_id}): {failed_sources}")
 
@@ -1217,6 +1380,38 @@ def data_sync_job():
                 _log_operation_sync(
                     None,
                     "overview_failures_notification",
+                    None,
+                    None,
+                    "failed",
+                    str(e),
+                )
+
+        if newly_suspended or resumed_from_suspension:
+            try:
+                from .services.tg_notify import notify_admins_sync
+                from .tg_format import detail_card
+
+                if newly_suspended:
+                    rows = [
+                        f"连续 {SYNC_FAILURE_SUSPEND_HOURS} 小时同步失败，已停止定时请求："
+                    ]
+                    for team_id, team_name in newly_suspended:
+                        rows.append(f"• {team_name} (id: {team_id})")
+                    rows.append(
+                        f"每 {SYNC_SUSPENDED_PROBE_HOURS} 小时探活一次；"
+                        "重新导入会话或手动同步成功即恢复。"
+                    )
+                    notify_admins_sync(detail_card("⏸️ 同步已暂停", rows))
+
+                if resumed_from_suspension:
+                    rows = ["以下 Team 同步已恢复，定时请求继续："]
+                    for team_id, team_name in resumed_from_suspension:
+                        rows.append(f"• {team_name} (id: {team_id})")
+                    notify_admins_sync(detail_card("✅ 同步已恢复", rows))
+            except Exception as e:
+                _log_operation_sync(
+                    None,
+                    "sync_suspension_notification",
                     None,
                     None,
                     "failed",
@@ -1241,7 +1436,12 @@ def data_sync_job():
         ).fetchone()
         patrol_conn.close()
         patrol_live = bool(kick_row and kick_row["value"] == "1")
-        run_patrol(dry_run=not patrol_live, skip_team_ids=failed_team_ids)
+        # 挂起的 Team 这一轮没刷新过快照，和同步失败一样必须跳过巡逻：
+        # 拿冻住的席位数和成员名单去判超员，会踢错人。
+        run_patrol(
+            dry_run=not patrol_live,
+            skip_team_ids=failed_team_ids | suspended_team_ids,
+        )
     except Exception as e:
         _log_operation_sync(None, "patrol_job_error", None, None, "failed", str(e))
 

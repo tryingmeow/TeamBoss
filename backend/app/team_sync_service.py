@@ -265,6 +265,11 @@ async def _write_team_sync_cache(
         # All overview sub-interfaces succeeded
         updates["last_full_sync_at"] = now_iso
         updates["last_sync_partial_failures"] = None
+        # 手动同步全绿 = 这个 Team 又能用了，解除定时同步挂起。手动同步是
+        # 挂起之后唯一不受节流限制的入口，也就是界面上的那个"恢复"动作。
+        updates["sync_failing_since"] = None
+        updates["sync_suspended_at"] = None
+        updates["sync_probe_at"] = None
     else:
         # Some overview sub-interfaces failed; record them but still update updated_at
         updates["last_sync_partial_failures"] = json.dumps(failed_interfaces, ensure_ascii=False)

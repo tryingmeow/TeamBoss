@@ -201,6 +201,10 @@ async def upsert_team_from_session(
             # 不清掉 auth_state，界面会在导入成功之后继续挂着「会话失效」。
             row_updates["auth_state"] = "ok"
             row_updates["auth_state_since"] = None
+            # 新会话已经校验通过，定时同步的挂起计时器一起清零。
+            row_updates["sync_failing_since"] = None
+            row_updates["sync_suspended_at"] = None
+            row_updates["sync_probe_at"] = None
             row_updates["updated_at"] = now
             set_clause = ", ".join(f"{key} = ?" for key in row_updates)
             values = list(row_updates.values()) + [team_id]

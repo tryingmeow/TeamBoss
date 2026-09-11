@@ -38,6 +38,10 @@ export interface Team {
   auth_state: 'ok' | 'rejected';
   /** 进入 rejected 的时间，用于显示「已持续 N 小时」。 */
   auth_state_since: string | null;
+  /** 连续同步失败的起点。全部接口恢复正常时清空。 */
+  sync_failing_since: string | null;
+  /** 定时同步被挂起的时刻。非空 = 已停止每轮请求，只按低频探活。 */
+  sync_suspended_at: string | null;
   cached_member_emails: string[];
 }
 

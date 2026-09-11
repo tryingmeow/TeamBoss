@@ -518,6 +518,12 @@ async def init_database():
             # 这些是周级慢变量，按团队最多 DISPLAY_SYNC_INTERVAL_HOURS 小时一次。
             # patrol 的输入（seats_entitled / 席位计数 / 成员名单）不在此列，仍然每轮实时拉。
             "ALTER TABLE teams ADD COLUMN display_synced_at TEXT",
+            # 定时同步挂起：连续失败的起点、挂起时刻、挂起期间上一次探活时刻。
+            # 上游吊销 token 之后重试不会有别的结果，只会每天上千次注定 401 的
+            # 请求和上百条重复告警；挂起后按低频探活自愈，重新导入会话即恢复。
+            "ALTER TABLE teams ADD COLUMN sync_failing_since TEXT",
+            "ALTER TABLE teams ADD COLUMN sync_suspended_at TEXT",
+            "ALTER TABLE teams ADD COLUMN sync_probe_at TEXT",
         ):
             try:
                 await db.execute(statement)
