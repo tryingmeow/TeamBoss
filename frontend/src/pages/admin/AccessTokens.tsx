@@ -82,15 +82,23 @@ export default function AccessTokens() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const [nextToastId, setNextToastId] = useState(0);
+  const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+
+  useEffect(() => () => {
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    toastTimersRef.current.forEach((timer) => clearTimeout(timer));
+    toastTimersRef.current.clear();
+  }, []);
 
   const showToast = (text: string, type: 'success' | 'error' = 'success') => {
-    const id = nextToastId;
-    setNextToastId((prev) => prev + 1);
+    const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, text, type }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 5000);
+    toastTimersRef.current.add(timer);
   };
 
   const loadTokens = async () => {

@@ -34,6 +34,8 @@ def _compute_days_remaining(active_until: str) -> int | None:
         return None
     try:
         until = datetime.fromisoformat(active_until.replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         delta = (until - now).days
         return max(delta, 0)

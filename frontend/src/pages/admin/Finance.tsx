@@ -13,6 +13,7 @@ import {
 import { AlertTriangle, ChevronDown, Clock, CreditCard, ExternalLink, KeyRound, Loader2, Mail, Pencil, Plus, Wallet, TrendingUp, Zap } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
+import { formatDateSafe } from '../../lib/formatDate';
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
 
@@ -655,7 +656,7 @@ export default function Finance() {
             ) : (
               <div className="flex h-9 items-center whitespace-nowrap rounded bg-gray-100 px-3 text-xs text-gray-700 dark:bg-slate-800 dark:text-slate-300">
                 {overview?.fx_updated_at
-                  ? format(parseISO(overview.fx_updated_at), 'MM-dd HH:mm')
+                  ? formatDateSafe(overview.fx_updated_at, 'MM-dd HH:mm')
                   : '内置静态汇率'}
               </div>
             )}
@@ -844,7 +845,7 @@ export default function Finance() {
                   <div key={i} className="h-12 animate-pulse rounded bg-gray-200 dark:bg-slate-800" />
                 ))}
               </div>
-            ) : overview?.timeline.length === 0 ? (
+            ) : !overview || overview.timeline.length === 0 ? (
               <div className="py-8 text-center text-gray-500 dark:text-slate-400">暂无续费计划</div>
             ) : (
               <div className="space-y-3 overflow-x-auto pb-1">
@@ -862,7 +863,7 @@ export default function Finance() {
                       >
                         <div className="flex items-center gap-3 sm:contents">
                           <div className="text-gray-500 dark:text-slate-400">
-                            {format(parseISO(item.date), 'MM-dd')}
+                            {formatDateSafe(item.date, 'MM-dd')}
                           </div>
                           <span className={`rounded px-2.5 py-1 text-xs font-medium whitespace-nowrap ${badgeBg}`}>
                             {daysUntil > 0 ? `${daysUntil}天` : '今天'}
@@ -987,10 +988,10 @@ export default function Finance() {
               <tbody className="divide-y divide-gray-100 dark:divide-slate-800/50">
                 {overviewLoading ? (
                   <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">加载中...</td></tr>
-                ) : overview?.teams.length === 0 ? (
+                ) : !overview || overview.teams.length === 0 ? (
                   <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">暂无团队</td></tr>
                 ) : (
-                  overview!.teams.map((team) => {
+                  overview.teams.map((team) => {
                     const sym = team.billing_symbol || team.billing_currency;
                     let daysBadge = 'bg-gray-100 text-gray-600 dark:bg-slate-800 dark:text-slate-300';
                     if (team.days_left !== null) {
@@ -1109,7 +1110,7 @@ export default function Finance() {
                           {team.active_until ? (
                             <div className="flex items-center gap-2 whitespace-nowrap">
                               <span className="text-gray-900 dark:text-slate-100">
-                                {format(parseISO(team.active_until), 'MM-dd')}
+                                {formatDateSafe(team.active_until, 'MM-dd')}
                               </span>
                               {team.days_left !== null && (
                                 <span className={`rounded px-2 py-0.5 text-xs font-medium ${daysBadge}`}>

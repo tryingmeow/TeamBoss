@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { fetchLogs as fetchLogsApi, type OperationLog } from '../../api/client';
 import { Activity, CheckCircle2, AlertCircle, Info, Clock, Search } from 'lucide-react';
-import { format } from 'date-fns';
+import { formatDateSafe } from '../../lib/formatDate';
 
 interface SystemLogsProps {
   embedded?: boolean;
@@ -29,15 +29,27 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
   const [totalPages, setTotalPages] = useState(1);
   const search = externalSearch ?? localSearch;
 
+  // 输入防抖:每次按键都触发 GET /api/logs 太贵,300ms 内不再有新输入才真正拉取。
+  const [debouncedSearch, setDebouncedSearch] = useState(search);
   useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  // 把"搜索/scope 变了就回到第 1 页"放到渲染期间同步完成(而不是单独一个
+  // effect),这样下面的抓取 effect 在同一次 commit 里就能看到最新的 page,
+  // 不会先用旧 page 打一次注定被丢弃的请求。
+  const [prevFetchKey, setPrevFetchKey] = useState({ scope, search: debouncedSearch });
+  if (prevFetchKey.scope !== scope || prevFetchKey.search !== debouncedSearch) {
+    setPrevFetchKey({ scope, search: debouncedSearch });
     setPage(1);
-  }, [scope, search]);
+  }
 
   useEffect(() => {
     let cancelled = false;
 
     setLoading(true);
-    fetchLogsApi({ page, per_page: 50, q: search, scope })
+    fetchLogsApi({ page, per_page: 50, q: debouncedSearch, scope })
       .then(res => {
         if (cancelled) return;
         setLogs(res.logs);
@@ -53,7 +65,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     return () => {
       cancelled = true;
     };
-  }, [page, scope, search]);
+  }, [page, scope, debouncedSearch]);
 
   const getStatusIcon = (result: string | null) => {
     switch (result?.toLowerCase()) {
@@ -156,7 +168,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
                     <td className="px-6 py-4 text-right text-gray-500 dark:text-slate-400">
                       <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
                         <Clock className="w-3.5 h-3.5" />
-                        {log.created_at ? format(new Date(log.created_at), 'MM-dd HH:mm:ss') : '-'}
+                        {log.created_at ? formatDateSafe(log.created_at, 'MM-dd HH:mm:ss', '-') : '-'}
                       </div>
                     </td>
                   </tr>

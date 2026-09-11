@@ -34,6 +34,13 @@ SESSIONS_DIR = get_sessions_dir()
 async def get_db():
     db = await aiosqlite.connect(get_db_path())
     db.row_factory = aiosqlite.Row
+    # WAL is a persistent, on-disk property of the database file (set once,
+    # survives across connections/processes), but PRAGMA statements are
+    # per-connection, so we still issue them on every connect. busy_timeout
+    # makes SQLite retry internally instead of raising "database is locked"
+    # immediately when another connection is nested inside an open read.
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA busy_timeout=5000")
     try:
         yield db
     finally:
@@ -121,6 +128,20 @@ async def init_database():
         except Exception:
             pass
 
+        # 命中率高的查找：member_expiry 上按 team_id 单独过滤（如巡检拉全量成员）
+        # 以及按 team_id + lower(email) 精确定位一条记录（如踢人前查 source/expires_at，
+        # 见 services/patrol.py 里若干 "WHERE team_id = ? ... AND lower(email) = ?"）。
+        # lower(email) 用表达式索引，因为热路径查询就是这样写谓词的——普通索引
+        # 不会被 lower(email) = ? 命中。
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_member_expiry_team_id "
+            "ON member_expiry(team_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_member_expiry_lower_email "
+            "ON member_expiry(team_id, lower(email))"
+        )
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS operation_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +155,13 @@ async def init_database():
                 created_at TEXT
             )
         """)
+        # chatgpt_limiter._cooldown_until 每次 token 刷新都要跑
+        # "WHERE team_id=? AND action IN (...) ORDER BY id DESC LIMIT 1"，
+        # 无索引时对 operation_logs 全表扫描。
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_operation_logs_team_action_id "
+            "ON operation_logs(team_id, action, id)"
+        )
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS settings (

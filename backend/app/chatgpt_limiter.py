@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -24,7 +25,60 @@ PROACTIVE_REFRESH_WINDOW = timedelta(hours=24)
 PROACTIVE_REFRESH_COOLDOWN = timedelta(hours=1)
 _NEGATIVE_REFRESH_RESULTS = {"failed", "partial", "unchanged"}
 
-_semaphore: threading.BoundedSemaphore | None = None
+class _ResizableSemaphore:
+    """Counting semaphore whose capacity can change at runtime.
+
+    A plain ``threading.BoundedSemaphore`` can't be resized in place, so the
+    previous implementation replaced the object whenever the configured
+    limit changed. Threads that already held a permit on the old object kept
+    it while new callers acquired permits on the new object, so the two
+    capacities briefly stacked (effectively ``old_limit + new_limit``
+    concurrent calls). Adjusting the available-permit count in place instead
+    of swapping the object keeps outstanding permits and the new capacity
+    consistent at every point in time.
+    """
+
+    def __init__(self, value: int) -> None:
+        self._cond = threading.Condition()
+        self._value = value
+        self._limit = value
+
+    def acquire(self) -> None:
+        with self._cond:
+            while self._value <= 0:
+                self._cond.wait()
+            self._value -= 1
+
+    def release(self) -> None:
+        with self._cond:
+            # BoundedSemaphore semantics: an unbalanced release is a bug in the
+            # caller, and silently inflating capacity would raise the effective
+            # concurrency limit for the rest of the process's life.
+            if self._value >= self._limit:
+                raise ValueError("semaphore released too many times")
+            self._value += 1
+            self._cond.notify()
+
+    def resize(self, new_limit: int, current_limit: int) -> None:
+        with self._cond:
+            self._value += new_limit - current_limit
+            self._limit = new_limit
+            self._cond.notify_all()
+
+    def __enter__(self) -> "_ResizableSemaphore":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.release()
+
+
+_SETTINGS_CACHE_TTL_SECONDS = 5.0
+_cached_api_concurrency_limit: int | None = None
+_cached_api_concurrency_limit_at: float = 0.0
+_settings_cache_lock = threading.Lock()
+
+_semaphore: _ResizableSemaphore | None = None
 _semaphore_limit: int | None = None
 _semaphore_lock = threading.Lock()
 _refresh_locks: dict[str, threading.Lock] = {}
@@ -62,13 +116,41 @@ def _read_api_concurrency_limit_sync() -> int:
     return DEFAULT_API_CONCURRENCY
 
 
-def _get_semaphore() -> threading.BoundedSemaphore:
-    global _semaphore, _semaphore_limit
+def _get_cached_api_concurrency_limit() -> int:
+    """Read ``api_concurrency`` with a short TTL cache.
+
+    ``_get_semaphore`` used to open and close a SQLite connection on every
+    single ChatGPT API call just to re-read one setting row. A short TTL is
+    enough since this only guards a concurrency limit, not correctness.
+    """
+
+    global _cached_api_concurrency_limit, _cached_api_concurrency_limit_at
+
+    now = time.monotonic()
+    with _settings_cache_lock:
+        if (
+            _cached_api_concurrency_limit is not None
+            and (now - _cached_api_concurrency_limit_at) < _SETTINGS_CACHE_TTL_SECONDS
+        ):
+            return _cached_api_concurrency_limit
 
     limit = _read_api_concurrency_limit_sync()
+    with _settings_cache_lock:
+        _cached_api_concurrency_limit = limit
+        _cached_api_concurrency_limit_at = now
+    return limit
+
+
+def _get_semaphore() -> _ResizableSemaphore:
+    global _semaphore, _semaphore_limit
+
+    limit = _get_cached_api_concurrency_limit()
     with _semaphore_lock:
-        if _semaphore is None or _semaphore_limit != limit:
-            _semaphore = threading.BoundedSemaphore(limit)
+        if _semaphore is None:
+            _semaphore = _ResizableSemaphore(limit)
+            _semaphore_limit = limit
+        elif _semaphore_limit != limit:
+            _semaphore.resize(limit, _semaphore_limit)
             _semaphore_limit = limit
         return _semaphore
 

@@ -107,6 +107,13 @@ async def _resolve_bot_username() -> Optional[str]:
     return username
 
 
+def _safe_summary_interval(raw: Optional[str]) -> int:
+    try:
+        return int(raw or "15")
+    except (TypeError, ValueError):
+        return 15
+
+
 # ---------------------------------------------------------------------------
 # /api/tg/config
 # ---------------------------------------------------------------------------
@@ -117,10 +124,7 @@ async def get_config():
     token = await _get_setting("tg_bot_token")
     token_set = bool(token)
     bot_username = await _resolve_bot_username() if token else None
-    try:
-        summary_interval = int(await _get_setting("tg_summary_interval_minutes") or "15")
-    except (TypeError, ValueError):
-        summary_interval = 15
+    summary_interval = _safe_summary_interval(await _get_setting("tg_summary_interval_minutes"))
     from ..tg_bot import is_bot_thread_alive
 
     return {
@@ -275,7 +279,9 @@ async def update_config(req: TgConfigUpdate):
         "admin_pairing_code": admin_pairing_code,
         "admin_pairing_expires_at": admin_pairing_expires_at,
         "summary_enabled": (await _get_setting("tg_summary_enabled")) == "1",
-        "summary_interval_minutes": int(await _get_setting("tg_summary_interval_minutes") or "15"),
+        "summary_interval_minutes": _safe_summary_interval(
+            await _get_setting("tg_summary_interval_minutes")
+        ),
     }
 
 

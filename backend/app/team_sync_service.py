@@ -369,11 +369,22 @@ async def sync_team_cache(team_id: str, force: bool = False, max_age_seconds: in
     workspace_task = _fetch_workspace_settings(client)
 
     try:
-        (overview_updates, overview_cache), members, workspace_settings = await asyncio.gather(
+        gather_results = await asyncio.gather(
             overview_task,
             members_task,
             workspace_task,
+            return_exceptions=True,
         )
+        # return_exceptions=True lets every task run to completion and have
+        # its result/exception actually retrieved instead of the default
+        # (first failure propagates immediately while the sibling
+        # coroutines keep running as orphaned, never-awaited tasks). Raise
+        # the first failure in call order so callers see the same outcome
+        # as before.
+        first_error = next((r for r in gather_results if isinstance(r, BaseException)), None)
+        if first_error is not None:
+            raise first_error
+        (overview_updates, overview_cache), members, workspace_settings = gather_results
     except HTTPException as exc:
         await log_operation(team_id, "sync_team", None, None, "failed", str(exc.detail), "manual")
         if not getattr(exc, "team_health_reported", False):

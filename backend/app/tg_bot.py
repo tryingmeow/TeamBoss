@@ -1701,9 +1701,9 @@ def _poll_loop(stop_event: threading.Event) -> None:
 
             updates = _get_updates(token, offset)
             for update in updates:
-                offset = update.get("update_id", offset)
-                if offset is not None:
-                    offset += 1
+                update_id = update.get("update_id")
+                if update_id is not None:
+                    offset = update_id + 1
                 message = update.get("message") or update.get("edited_message")
                 if not message:
                     continue

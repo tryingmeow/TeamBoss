@@ -201,20 +201,28 @@ export default function TeamCard({
     }
   };
 
+  // 请求排序守卫:手动同步和轮询同步共用同一个自增 id,只有最新发出的那次
+  // 请求的结果才允许写 state,避免慢的旧响应覆盖后到的新响应。
+  const latestRequestId = useRef(0);
+  const mountedRef = useRef(true);
+
   const handleSyncTeam = async (force: boolean) => {
     if (syncing) return;
     setSyncing(true);
+    const requestId = ++latestRequestId.current;
     try {
       const result = await syncTeam(team.id, force);
+      if (!mountedRef.current || requestId !== latestRequestId.current) return;
       setMembersData(result.members);
       setWorkspaceSettings(result.workspace_settings);
       onSyncSucceeded(result.team);
     } catch (err) {
+      if (!mountedRef.current || requestId !== latestRequestId.current) return;
       await refreshMembers(false);
       const errorMsg = err instanceof Error ? err.message : '同步失败';
       showToast(`同步失败，当前显示的是缓存数据${errorMsg ? '：' + errorMsg : ''}`, 'error');
     } finally {
-      setSyncing(false);
+      if (mountedRef.current) setSyncing(false);
     }
   };
 
@@ -223,8 +231,13 @@ export default function TeamCard({
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const settleStart = useRef(0);
   const settleBaseline = useRef('');
+  // 每次 stopSettle/startMemberSettle/卸载都会递增:一次 tick 醒来时如果
+  // epoch 已经变了,说明它属于一条已经作废的轮询链(被折叠/新操作/卸载取代),
+  // 结果直接丢弃,不写 state 也不再安排下一次。
+  const settleEpoch = useRef(0);
 
   const stopSettle = () => {
+    settleEpoch.current += 1;
     if (settleTimer.current) {
       clearTimeout(settleTimer.current);
       settleTimer.current = null;
@@ -232,9 +245,14 @@ export default function TeamCard({
     setSettling(false);
   };
 
-  useEffect(() => () => {
-    if (settleTimer.current) clearTimeout(settleTimer.current);
-    if (ownerEmailCopyTimer.current) clearTimeout(ownerEmailCopyTimer.current);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      settleEpoch.current += 1;
+      if (settleTimer.current) clearTimeout(settleTimer.current);
+      if (ownerEmailCopyTimer.current) clearTimeout(ownerEmailCopyTimer.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -251,23 +269,33 @@ export default function TeamCard({
     else if (elapsed < 360_000) delay = 20_000;       // 180–360s:每 20s 拉一次
     else { stopSettle(); return; }                    // 360s 封顶,停
 
+    const epoch = settleEpoch.current;
     settleTimer.current = setTimeout(async () => {
+      const requestId = ++latestRequestId.current;
       try {
         const result = await syncTeam(team.id, true);
-        setMembersData(result.members);
-        setWorkspaceSettings(result.workspace_settings);
-        onSyncSucceeded(result.team);
+        // 卸载了,或者这条轮询链已经被折叠/新操作/新一轮 start 取代:丢弃结果。
+        if (!mountedRef.current || epoch !== settleEpoch.current) return;
+        if (requestId === latestRequestId.current) {
+          setMembersData(result.members);
+          setWorkspaceSettings(result.workspace_settings);
+          onSyncSucceeded(result.team);
+        }
         if (membersSignature(result.members) !== settleBaseline.current) {
           stopSettle();   // 变化已在 ChatGPT 侧生效,收工
           return;
         }
       } catch { /* 网络抖动忽略,继续下一档 */ }
+      if (!mountedRef.current || epoch !== settleEpoch.current) return;
       scheduleSettlePoll();
     }, delay);
   };
 
   // 邀请 / 踢人 / 撤邀请后调用:记下操作前的成员指纹,启动阶梯轮询。
   const startMemberSettle = () => {
+    // 递增 epoch,让上一条链(如果还有 tick 挂在 await 上)在醒来时发现自己
+    // 已经作废,而不会跟这条新链抢 settleTimer.current 或互相覆盖状态。
+    settleEpoch.current += 1;
     settleBaseline.current = membersSignature(membersData);
     settleStart.current = Date.now();
     if (settleTimer.current) clearTimeout(settleTimer.current);
@@ -280,6 +308,8 @@ export default function TeamCard({
     setExpanded(nextExpanded);
     if (nextExpanded) {
       void handleSyncTeam(false);
+    } else {
+      stopSettle();   // 收起面板后不再需要看不见的轮询继续打 sync?force=true
     }
   };
 

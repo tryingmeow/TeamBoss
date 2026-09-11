@@ -51,10 +51,13 @@ class _FailureTracker:
                 del self.failures[key]
         overflow = len(self.failures) - self.max_tracked_ips
         if overflow > 0:
-            victims = sorted(
-                self.failures, key=lambda k: self.failures[k].get("first_failure_at", 0)
+            # 和上面那段循环一样：仍在锁定期内的条目不参与淘汰，否则溢出清理会
+            # 把刚触发锁定的 IP（first_failure_at 天然最老）反而清掉，等于免费解锁。
+            evictable = sorted(
+                (k for k, entry in self.failures.items() if entry.get("locked_until", 0) <= now),
+                key=lambda k: self.failures[k].get("first_failure_at", 0),
             )[:overflow]
-            for key in victims:
+            for key in evictable:
                 del self.failures[key]
 
     def record_failure(self, ip: str) -> tuple[bool, int]:

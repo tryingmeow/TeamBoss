@@ -161,15 +161,21 @@ def claim_member_pairing_code_sync(
                 (str(chat_id), now, row["id"]),
             )
             conn.commit()
-            sync_chat_commands_sync(str(chat_id), conn=conn)
-            if previous_chat_id and previous_chat_id != str(chat_id):
-                sync_chat_commands_sync(previous_chat_id, conn=conn)
         finally:
             conn.close()
     except Exception:
         # 任何 Telegram 用户都能发起绑定，裸异常会带出数据库路径与表结构。
         logger.exception("member binding failed")
         return "绑定失败，请联系管理员。"
+
+    # 绑定行和配对码消费均已提交，属于既成事实。这里的命令同步只是锦上添花，
+    # 失败也不能再回退成"绑定失败"的提示——否则用户会拿着已作废的配对码重试。
+    try:
+        sync_chat_commands_sync(str(chat_id))
+        if previous_chat_id and previous_chat_id != str(chat_id):
+            sync_chat_commands_sync(previous_chat_id)
+    except Exception:
+        logger.exception("post-binding chat command sync failed")
 
     return f"✅ 绑定成功：{email}\n发送 /info 查询自己的成员状态和服务到期时间。"
 

@@ -57,6 +57,18 @@ def _bearer_token(authorization: Optional[str]) -> Optional[str]:
     return token.strip()
 
 
+def safe_compare_digest(supplied: str, expected: str) -> bool:
+    """secrets.compare_digest 对非 ASCII 的 str 会抛 TypeError（Uvicorn 把请求头按
+    latin-1 解码，所以 `X-API-Key: <非 ASCII>` 能一路走到这里）。非 ASCII 输入按
+    鉴权失败处理，而不是让异常向上冒泡成 500；ASCII 路径仍然是常数时间比较。"""
+    try:
+        supplied.encode("ascii")
+        expected.encode("ascii")
+    except (UnicodeEncodeError, AttributeError):
+        return False
+    return secrets.compare_digest(supplied, expected)
+
+
 def _password_hash(password: str) -> str:
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac(
@@ -248,8 +260,8 @@ async def require_admin(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="API Key 未初始化")
 
     supplied = (x_api_key or "").strip() or (_bearer_token(authorization) or "").strip()
-    current_matches = bool(supplied) and secrets.compare_digest(supplied, expected)
-    previous_matches = bool(supplied and previous) and secrets.compare_digest(supplied, previous)
+    current_matches = bool(supplied) and safe_compare_digest(supplied, expected)
+    previous_matches = bool(supplied and previous) and safe_compare_digest(supplied, previous)
     if not current_matches and not previous_matches:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Key 无效")
 

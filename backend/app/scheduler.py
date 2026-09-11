@@ -29,7 +29,15 @@ from .services.team_health_alerts import (
 )
 from .services.team_locks import member_operation_claim_sync
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(
+    # APScheduler 3.11 默认 misfire_grace_time=1（秒）：member_watch_job(30s 间隔)/
+    # auto_kick_job(60s 间隔) 做分页网络调用、单次请求超时 60s，还排在 4 个并发许可
+    # 后面，一次运行超过自己的间隔太正常了；默认值会把超期的下一次触发直接丢弃
+    # （悄无声息地漏跑），而不是照常延后执行。300s 给够一到两轮排队+超时的余量，
+    # 同时仍能在任务真正卡死时体现出来。max_instances/coalesce 沿用 APScheduler
+    # 该版本的既有默认值（max_instances=1, coalesce=True），不在此改动。
+    job_defaults={"misfire_grace_time": 300},
+)
 APP_LOCAL_TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 
 # 纯展示字段的刷新间隔。余额、卡号、Team 名、折扣、默认席位类型、单席位价格都是

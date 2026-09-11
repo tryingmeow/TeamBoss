@@ -24,8 +24,19 @@ async def export_all_sessions():
         if os.path.exists(session_file):
             with open(session_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                data["_team_id"] = team_id
-                sessions.append(data)
+            # Some session files on disk hold a JSON-encoded string rather
+            # than an object (routes/users.py._parse_session_file handles
+            # the same shape). Unwrap it the same way instead of failing
+            # the whole export with a TypeError on dict-only assignment.
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except (TypeError, ValueError):
+                    data = None
+            if not isinstance(data, dict):
+                continue
+            data["_team_id"] = team_id
+            sessions.append(data)
 
     return sessions
 

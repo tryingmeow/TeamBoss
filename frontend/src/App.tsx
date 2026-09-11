@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import JoinPage from './components/JoinPage';
 import AdminGate from './components/AdminGate';
 import TermsGate from './components/TermsGate';
+import ErrorBoundary from './components/ErrorBoundary';
 import Layout from './components/Layout';
 import TeamManagement from './pages/admin/TeamManagement';
 import UserManagement from './pages/admin/UserManagement';
@@ -22,7 +23,9 @@ export default function App() {
         <Route path="/admin" element={
           <TermsGate>
             <AdminGate>
-              <Layout />
+              <ErrorBoundary>
+                <Layout />
+              </ErrorBoundary>
             </AdminGate>
           </TermsGate>
         }>

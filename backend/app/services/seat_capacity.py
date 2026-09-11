@@ -224,12 +224,14 @@ async def update_capacity_cache(
             "seats_in_use": seats_in_use,
             "codex_count": codex_count,
             "chatgpt_count": chatgpt_count,
-            "active_start": subscription.get("active_start"),
-            "active_until": subscription.get("active_until"),
             "updated_at": now,
         }
 
         # Only add these if they're actually in the subscription response
+        if "active_start" in subscription:
+            updates["active_start"] = subscription["active_start"]
+        if "active_until" in subscription:
+            updates["active_until"] = subscription["active_until"]
         if "seats_entitled" in subscription:
             updates["seats_entitled"] = subscription["seats_entitled"]
         if "billing_currency" in subscription:

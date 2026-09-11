@@ -1,9 +1,9 @@
+import asyncio
 import logging
 import os
 import subprocess
 from contextlib import asynccontextmanager
 
-import secrets
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header
@@ -18,6 +18,7 @@ from .security import (
     get_admin_api_key,
     get_cors_origins,
     require_admin,
+    safe_compare_digest,
 )
 from .tg_bot import start_bot_thread, stop_bot_thread
 
@@ -121,7 +122,7 @@ async def _is_admin_request(
     supplied = (x_api_key or "").strip() or (_bearer_token(authorization) or "").strip()
     if not supplied:
         return False
-    return secrets.compare_digest(supplied, expected)
+    return safe_compare_digest(supplied, expected)
 
 
 @app.get("/api/health")
@@ -165,12 +166,17 @@ async def health_check(is_admin: bool = Depends(_is_admin_request)):
     try:
         from .database import get_db_path
 
-        conn = sqlite3.connect(get_db_path(), timeout=2)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute("SELECT COUNT(*) as count FROM teams")
-        result = cursor.fetchone()
-        total_teams = result["count"] if result else 0
-        conn.close()
+        def _check_database():
+            conn = sqlite3.connect(get_db_path(), timeout=2)
+            try:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT COUNT(*) as count FROM teams")
+                result = cursor.fetchone()
+                return result["count"] if result else 0
+            finally:
+                conn.close()
+
+        total_teams = await asyncio.to_thread(_check_database)
 
         checks["database"] = {
             "status": "ok",
@@ -224,20 +230,24 @@ async def health_check(is_admin: bool = Depends(_is_admin_request)):
     # 3. Sync Status Check (last_full_sync_at across teams)
     # ──────────────────────────────────────────────────────────────────
     try:
-        conn = sqlite3.connect(get_db_path(), timeout=2)
-        conn.row_factory = sqlite3.Row
+        def _check_sync():
+            conn = sqlite3.connect(get_db_path(), timeout=2)
+            try:
+                conn.row_factory = sqlite3.Row
+                # Get total and synced count
+                total_row = conn.execute("SELECT COUNT(*) as count FROM teams").fetchone()
+                total_teams = total_row["count"] if total_row else 0
 
-        # Get total and synced count
-        total_row = conn.execute("SELECT COUNT(*) as count FROM teams").fetchone()
-        total_teams = total_row["count"] if total_row else 0
+                # Get the most recent sync time
+                recent = conn.execute(
+                    "SELECT last_full_sync_at FROM teams WHERE last_full_sync_at IS NOT NULL "
+                    "ORDER BY last_full_sync_at DESC LIMIT 1"
+                ).fetchone()
+                return total_teams, recent
+            finally:
+                conn.close()
 
-        # Get the most recent sync time
-        recent = conn.execute(
-            "SELECT last_full_sync_at FROM teams WHERE last_full_sync_at IS NOT NULL "
-            "ORDER BY last_full_sync_at DESC LIMIT 1"
-        ).fetchone()
-
-        conn.close()
+        total_teams, recent = await asyncio.to_thread(_check_sync)
 
         if recent and recent["last_full_sync_at"]:
             last_sync_iso = recent["last_full_sync_at"]
@@ -292,10 +302,15 @@ async def health_check(is_admin: bool = Depends(_is_admin_request)):
     try:
         import sqlite3
 
-        conn = sqlite3.connect(get_db_path(), timeout=2)
-        cursor = conn.execute("SELECT value FROM settings WHERE key = 'tg_bot_token'")
-        token_row = cursor.fetchone()
-        conn.close()
+        def _check_telegram_token():
+            conn = sqlite3.connect(get_db_path(), timeout=2)
+            try:
+                cursor = conn.execute("SELECT value FROM settings WHERE key = 'tg_bot_token'")
+                return cursor.fetchone()
+            finally:
+                conn.close()
+
+        token_row = await asyncio.to_thread(_check_telegram_token)
 
         token = (token_row[0] if token_row else "").strip() if token_row else ""
         configured = bool(token)

@@ -1202,12 +1202,12 @@ function MemberList({
                       <button
                         type="button"
                         onClick={() => handleCopyTgBinding(member.email)}
-                        disabled={copyingBindingEmail === member.email.trim().toLowerCase()}
+                        disabled={copyingBindingEmail === (member.email || '').trim().toLowerCase()}
                         className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-indigo-500/10 hover:text-indigo-500 disabled:cursor-wait disabled:opacity-50 dark:text-slate-500 dark:hover:text-indigo-400"
                         title={member.tg_binding?.bound ? '复制重新绑定指令' : '复制绑定指令'}
                         aria-label={member.tg_binding?.bound ? `复制 ${member.email} 的重新绑定指令` : `复制 ${member.email} 的绑定指令`}
                       >
-                        {copiedBindingEmail === member.email.trim().toLowerCase()
+                        {copiedBindingEmail === (member.email || '').trim().toLowerCase()
                           ? <Check className="h-4 w-4 text-emerald-500" />
                           : <Copy className="h-4 w-4" />}
                       </button>
@@ -1275,13 +1275,21 @@ export default function UserManagement() {
     () => new Set(DEFAULT_MEMBER_STATUS_FILTERS)
   );
   const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+
+  useEffect(() => () => {
+    toastTimersRef.current.forEach((timer) => clearTimeout(timer));
+    toastTimersRef.current.clear();
+  }, []);
 
   const showToast: ShowToast = (text, type = 'success') => {
     const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, text, type }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3500);
+    toastTimersRef.current.add(timer);
   };
 
   const seatFilterOptions = useMemo(

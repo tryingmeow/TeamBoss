@@ -67,6 +67,7 @@ export default function Layout() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navRef = useRef<HTMLDivElement>(null);
   const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -80,6 +81,11 @@ export default function Layout() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [location.pathname]);
+
+  useEffect(() => () => {
+    toastTimersRef.current.forEach((timer) => clearTimeout(timer));
+    toastTimersRef.current.clear();
+  }, []);
 
   const toggleTheme = () => {
     const root = document.documentElement;
@@ -95,9 +101,11 @@ export default function Layout() {
   const showToast = useCallback((text: string, type: 'success' | 'error' = 'success') => {
     const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, text, type }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3000);
+    toastTimersRef.current.add(timer);
   }, []);
 
   const handleRefresh = async () => {
@@ -151,7 +159,7 @@ export default function Layout() {
   };
 
   const handleDelete = (id: string) => {
-    setTeams(teams.filter((t) => t.id !== id));
+    setTeams((prev) => prev.filter((t) => t.id !== id));
     clearSyncFailure(id);
     showToast('已删除');
   };

@@ -12,6 +12,11 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(cookie\s*[:=]\s*)[^\s,'\"]{8,}"),
     # 裸 JWT（三段 base64url）。session token 与 access token 都是这个形状。
     re.compile(r"\beyJ[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{8,}\.[A-Za-z0-9\-_]{8,}"),
+    # URL 里带的凭据，例如代理地址 http://user:pass@host:port。urllib3 的
+    # LocationParseError 会把整个 URL（含 userinfo）拼进异常文本，代理地址可能
+    # 就此原样落进 operation_logs / Telegram 告警。scheme 和 host 保留可读，
+    # 只抹 "@" 前的 userinfo（用零宽断言让 "@" 本身不被吃掉，留在掩码后面）。
+    re.compile(r"(?i)([a-z][a-z0-9+.\-]*://)[^\s/@'\"]+(?=@)"),
 )
 
 

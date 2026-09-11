@@ -99,7 +99,13 @@ export default function TeamSettingsDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, teamId, initialSettings, currentProxyId]);
+    // initialSettings 特意不放进依赖:它是 TeamCard 的 workspaceSettings state,
+    // 每次 syncTeam(含结算轮询的每一次 tick)都会给出一个内容可能完全相同的新
+    // 对象引用。放进依赖会导致弹窗打开期间只要父组件刷新就整段重新拉取,
+    // 把"查询中..."重新拍回来。只在 open/teamId/currentProxyId 变化时重新拉取,
+    // 弹窗刚打开那一次仍然用 initialSettings 做首屏内容(如果有的话)。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, teamId, currentProxyId]);
 
   const currentSeat = useMemo<SeatType>(
     () => normalizeWorkspaceSeatType(settings?.default_seat_type ?? 'default'),

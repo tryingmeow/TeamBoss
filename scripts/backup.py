@@ -142,7 +142,23 @@ def backup_database(db_path: str, backup_path: str, dry_run: bool = False) -> bo
 
     except Exception as e:
         logger.error(f"数据库备份失败: {e}", exc_info=True)
+        _remove_partial_backup(backup_path)
         return False
+
+
+def _remove_partial_backup(path: str) -> None:
+    """Remove a partial/corrupt backup file left behind by a failed run.
+
+    Without this, cleanup_old_backups() later counts the corrupt file as one
+    of the retained ``keep_count`` backup groups and deletes a genuinely
+    good older backup to make room for it.
+    """
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"已清理失败备份的残留文件: {path}")
+    except OSError as cleanup_err:
+        logger.warning(f"清理失败备份的残留文件时出错: {path} ({cleanup_err})")
 
 
 def backup_sessions(sessions_path: str, backup_path: str, dry_run: bool = False) -> bool:
@@ -180,6 +196,7 @@ def backup_sessions(sessions_path: str, backup_path: str, dry_run: bool = False)
 
     except Exception as e:
         logger.error(f"会话备份失败: {e}", exc_info=True)
+        _remove_partial_backup(backup_path)
         return False
 
 

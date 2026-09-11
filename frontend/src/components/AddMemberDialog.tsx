@@ -78,6 +78,13 @@ export default function AddMemberDialog({
     setBatchResult(null);
   };
 
+  // Esc / 点击遮罩关闭时 Radix 只会调用这里的 onOpenChange,不会走下面按钮上
+  // 显式绑定的 resetForm——所有关闭路径统一在这里清空表单,而不仅是 Cancel/X。
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) resetForm();
+    onOpenChange(nextOpen);
+  };
+
   const handleRetryFailed = () => {
     if (!batchResult?.failed?.length) return;
     setEmail(batchResult.failed.map((f) => f.email).join('\n'));
@@ -167,7 +174,7 @@ export default function AddMemberDialog({
 
   return (
     <>
-      <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 bg-black/60 z-50" />
           <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md rounded-xl bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] p-6 shadow-2xl">

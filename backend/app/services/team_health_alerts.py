@@ -22,6 +22,14 @@ DB_PATH = None
 _INCIDENT_LOCK = threading.Lock()
 _MAX_ERROR_LENGTH = 500
 
+# (team_id, alert_key) pairs for which a thread has claimed the right to send
+# the Telegram notification and is currently doing so (outside _INCIDENT_LOCK,
+# since notify_admins_sync is a blocking network call). Guarded by
+# _INCIDENT_LOCK just like the DB row itself, so "claim, then notify, then
+# release" still gives exactly one sender per open incident even though the
+# lock is no longer held for the whole duration of the send.
+_SENDING_INCIDENTS: set[tuple[str, str]] = set()
+
 # 一个未恢复的故障每隔多久重新提醒一次。只发一次的话，故障发生在深夜就等于没发：
 # 消息被后来的通知顶走，第二天没人知道还坏着。
 REPEAT_ALERT_INTERVAL = timedelta(hours=6)
@@ -145,6 +153,11 @@ def report_team_failure_sync(
 
     now = _now_iso()
     error_text = str(getattr(error, "detail", error) or "unknown error")[:_MAX_ERROR_LENGTH]
+    incident_key = (team_id, alert_key)
+
+    # ── Critical section: decide whether this call is the one that gets to
+    # notify, and persist the failure-counter update. Kept short and non-
+    # blocking so the lock is never held across the Telegram call below. ──
     with _INCIDENT_LOCK:
         conn = _connect()
         try:
@@ -203,52 +216,78 @@ def report_team_failure_sync(
                     "failure_count": failure_count,
                 }
 
-            label = _ALERT_LABELS.get(alert_key, alert_key)
-            lines = [
-                f"🏢 车队：{team_name}",
-                f"🏷️ 类型：{label}",
-                f"🔗 来源：{source}",
-                f"📝 错误：{error_text}",
-            ]
-            if is_reminder:
-                duration = _humanize_since(first_failed_at, now_dt)
-                lines.insert(1, f"⏰ 仍未恢复{f'，已持续 {duration}' if duration else ''}")
-            text = detail_card(
-                "🔁 Team 异常仍未恢复" if is_reminder else "🚨 Team 异常",
-                tuple(lines),
-            )
-            sent = notify_admins_sync(text)
-            if sent > 0:
-                conn.execute(
-                    """UPDATE team_health_incidents
-                       SET notified = 1, last_notified_at = ?, updated_at = ?
-                       WHERE team_id = ? AND alert_key = ? AND status = 'open'""",
-                    (now, now, team_id, alert_key),
-                )
-                conn.commit()
-                _log_delivery(
-                    conn,
-                    team_id,
-                    "team_health_alert",
-                    f"key={alert_key}, source={source}, delivered_to={sent}"
-                    + (", reminder=1" if is_reminder else ""),
-                    "success",
-                )
-                return {"notified": sent, "reason": "sent", "failure_count": failure_count}
-
-            _log_delivery(
-                conn,
-                team_id,
-                "team_health_alert",
-                f"key={alert_key}, source={source}, delivered_to=0",
-                "failed",
-                "Telegram alert was not delivered",
-            )
-            return {"notified": 0, "reason": "not_delivered", "failure_count": failure_count}
+            # Another thread is already mid-send for this exact incident (DB
+            # still shows notified=0 until that send finishes) — don't send
+            # twice. This is the in-memory equivalent of the "already_notified"
+            # check above, for the window between claiming and persisting it.
+            if incident_key in _SENDING_INCIDENTS:
+                return {
+                    "notified": 0,
+                    "reason": "deduplicated",
+                    "failure_count": failure_count,
+                }
+            _SENDING_INCIDENTS.add(incident_key)
         except Exception as exc:
             return {"notified": 0, "reason": "internal_error", "error": str(exc)}
         finally:
             conn.close()
+
+    # ── Outside the lock: the blocking Telegram call, then a short second
+    # critical section to persist the outcome and release the claim. ──
+    try:
+        label = _ALERT_LABELS.get(alert_key, alert_key)
+        lines = [
+            f"🏢 车队：{team_name}",
+            f"🏷️ 类型：{label}",
+            f"🔗 来源：{source}",
+            f"📝 错误：{error_text}",
+        ]
+        if is_reminder:
+            duration = _humanize_since(first_failed_at, now_dt)
+            lines.insert(1, f"⏰ 仍未恢复{f'，已持续 {duration}' if duration else ''}")
+        text = detail_card(
+            "🔁 Team 异常仍未恢复" if is_reminder else "🚨 Team 异常",
+            tuple(lines),
+        )
+        sent = notify_admins_sync(text)
+
+        with _INCIDENT_LOCK:
+            conn = _connect()
+            try:
+                if sent > 0:
+                    conn.execute(
+                        """UPDATE team_health_incidents
+                           SET notified = 1, last_notified_at = ?, updated_at = ?
+                           WHERE team_id = ? AND alert_key = ? AND status = 'open'""",
+                        (now, now, team_id, alert_key),
+                    )
+                    conn.commit()
+                    _log_delivery(
+                        conn,
+                        team_id,
+                        "team_health_alert",
+                        f"key={alert_key}, source={source}, delivered_to={sent}"
+                        + (", reminder=1" if is_reminder else ""),
+                        "success",
+                    )
+                    return {"notified": sent, "reason": "sent", "failure_count": failure_count}
+
+                _log_delivery(
+                    conn,
+                    team_id,
+                    "team_health_alert",
+                    f"key={alert_key}, source={source}, delivered_to=0",
+                    "failed",
+                    "Telegram alert was not delivered",
+                )
+                return {"notified": 0, "reason": "not_delivered", "failure_count": failure_count}
+            except Exception as exc:
+                return {"notified": 0, "reason": "internal_error", "error": str(exc)}
+            finally:
+                conn.close()
+    finally:
+        with _INCIDENT_LOCK:
+            _SENDING_INCIDENTS.discard(incident_key)
 
 
 def report_team_recovery_sync(team_id: str, alert_key: str, *, source: str) -> dict:

@@ -1,3 +1,5 @@
+import asyncio
+
 import requests
 from datetime import datetime, timezone
 
@@ -118,11 +120,14 @@ async def check_proxy(proxy_id: int):
         proxy_url = row["url"]
         now = _now_iso()
         try:
-            resp = requests.get(
-                "https://chatgpt.com",
-                proxies={"http": proxy_url, "https": proxy_url},
-                timeout=10,
-            )
+            def _do_check():
+                return requests.get(
+                    "https://chatgpt.com",
+                    proxies={"http": proxy_url, "https": proxy_url},
+                    timeout=10,
+                )
+
+            resp = await asyncio.to_thread(_do_check)
             check_status = "ok" if resp.status_code < 500 else "error"
             check_error = None
         except Exception as check_exc:

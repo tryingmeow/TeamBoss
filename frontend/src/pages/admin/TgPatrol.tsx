@@ -18,7 +18,7 @@ import { AlertTriangle, CheckCircle2, Clock, Copy, Plus, Send, Settings, Shield,
 import * as Dialog from '@radix-ui/react-dialog';
 import Toast from '../../components/Toast';
 import Switch from '../../components/Switch';
-import { format } from 'date-fns';
+import { formatDateSafe } from '../../lib/formatDate';
 
 interface ToastMessage {
   id: number;
@@ -88,6 +88,7 @@ function PatrolSection() {
   const [showKickConfirm, setShowKickConfirm] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const [selectedTeams, setSelectedTeams] = useState<Set<string>>(new Set());
   const [pendingExempt, setPendingExempt] = useState<{ team: PatrolStatus['teams'][number]; willExempt: boolean } | null>(null);
   const [savingExempt, setSavingExempt] = useState(false);
@@ -95,10 +96,17 @@ function PatrolSection() {
   const showToast = (text: string, type: ToastType = 'success') => {
     const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, text, type }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3500);
+    toastTimersRef.current.add(timer);
   };
+
+  useEffect(() => () => {
+    toastTimersRef.current.forEach((timer) => clearTimeout(timer));
+    toastTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     loadStatus();
@@ -237,7 +245,7 @@ function PatrolSection() {
                 Codex 未开启、GPT 席位实际超额且从系统外新加入的成员。系统内拉人不受影响。
                 {status.baseline_at && (
                   <span className="block text-xs mt-1">
-                    上次保护：{format(new Date(status.baseline_at), 'MM-dd HH:mm:ss')}
+                    上次保护：{formatDateSafe(status.baseline_at, 'MM-dd HH:mm:ss')}
                   </span>
                 )}
               </div>
@@ -406,6 +414,7 @@ function TgBotSection() {
   const [loading, setLoading] = useState(true);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toastIdRef = useRef(0);
+  const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const [tokenInput, setTokenInput] = useState('');
   const [tokenSaving, setTokenSaving] = useState(false);
   const [codeGenerating, setCodeGenerating] = useState(false);
@@ -418,10 +427,17 @@ function TgBotSection() {
   const showToast = (text: string, type: ToastType = 'success') => {
     const id = ++toastIdRef.current;
     setToasts((prev) => [...prev, { id, text, type }]);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 3500);
+    toastTimersRef.current.add(timer);
   };
+
+  useEffect(() => () => {
+    toastTimersRef.current.forEach((timer) => clearTimeout(timer));
+    toastTimersRef.current.clear();
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -535,7 +551,7 @@ function TgBotSection() {
       setCodeGenerating(true);
       const result = await createTgCode({ note: codeNote || undefined });
       setShowNewCode(result.code);
-      setCodes([result, ...codes]);
+      setCodes((prev) => [result, ...prev]);
       setCodeNote('');
       showToast('管理员配对码已生成');
     } catch (err) {
@@ -549,7 +565,7 @@ function TgBotSection() {
   const handleDeleteCode = async (id: number) => {
     try {
       await deleteTgCode(id);
-      setCodes(codes.filter((c) => c.id !== id));
+      setCodes((prev) => prev.filter((c) => c.id !== id));
       showToast('配对码已吊销');
     } catch (err) {
       console.error(err);
@@ -560,7 +576,7 @@ function TgBotSection() {
   const handleUpdateUserDisabled = async (id: number, disabled: boolean) => {
     try {
       await updateTgUser(id, { disabled });
-      setUsers(users.map((u) => (u.id === id ? { ...u, disabled } : u)));
+      setUsers((prev) => prev.map((u) => (u.id === id ? { ...u, disabled } : u)));
       showToast(disabled ? '用户已停用' : '用户已启用');
     } catch (err) {
       console.error(err);
@@ -572,7 +588,7 @@ function TgBotSection() {
     if (confirm('确定要移除这个管理员吗？')) {
       try {
         await deleteTgUser(id);
-        setUsers(users.filter((u) => u.id !== id));
+        setUsers((prev) => prev.filter((u) => u.id !== id));
         showToast('管理员已移除');
       } catch (err) {
         console.error(err);
@@ -677,7 +693,7 @@ function TgBotSection() {
               <span>轮询线程: {config?.polling ? '运行中' : '未运行'}</span>
               <span>
                 上次摘要: {config?.summary_last_sent_at
-                  ? format(new Date(config.summary_last_sent_at), 'MM-dd HH:mm:ss')
+                  ? formatDateSafe(config.summary_last_sent_at, 'MM-dd HH:mm:ss')
                   : '尚未发送'}
               </span>
             </div>
@@ -758,9 +774,13 @@ function TgBotSection() {
                 {showNewCode}
               </code>
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(showNewCode);
-                  showToast('已复制到剪贴板');
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(showNewCode);
+                    showToast('已复制到剪贴板');
+                  } catch {
+                    showToast('复制失败，请手动选中复制', 'error');
+                  }
                 }}
                 className="p-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white transition-colors"
               >
@@ -794,10 +814,10 @@ function TgBotSection() {
                       管理员 •{' '}
                       {code.used_by_chat_id ? (
                         <span className="text-emerald-600 dark:text-emerald-400">
-                          已用 ({format(new Date(code.used_at!), 'MM-dd HH:mm')})
+                          已用 ({formatDateSafe(code.used_at, 'MM-dd HH:mm')})
                         </span>
                       ) : (
-                        <span>过期: {format(new Date(code.expires_at), 'MM-dd HH:mm')}</span>
+                        <span>过期: {formatDateSafe(code.expires_at, 'MM-dd HH:mm')}</span>
                       )}
                     </div>
                   </div>
@@ -850,7 +870,7 @@ function TgBotSection() {
                   </span>
                 </div>
                 <div className="text-xs text-gray-500 dark:text-slate-400">
-                  配对时间：{format(new Date(user.paired_at), 'MM-dd HH:mm:ss')}
+                  配对时间：{formatDateSafe(user.paired_at, 'MM-dd HH:mm:ss')}
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -899,7 +919,7 @@ function TgBotSection() {
                       {user.chat_id}
                     </td>
                     <td className="px-6 py-4 text-xs text-gray-500 dark:text-slate-400">
-                      {format(new Date(user.paired_at), 'MM-dd HH:mm:ss')}
+                      {formatDateSafe(user.paired_at, 'MM-dd HH:mm:ss')}
                     </td>
                     <td className="px-6 py-4 text-right space-x-2">
                       <button

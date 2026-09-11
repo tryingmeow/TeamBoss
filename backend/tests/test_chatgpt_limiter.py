@@ -13,9 +13,28 @@ import jwt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.chatgpt_client import ChatGPTClient
+from app.chatgpt_client import ChatGPTClient, mask_secrets
 from app import chatgpt_limiter
 from app import database as app_database
+
+
+class MaskSecretsTest(unittest.TestCase):
+    def test_masks_url_credentials_keeping_scheme_and_host(self):
+        text = "proxy error for http://proxyuser:s3cr3t-pass@10.0.0.1:8080/foo"
+        masked = mask_secrets(text)
+        self.assertNotIn("proxyuser", masked)
+        self.assertNotIn("s3cr3t-pass", masked)
+        self.assertIn("http://***@10.0.0.1:8080/foo", masked)
+
+    def test_masks_url_credentials_with_https_and_no_password(self):
+        text = "LocationParseError: https://onlyuser@example.com:443/"
+        masked = mask_secrets(text)
+        self.assertNotIn("onlyuser", masked)
+        self.assertIn("https://***@example.com:443/", masked)
+
+    def test_leaves_plain_urls_without_credentials_untouched(self):
+        text = "GET https://chatgpt.com/backend-api/teams failed"
+        self.assertEqual(mask_secrets(text), text)
 
 
 class FakeClient(ChatGPTClient):
