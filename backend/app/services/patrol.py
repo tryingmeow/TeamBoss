@@ -38,7 +38,7 @@
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ..chatgpt_client import ChatGPTClient
 from ..chatgpt_limiter import run_chatgpt_call_sync
@@ -1134,7 +1134,7 @@ def _patrol_strict_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id
 
 # ── 主入口 ───────────────────────────────────────────────────────────────
 
-def run_patrol(dry_run: bool, skip_team_ids: Optional[set[str]] = None) -> dict:
+def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
     """跑一轮巡逻。返回 {"events": [...], "kicked": int, "would_kick": int, ...}。
 
     events 里每条要么是某个候选的踢人/预演动作记录，要么是豁免车队的
@@ -1142,10 +1142,14 @@ def run_patrol(dry_run: bool, skip_team_ids: Optional[set[str]] = None) -> dict:
     每个 risk == 'over' 的车队（无论 dry-run 还是真踢、无论是否豁免）都会
     经 notify_admins_sync 推一条摘要给 TG 管理员。
 
-    skip_team_ids：本轮不处理的 team（典型场景是 scheduler.data_sync_job 里刚刚
-    同步失败的那几个）——"每个 team 独立判断，不再一票否决"：调用方不应该因为
-    某个 team 同步失败就不敢调用本函数，而是把失败的 id 传进来，其余 team 照常巡逻。
-    默认 None（不跳过任何 team），行为与调用方不传这个参数时完全一致。
+    ``allow_team_ids`` 是**白名单**，必传：只有本轮刚刚成功刷新过快照的 team 才
+    会被巡逻，其余一律不碰。这是故意选的方向——黑名单（"把本轮失败的 team 传进
+    来跳过"）失败时是敞开的：调用方任何一次提前 return / 异常 / 忘记传参，都会
+    交出一个空集合，于是巡逻拿着每个 team 的陈旧缓存全量开工，按冻住的席位数判
+    超员、按冻住的名单挑人。白名单失败时是关闭的：拿不到就什么都不做。
+
+    白名单已经隐含了"同步失败的 team 不巡逻"和"挂起的 team 不巡逻"，调用方不需要
+    再额外传排除集合；同理，这里也不需要任何缓存新鲜度检查。
     """
     events: list[dict] = []
     kicked = 0
@@ -1155,7 +1159,7 @@ def run_patrol(dry_run: bool, skip_team_ids: Optional[set[str]] = None) -> dict:
     strict_kicked = 0
     strict_would_kick = 0
     conn: Optional[sqlite3.Connection] = None
-    skip_ids = {str(x) for x in (skip_team_ids or set())}
+    allow_ids = {str(x) for x in (allow_team_ids or ())}
 
     try:
         conn = _get_sync_db()
@@ -1185,8 +1189,9 @@ def run_patrol(dry_run: bool, skip_team_ids: Optional[set[str]] = None) -> dict:
             codex_enabled = bool(team["is_codex_enabled"])
             seats_entitled = team["seats_entitled"] or 0
 
-            # 本轮明确要求跳过的 team（比如同步刚失败）：完全不碰，不初始化、不判断、不通知。
-            if str(team_id) in skip_ids:
+            # 不在本轮白名单里的 team（同步失败、已挂起、或调用方压根没刷新过它）：
+            # 完全不碰，不初始化、不判断、不通知。
+            if str(team_id) not in allow_ids:
                 continue
 
             # 巡逻已开启后新增/首次启用的 Team 必须单独保护。建立基线的这一轮

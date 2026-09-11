@@ -15,6 +15,10 @@ from ..services.patrol import (
     parse_exempt_team_ids,
     run_patrol,
 )
+from ..services.seat_capacity import (
+    fetch_live_chatgpt_seat_capacity,
+    update_capacity_cache,
+)
 from ..services.team_clients import get_team_client
 
 router = APIRouter(prefix="/api/patrol", tags=["patrol"])
@@ -181,9 +185,49 @@ async def update_patrol_settings(req: PatrolSettingsUpdate):
 
 @router.post("/run")
 async def trigger_patrol_run(req: PatrolRunRequest):
+    """手动触发一轮巡逻。
+
+    ``run_patrol`` 只处理白名单里的 team，而这个入口没有"刚刚跑完的同步轮次"可以
+    继承，所以白名单必须由它自己挣来：逐个 active team 现场刷新执行链路的三项输入
+    （成员/邀请名单、订阅、席位数），只有全部刷新成功的 team 才进白名单。刷新失败
+    的 team 这一轮不碰——手动按钮同样不允许拿着一份从没刷新过的冻结缓存去判超员、
+    挑人。和 ``/activate`` 的"全部刷新成功才动手"是同一条原则，只是这里退化成按
+    team 生效，不整体拒绝。
+    """
+    async with get_db() as db:
+        cursor = await db.execute("SELECT id FROM teams WHERE status = 'active'")
+        team_rows = await cursor.fetchall()
+
+    allow_team_ids: list[str] = []
+    refresh_failures: list[str] = []
+    for row in team_rows:
+        team_id = row["id"]
+        try:
+            client = await get_team_client(team_id)
+            await fetch_and_cache_members(team_id, client)
+            capacity, subscription, seat_counts, _pending = (
+                await fetch_live_chatgpt_seat_capacity(client)
+            )
+            await update_capacity_cache(team_id, subscription, seat_counts)
+        except Exception as exc:
+            refresh_failures.append(f"{team_id}: {exc}")
+            continue
+        allow_team_ids.append(team_id)
+
+    if refresh_failures:
+        await log_operation(
+            None,
+            "patrol_manual_run",
+            None,
+            f"patrolled={len(allow_team_ids)}, skipped_unrefreshed={len(refresh_failures)}",
+            "success",
+            "; ".join(refresh_failures),
+        )
+
     # run_patrol 是同步阻塞函数（内部走同步 sqlite3 + 同步 HTTP 调用），
     # 丢进线程池跑，不阻塞事件循环。与 tg_notify.notify_admins 的做法一致。
-    result = await asyncio.to_thread(run_patrol, req.dry_run)
+    result = await asyncio.to_thread(run_patrol, req.dry_run, allow_team_ids)
+    result["skipped_teams"] = refresh_failures
     return result
 
 

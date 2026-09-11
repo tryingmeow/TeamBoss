@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Settings } from '../types';
 import { fetchSettings, updateSettings } from '../api/client';
+import { invalidateKickPolicy } from './useKickPolicy';
 
 
 export function useSettings() {
@@ -31,6 +32,9 @@ export function useSettings() {
 
   const save = useCallback(async (data: Partial<Settings>) => {
     await updateSettings(data);
+    // 到期选择器用 useKickPolicy 缓存宽限规则，改完设置必须让它重新拉，
+    // 否则「预计 X 移出」还在按旧规则算。
+    invalidateKickPolicy();
     setSettings(prev => ({ ...prev, ...data }));
   }, []);
 

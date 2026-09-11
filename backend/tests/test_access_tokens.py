@@ -47,7 +47,8 @@ class AccessTokenQueryLimitTest(unittest.IsolatedAsyncioTestCase):
             check_rate_limit.assert_awaited_once_with(
                 request, access_tokens._limiter_query
             )
-            query_membership.assert_awaited_once_with("user@example.com")
+            # 第二个实参是"出示的兑换码"（兑换历史的凭据），这里两个入口都没传。
+            query_membership.assert_awaited_once_with("user@example.com", None)
 
             check_rate_limit.reset_mock()
             query_membership.reset_mock()
@@ -60,7 +61,8 @@ class AccessTokenQueryLimitTest(unittest.IsolatedAsyncioTestCase):
             check_rate_limit.assert_awaited_once_with(
                 request, access_tokens._limiter_query
             )
-            query_membership.assert_awaited_once_with("user@example.com")
+            # 第二个实参是"出示的兑换码"（兑换历史的凭据），这里两个入口都没传。
+            query_membership.assert_awaited_once_with("user@example.com", None)
 
 
 class AccessTokenRedemptionSafetyTest(unittest.IsolatedAsyncioTestCase):

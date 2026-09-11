@@ -121,6 +121,22 @@ class PatrolTest(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _patrol(self, **kwargs):
+        """跑一轮巡逻，白名单 = 当前所有 active team。
+
+        run_patrol 现在收的是白名单（只巡逻本轮刚刷新成功的 team），没有默认值：
+        忘记传 = 什么都不做。这些用例关心的是巡逻自身的判定，所以统一把全部
+        active team 放进白名单；白名单本身的行为由 PatrolAllowListTest 覆盖。
+        """
+        conn = self._conn()
+        team_ids = [
+            row["id"] for row in conn.execute(
+                "SELECT id FROM teams WHERE status = 'active'"
+            ).fetchall()
+        ]
+        conn.close()
+        return patrol.run_patrol(allow_team_ids=team_ids, **kwargs)
+
     def _operation_logs(self, action=None):
         conn = self._conn()
         if action:
@@ -159,7 +175,7 @@ class PatrolTest(unittest.TestCase):
         _set_setting(conn, "patrol_kick_enabled", "1")
         conn.close()
 
-        result = patrol.run_patrol(dry_run=True)
+        result = self._patrol(dry_run=True)
 
         self.assertEqual(result["events"], [])
         self.assertEqual(result["kicked"], 0)
@@ -180,7 +196,7 @@ class PatrolTest(unittest.TestCase):
         _set_setting(conn, "patrol_kick_enabled", "1")
         conn.close()
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["events"], [])
         self.assertEqual(result["kicked"], 0)
@@ -202,7 +218,7 @@ class PatrolTest(unittest.TestCase):
         _set_setting(conn, "patrol_kick_enabled", "1")
         conn.close()
 
-        result = patrol.run_patrol(dry_run=True)  # dry_run 强制空跑，安全地看会选中谁
+        result = self._patrol(dry_run=True)  # dry_run 强制空跑，安全地看会选中谁
 
         would_kick_events = [e for e in result["events"] if e.get("action") == "would_kick"]
         emails = [e["email"] for e in would_kick_events]
@@ -227,7 +243,7 @@ class PatrolTest(unittest.TestCase):
         _set_setting(conn, "patrol_kick_enabled", "1")
         conn.close()
 
-        result = patrol.run_patrol(dry_run=True)
+        result = self._patrol(dry_run=True)
 
         would_kick_events = [e for e in result["events"] if e.get("action") == "would_kick"]
         emails = [e["email"] for e in would_kick_events]
@@ -250,7 +266,7 @@ class PatrolTest(unittest.TestCase):
         patrol.ChatGPTClient = RaisingChatGPTClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)  # 调用方明确要求"别空跑"
+        result = self._patrol(dry_run=False)  # 调用方明确要求"别空跑"
 
         self.assertEqual(result["kicked"], 0)
         self.assertEqual(result["would_kick"], 1)
@@ -279,7 +295,7 @@ class PatrolTest(unittest.TestCase):
         patrol.ChatGPTClient = RaisingChatGPTClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["kicked"], 0)
         self.assertEqual(result["would_kick"], 0)
@@ -386,7 +402,7 @@ class PatrolTest(unittest.TestCase):
         conn.close()
 
         patrol.ChatGPTClient = RaisingChatGPTClient
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["kicked"], 0)
         self.assertEqual(result["would_kick"], 0)
@@ -443,7 +459,7 @@ class PatrolTest(unittest.TestCase):
         _set_setting(conn, "patrol_kick_enabled", "1")
         conn.close()
 
-        result = patrol.run_patrol(dry_run=True)
+        result = self._patrol(dry_run=True)
 
         would_kick_events = [e for e in result["events"] if e.get("action") == "would_kick"]
         self.assertEqual([e["email"] for e in would_kick_events], ["only-candidate@x.com"])
@@ -479,7 +495,7 @@ class PatrolTest(unittest.TestCase):
         patrol.ChatGPTClient = FakeClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["kicked"], 1)
         self.assertEqual(result["would_kick"], 0)
@@ -682,6 +698,22 @@ class _PatrolNewFeaturesTestBase(unittest.TestCase):
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _patrol(self, **kwargs):
+        """跑一轮巡逻，白名单 = 当前所有 active team。
+
+        run_patrol 现在收的是白名单（只巡逻本轮刚刷新成功的 team），没有默认值：
+        忘记传 = 什么都不做。这些用例关心的是巡逻自身的判定，所以统一把全部
+        active team 放进白名单；白名单本身的行为由 PatrolAllowListTest 覆盖。
+        """
+        conn = self._conn()
+        team_ids = [
+            row["id"] for row in conn.execute(
+                "SELECT id FROM teams WHERE status = 'active'"
+            ).fetchall()
+        ]
+        conn.close()
+        return patrol.run_patrol(allow_team_ids=team_ids, **kwargs)
+
     def _operation_logs(self, action=None):
         conn = self._conn()
         if action:
@@ -728,7 +760,7 @@ class PatrolInviteRevokeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = FakeInviteClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["invites_revoked"], 1)
         self.assertEqual(result["invites_would_revoke"], 0)
@@ -765,7 +797,7 @@ class PatrolInviteRevokeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = RaisingInviteClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)  # 若代码试图真的撤邀请，站岗类会让测试失败
+        result = self._patrol(dry_run=False)  # 若代码试图真的撤邀请，站岗类会让测试失败
 
         self.assertEqual(result["invites_revoked"], 0)
         self.assertEqual(self._operation_logs("patrol_revoke_invite"), [])
@@ -903,7 +935,7 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = RaisingInviteClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["strict_kicked"], 0)
         self.assertEqual(result["strict_would_kick"], 0)
@@ -957,7 +989,7 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = FakeStrictClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["strict_kicked"], 1)
         strict_events = [e for e in result["events"] if e.get("action") == "strict_kick"]
@@ -996,7 +1028,7 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = RaisingInviteClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result1 = patrol.run_patrol(dry_run=False)
+        result1 = self._patrol(dry_run=False)
         self.assertEqual(result1["strict_kicked"], 0)
         self.assertEqual(result1["strict_would_kick"], 0)
         flagged_logs = self._operation_logs("patrol_strict_flagged")
@@ -1005,7 +1037,7 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
 
         notify_count_after_first_run = len(self.notify_calls)
 
-        result2 = patrol.run_patrol(dry_run=False)  # 第二轮：仍在等待期内，不应重复通知/仍不动手
+        result2 = self._patrol(dry_run=False)  # 第二轮：仍在等待期内，不应重复通知/仍不动手
         self.assertEqual(result2["strict_kicked"], 0)
         self.assertEqual(len(self._operation_logs("patrol_strict_flagged")), 1)  # 没有新增
         self.assertEqual(len(self.notify_calls), notify_count_after_first_run)  # 没有重复推送
@@ -1046,7 +1078,7 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = RaisingInviteClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["strict_kicked"], 0)
         self.assertEqual(result["strict_would_kick"], 0)
@@ -1074,7 +1106,7 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = RaisingInviteClient  # get_members/remove_member 任一被调用都会让测试失败
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(result["strict_kicked"], 0)
         self.assertEqual(result["strict_would_kick"], 0)
@@ -1085,11 +1117,11 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         self.assertTrue(any("数量过多" in t and "3 / 团队共 4 人" in t for t in self.notify_calls))
         self.assertEqual(len(self._operation_logs("patrol_strict_batch_guard")), 1)
 
-# ── 三、每个 team 独立判断，不再一票否决（run_patrol 的 skip_team_ids 参数） ──────
+# ── 三、每个 team 独立判断（run_patrol 的 allow_team_ids 白名单） ────────────
 
 class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
 
-    def test_run_patrol_skip_team_ids_isolates_failed_team_only(self):
+    def test_run_patrol_allow_list_isolates_unrefreshed_team_only(self):
         conn = self._conn()
         _insert_team(conn, "team-healthy", seats_entitled=0)
         _insert_member_cache(conn, "team-healthy", [
@@ -1126,7 +1158,7 @@ class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
         patrol.ChatGPTClient = SelectiveClient
         patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
 
-        result = patrol.run_patrol(dry_run=False, skip_team_ids={"team-failed"})
+        result = patrol.run_patrol(dry_run=False, allow_team_ids={"team-healthy"})
 
         self.assertEqual(result["kicked"], 1)
         healthy_events = [e for e in result["events"] if e.get("team_id") == "team-healthy"]
@@ -1150,6 +1182,35 @@ class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
             if log.get("team_id") == "team-failed"
         ]
         self.assertEqual(failed_logs, [])
+
+    def test_empty_allow_list_patrols_nothing(self):
+        """白名单是故意选的方向：失败关闭。
+
+        黑名单在调用方提前 return / 抛异常 / 忘记传参时会交出一个空集合，巡逻就
+        拿着每个 team 的陈旧缓存全量开工——按冻住的席位数判超员、按冻住的名单挑
+        人。白名单的空集合意味着什么都不做。
+        """
+        conn = self._conn()
+        _insert_team(conn, "team-a", seats_entitled=0)
+        _insert_member_cache(conn, "team-a", [
+            _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("candidate@x.com", "u-a", source="detected",
+                     first_seen_at="2026-07-10T00:00:00Z"),
+        ])
+        _insert_expiry_row(conn, "team-a", email="candidate@x.com", user_id="u-a",
+                            source="detected", first_seen_at="2026-07-10T00:00:00Z")
+        _insert_team_baseline(conn, "team-a")
+        self._arm_globally(conn)
+        conn.close()
+
+        patrol.ChatGPTClient = RaisingInviteClient
+        patrol.run_chatgpt_call_sync = lambda func, *a, **kw: func(*a, **kw)
+
+        result = patrol.run_patrol(dry_run=False, allow_team_ids=set())
+
+        self.assertEqual(result["kicked"], 0)
+        self.assertEqual(result["events"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

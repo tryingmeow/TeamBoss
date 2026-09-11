@@ -383,10 +383,11 @@ async def get_team_invoices(team_id: str):
         rows = await cursor.fetchall()
 
     if not rows:
-        # 库里一条都没有就现场拉一次（内部仍受 24 小时缓存约束）。失败不
-        # 报错，照常返回空列表，界面显示「暂无账单数据」。
+        # 库里一条都没有就现场拉一次。这是用户主动触发的入口，force=True 绕过
+        # 24 小时节流：定时轮次会因为上一次失败而退避，用户点开的时候必须还能
+        # 立刻重试。失败不报错，照常返回空列表，界面显示「暂无账单数据」。
         try:
-            await asyncio.to_thread(refresh_invoices_for_team_blocking, team_id)
+            await asyncio.to_thread(refresh_invoices_for_team_blocking, team_id, True)
         except Exception:
             pass
         async with get_db() as db:

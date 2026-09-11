@@ -181,7 +181,13 @@ export default function JoinPage() {
 
     setQueryLoading(true);
     try {
-      const data = await queryMembershipStatus({ query: email.trim() });
+      // 兑换记录属于隐私数据，后端只在调用方能出示本人的一张兑换码时才返回。
+      // 不填也能查到车队和到期时间，只是记录那一段会是空的。
+      const proof = token.trim();
+      const data = await queryMembershipStatus({
+        query: email.trim(),
+        ...(proof ? { token: proof } : {}),
+      });
       setStatusResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : '查询失败');
@@ -249,22 +255,25 @@ export default function JoinPage() {
               />
             </label>
 
-            {tab === 'redeem' && (
-              <label className="block">
-                <span className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  <KeyRound size={15} />
-                  Token
-                </span>
-                <input
-                  type="text"
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                  placeholder="atm_..."
-                  autoComplete="one-time-code"
-                  className="w-full px-3 py-2.5 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-xl text-sm text-gray-900 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all font-mono"
-                />
-              </label>
-            )}
+            <label className="block">
+              <span className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                <KeyRound size={15} />
+                Token
+                {tab === 'query' && (
+                  <span className="font-normal text-xs text-gray-400 dark:text-gray-500">
+                    选填，填写后可查看兑换记录
+                  </span>
+                )}
+              </span>
+              <input
+                type="text"
+                value={token}
+                onChange={(event) => setToken(event.target.value)}
+                placeholder="atm_..."
+                autoComplete="one-time-code"
+                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-xl text-sm text-gray-900 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all font-mono"
+              />
+            </label>
 
             {error && (
               <div className="flex items-start gap-2 rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">

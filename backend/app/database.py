@@ -1,7 +1,10 @@
 import aiosqlite
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 def get_db_dir() -> str:
@@ -45,6 +48,26 @@ async def get_db():
         yield db
     finally:
         await db.close()
+
+
+async def _migrate(db, statement: str) -> None:
+    """执行一条幂等的 schema 迁移语句（通常是 ``ALTER TABLE ... ADD COLUMN``）。
+
+    sqlite 的 ``ADD COLUMN`` 没有 ``IF NOT EXISTS``，列已存在时必然报错——这是升级到
+    已经跑过这条迁移的库时的预期路径，必须吞掉，不能阻塞启动。但把它写成
+    ``except Exception: pass`` 会把"列已存在"之外的所有失败（磁盘满、库被锁、语句
+    本身写错了列名/类型……）一起吞掉，迁移悄悄没生效，直到几个版本后在某个完全无关
+    的地方炸出一个看不出原因的运行时错误。所以这里把"已存在"之外的失败单独识别出来，
+    打一条 warning 日志（带上语句和原始异常），其余情况仍然原样吞掉、不阻塞启动、
+    不引入任何 schema 版本门槛。
+    """
+    try:
+        await db.execute(statement)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "duplicate column" in message or "already exists" in message:
+            return
+        logger.warning("schema 迁移执行失败，已跳过（不阻塞启动）: %s | %s", statement, exc)
 
 
 async def init_database():
@@ -115,18 +138,9 @@ async def init_database():
         """)
 
         # migrate: add first_seen_at / source columns for existing databases
-        try:
-            await db.execute("ALTER TABLE member_expiry ADD COLUMN first_seen_at TEXT")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE member_expiry ADD COLUMN source TEXT DEFAULT 'system'")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE member_expiry ADD COLUMN kick_source TEXT")
-        except Exception:
-            pass
+        await _migrate(db, "ALTER TABLE member_expiry ADD COLUMN first_seen_at TEXT")
+        await _migrate(db, "ALTER TABLE member_expiry ADD COLUMN source TEXT DEFAULT 'system'")
+        await _migrate(db, "ALTER TABLE member_expiry ADD COLUMN kick_source TEXT")
 
         # 命中率高的查找：member_expiry 上按 team_id 单独过滤（如巡检拉全量成员）
         # 以及按 team_id + lower(email) 精确定位一条记录（如踢人前查 source/expires_at，
@@ -199,10 +213,7 @@ async def init_database():
 
         # member_watch 列迁移（已有库可能缺新列）
         for col, col_type in [("tg_chat_id", "TEXT"), ("tg_message_id", "INTEGER")]:
-            try:
-                await db.execute(f"ALTER TABLE member_watch ADD COLUMN {col} {col_type}")
-            except Exception:
-                pass
+            await _migrate(db, f"ALTER TABLE member_watch ADD COLUMN {col} {col_type}")
 
         # 自助加入/续期 token（只存 SHA-256，明文 token 只在生成响应中返回一次）
         await db.execute("""
@@ -296,10 +307,7 @@ async def init_database():
             "ALTER TABLE pending_invite_reconciliations ADD COLUMN token_use_id INTEGER",
             "ALTER TABLE pending_invite_reconciliations ADD COLUMN kind TEXT DEFAULT 'backfill'",
         ):
-            try:
-                await db.execute(stmt)
-            except Exception:
-                pass
+            await _migrate(db, stmt)
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS proxies (
@@ -503,14 +511,8 @@ async def init_database():
             )
         """)
 
-        try:
-            await db.execute("ALTER TABLE teams ADD COLUMN proxy_id INTEGER")
-        except Exception:
-            pass
-        try:
-            await db.execute("ALTER TABLE teams ADD COLUMN remark TEXT")
-        except Exception:
-            pass
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN proxy_id INTEGER")
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN remark TEXT")
         for statement in (
             "ALTER TABLE teams ADD COLUMN is_codex_enabled INTEGER DEFAULT 0",
             "ALTER TABLE teams ADD COLUMN billing_symbol TEXT",
@@ -553,10 +555,7 @@ async def init_database():
             "ALTER TABLE teams ADD COLUMN sync_suspended_at TEXT",
             "ALTER TABLE teams ADD COLUMN sync_probe_at TEXT",
         ):
-            try:
-                await db.execute(statement)
-            except Exception:
-                pass
+            await _migrate(db, statement)
 
         # 历史库先用旧等式回填，保证升级后 API 合同立即可用；下一轮官方
         # seat_type_counts 同步会用 default 字段覆盖为权威值。

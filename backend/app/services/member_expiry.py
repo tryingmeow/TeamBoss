@@ -397,6 +397,11 @@ async def _insert_pending_invite_reconciliation(
     ``kind='backfill'``：远端邀请已确认成功、本地 member_expiry 落库失败，调度器
     看到人出现后按行内 ``expires_at`` 回填，并顺带结清 ``token_use_id`` 这次兑换。
 
+    ``kind='extend'``：``backfill`` 的累加版。远端邀请/续期已确认成功、本地累加
+    写入失败，行内 ``expires_at`` 是"落盘时刻 + 购买时长"，调度器据此还原时长并
+    在成员现有到期时间之上追加（绝不能只取 max，否则更远的现有到期会把这次购买
+    的时长吃掉）。
+
     ``kind='barrier'``：远端结果未定的自助邀请，只借这张表挡住巡逻撤销。调度器
     绝不能据此写到期时间——结算必须走 ``reconcile_pending_redemptions`` 的累加
     语义，否则同一张码会被两条恢复路径各加一次时长。
@@ -545,11 +550,11 @@ async def record_confirmed_invite_extension(
         team_id,
         user_id,
         email,
-        # 仅在"所有本地写入都失败"的兜底记录里使用：至少保证人工/对账补回的
-        # 时长不少于这次购买的时长。
-        _nominal_expiry_iso(duration),
+        # 兜底行的到期时间由 grant_duration 在落盘那一刻算出（见下）。
+        None,
         source,
         token_use_id,
+        grant_duration=duration,
     )
 
 
@@ -569,6 +574,8 @@ async def _persist_confirmed_membership(
     expires_iso: Optional[str],
     source: str,
     token_use_id: Optional[int] = None,
+    *,
+    grant_duration: Optional[str] = None,
 ) -> Optional[str]:
     """执行 ``writer``（本地成员记录写入），带重试 + 持久化兜底，且永不抛异常。
 
@@ -593,6 +600,17 @@ async def _persist_confirmed_membership(
     # All retries exhausted. OpenAI already has this member — the gap must
     # not disappear silently.
     error_text = str(last_exc) if last_exc else "unknown error"
+
+    # 累加式写入的兜底行必须保住"买到的时长"，不是一个名义到期时间：调度器回填
+    # 时若只取 max(行内到期, 现有到期)，一个已经有更远到期时间的成员会让这次购买
+    # 的时长凭空蒸发，而兑换却被置成 success，用户和管理员都看不到任何异常。
+    # 这里把行标成 kind='extend'，到期时间在**落盘这一刻**按 now + duration 算，
+    # 调度器就能用 (行内到期 - 行的 created_at) 还原出购买时长并按
+    # max(现有到期, 现在) + 时长 追加——和 extend_member_expiry 同一套语义。
+    reconciliation_kind = "backfill"
+    if grant_duration is not None:
+        expires_iso = _nominal_expiry_iso(grant_duration)
+        reconciliation_kind = "extend"
     backfill_detail = (
         f"member_expiry write failed after {_CONFIRM_WRITE_ATTEMPTS} attempts; "
         f"OpenAI invite already succeeded and MUST be backfilled manually: "
@@ -604,6 +622,7 @@ async def _persist_confirmed_membership(
         await _insert_pending_invite_reconciliation(
             team_id, user_id, email, expires_iso, source, error_text,
             token_use_id=token_use_id,
+            kind=reconciliation_kind,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.error(

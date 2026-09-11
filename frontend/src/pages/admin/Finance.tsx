@@ -14,6 +14,7 @@ import { AlertTriangle, ChevronDown, Clock, CreditCard, ExternalLink, KeyRound, 
 import * as Popover from '@radix-ui/react-popover';
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { formatDateSafe } from '../../lib/formatDate';
+import CostTrendChart from '../../components/CostTrendChart';
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
 
@@ -53,7 +54,21 @@ function timelineCardKey(item: FinanceTimelineItem) {
   return item.card_key || `${(item.card_brand || '').trim().toLowerCase()}:${item.card_last4}`;
 }
 
+/**
+ * 已逾期必须和"还剩几天"分开：逾期 30 天的续费此前会显示成「今天」并落进
+ * 红色≤7天角标里，看上去只是"今天要处理"，而不是"已经欠了一个月"。
+ */
+function timelineDaysLabel(daysUntil: number): string {
+  if (daysUntil < 0) return `已逾期 ${Math.abs(daysUntil)} 天`;
+  if (daysUntil === 0) return '今天';
+  return `${daysUntil}天`;
+}
+
 function timelineDaysBadgeClass(daysUntil: number) {
+  if (daysUntil < 0) {
+    // 实心 + 描边：逾期在一屏红色角标里也能一眼挑出来。
+    return 'bg-rose-600 text-white ring-1 ring-rose-700 dark:bg-rose-600 dark:text-white dark:ring-rose-400/60';
+  }
   if (daysUntil <= 7) {
     return 'bg-rose-50 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300';
   }
@@ -769,6 +784,9 @@ export default function Finance() {
         </div>
       </div>
 
+      {/* Cost trend */}
+      <CostTrendChart />
+
       {/* Renewal Timeline / Cards */}
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
@@ -866,7 +884,7 @@ export default function Finance() {
                             {formatDateSafe(item.date, 'MM-dd')}
                           </div>
                           <span className={`rounded px-2.5 py-1 text-xs font-medium whitespace-nowrap ${badgeBg}`}>
-                            {daysUntil > 0 ? `${daysUntil}天` : '今天'}
+                            {timelineDaysLabel(daysUntil)}
                           </span>
                         </div>
                         <div className="mt-3 min-w-0 sm:mt-0">

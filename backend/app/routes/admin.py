@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from ..client_ip import RateLimiter as _RateLimiter, get_client_ip
+from ..client_ip import RateLimiter as _RateLimiter, get_client_ip_info
 from ..database import log_operation
 from ..security import (
     change_admin_password,
@@ -144,9 +144,9 @@ def _api_key_prefix(api_key: str) -> str:
 
 @router.post("/login", response_model=AdminLoginResponse)
 async def login(req: AdminLoginRequest, request: Request):
-    client_ip = get_client_ip(request)
+    client_ip, is_proxy_self_identity = get_client_ip_info(request)
 
-    # 速率限制检查
+    # 速率限制检查（不受下面"共享身份不锁定"规则影响：请求频率限制始终生效）
     if not _limiter_login.is_allowed(client_ip):
         await log_operation(None, "admin_login", None, f"ip={client_ip}", "failed", "Rate limit exceeded")
         raise HTTPException(
@@ -154,8 +154,11 @@ async def login(req: AdminLoginRequest, request: Request):
             detail="请求过于频繁，请稍后再试",
         )
 
-    # 失败锁定检查
-    if _failure_tracker.is_locked(client_ip):
+    # 失败锁定检查。is_proxy_self_identity=True 说明这个 IP 其实是可信代理自己的
+    # 地址（部署把每个访客都坍缩成了同一个身份，见 client_ip.get_client_ip_info），
+    # 锁住它等于把全站所有访客一起锁掉、管理员也不例外——所以这种情况下只限流、
+    # 不锁定；真实的每访客身份（正确配置下的正常情况）锁定逻辑完全不变。
+    if not is_proxy_self_identity and _failure_tracker.is_locked(client_ip):
         await log_operation(None, "admin_login", None, f"ip={client_ip}", "failed", "Account locked due to multiple failures")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -173,7 +176,7 @@ async def login(req: AdminLoginRequest, request: Request):
             "failed",
             "Invalid password",
         )
-        if is_locked:
+        if is_locked and not is_proxy_self_identity:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="登录失败次数过多，请 15 分钟后再试",

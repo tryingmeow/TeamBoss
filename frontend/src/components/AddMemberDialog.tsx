@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { AlertTriangle, X } from 'lucide-react';
-import ExpiryPicker from './ExpiryPicker';
+import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
+import { useKickPolicy } from '../hooks/useKickPolicy';
+import { selectionToDuration } from '../lib/expiry';
 import { inviteMember, OverageConfirmationError } from '../api/client';
 import { SEAT_TYPE_OPTIONS } from '../lib/seatType';
 import type { SeatType } from '../types';
@@ -43,6 +45,9 @@ function asBatchResult(result: unknown): BatchInviteResultLike | null {
   return candidate;
 }
 
+// 新增成员的默认到期时间一直是 30 天，换成结构化选择项后仍然是同一个值。
+const DEFAULT_EXPIRY: ExpirySelection = { kind: 'duration', value: '30d' };
+
 function parseEmails(raw: string): string[] {
   return raw.split(/\r?\n/).map((e) => e.trim()).filter(Boolean);
 }
@@ -59,9 +64,10 @@ export default function AddMemberDialog({
 }: AddMemberDialogProps) {
   const [email, setEmail] = useState('');
   const [seatType, setSeatType] = useState<SeatType>('default');
-  const [expiry, setExpiry] = useState('30d');
+  const [expiry, setExpiry] = useState<ExpirySelection>(DEFAULT_EXPIRY);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const kickPolicy = useKickPolicy();
   const [confirmOverageOpen, setConfirmOverageOpen] = useState(false);
   const [overageMessage, setOverageMessage] = useState('');
   const [pendingInviteEmails, setPendingInviteEmails] = useState<string[]>([]);
@@ -70,7 +76,7 @@ export default function AddMemberDialog({
   const resetForm = () => {
     setEmail('');
     setSeatType(fixedSeatType ?? 'default');
-    setExpiry('30d');
+    setExpiry(DEFAULT_EXPIRY);
     setError('');
     setConfirmOverageOpen(false);
     setOverageMessage('');
@@ -107,7 +113,9 @@ export default function AddMemberDialog({
     setLoading(true);
     try {
       const effectiveSeatType = fixedSeatType ?? seatType;
-      const expiresIn = expiry === '永不' ? 'never' : expiry;
+      // 邀请接口只收 expires_in（durations 语法），所以日历选出来的绝对时刻
+      // 在这里折算成"从现在起 N 分钟"。请求体形状不变。
+      const expiresIn = selectionToDuration(expiry);
 
       if (submitInvites) {
         const result = await submitInvites({
@@ -220,7 +228,7 @@ export default function AddMemberDialog({
 
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-400 mb-2">过期时间</label>
-              <ExpiryPicker value={expiry} onChange={setExpiry} />
+              <ExpiryPicker value={expiry} onChange={setExpiry} policy={kickPolicy} disabled={loading} />
             </div>
 
             {error && (

@@ -130,23 +130,42 @@ def store_invoices_sync(conn: sqlite3.Connection, team_id: str, raw_invoices, no
     return stored
 
 
+def _mark_invoice_attempt_sync(conn: sqlite3.Connection, team_id: str, now: str) -> None:
+    """记一次"这个 team 的发票拉取已经尝试过了"。
+
+    ``teams.invoices_synced_at`` 就是这个节流点：成功和失败都要落，否则一个上游
+    持续报错的 team 会在**每一轮** data_sync 里被重试，24 小时一次的设计形同虚设。
+    需要立刻重试的入口（用户展开发票子表）走 force，不看这个时间戳。
+    """
+    conn.execute("UPDATE teams SET invoices_synced_at = ? WHERE id = ?", (now, team_id))
+    conn.commit()
+
+
 def refresh_invoices_sync(conn: sqlite3.Connection, client, team_id: str, now: str,
                           run_call, limit: int = INVOICE_FETCH_LIMIT):
-    """拉一次发票并入库。返回错误文本，成功返回 None。"""
+    """拉一次发票并入库。返回错误文本，成功返回 None。
+
+    一次调用取的是这个 team 的一整批发票，要么全成要么全败，没有部分成功要处理。
+    无论成败都推进节流时间戳（见 ``_mark_invoice_attempt_sync``）。
+    """
     result = run_call(client.get_invoices, limit)
     if not isinstance(result, dict) or "error" in result:
+        _mark_invoice_attempt_sync(conn, team_id, now)
         return (result or {}).get("error", "invalid response") if isinstance(result, dict) else "invalid response"
     items = result.get("data")
     if not isinstance(items, list):
+        _mark_invoice_attempt_sync(conn, team_id, now)
         return "invalid response: missing data list"
     store_invoices_sync(conn, team_id, items, now)
-    conn.execute("UPDATE teams SET invoices_synced_at = ? WHERE id = ?", (now, team_id))
-    conn.commit()
+    _mark_invoice_attempt_sync(conn, team_id, now)
     return None
 
 
 def refresh_invoices_if_stale_sync(conn: sqlite3.Connection, client, team_id: str,
-                                   now: str, run_call):
+                                   now: str, run_call, force: bool = False):
+    """节流版拉取。``force=True`` 跳过节流，给用户主动触发的入口用。"""
+    if force:
+        return refresh_invoices_sync(conn, client, team_id, now, run_call)
     row = conn.execute(
         "SELECT invoices_synced_at FROM teams WHERE id = ?", (team_id,)
     ).fetchone()
@@ -168,11 +187,13 @@ def refresh_invoices_if_stale_sync(conn: sqlite3.Connection, client, team_id: st
     return refresh_invoices_sync(conn, client, team_id, now, run_call)
 
 
-def refresh_invoices_for_team_blocking(team_id: str):
+def refresh_invoices_for_team_blocking(team_id: str, force: bool = False):
     """给路由层用的一次性拉取：自己开同步连接、自己组装客户端。
 
-    只在该团队一条发票都没有、且缓存过期时才会真的发请求。任何失败都
-    只返回错误文本，调用方照常返回库里已有的数据。
+    这是用户主动触发的那个入口（展开某个 team 的发票子表）。``force=True`` 时
+    绕过 24 小时节流：定时轮次会因为上一次失败而退避，用户点开的时候必须还能
+    立刻重试一次，否则一个坏掉过一次的 team 在界面上要空一整天。任何失败都只
+    返回错误文本，调用方照常返回库里已有的数据。
     """
     from ..chatgpt_limiter import run_chatgpt_call_sync
     from ..chatgpt_client import ChatGPTClient
@@ -194,7 +215,9 @@ def refresh_invoices_for_team_blocking(team_id: str):
             proxy_url=team["proxy_url"],
         )
         now = datetime.now(timezone.utc).isoformat()
-        return refresh_invoices_if_stale_sync(conn, client, team_id, now, run_chatgpt_call_sync)
+        return refresh_invoices_if_stale_sync(
+            conn, client, team_id, now, run_chatgpt_call_sync, force=force
+        )
     finally:
         conn.close()
 

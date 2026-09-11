@@ -1,7 +1,31 @@
 import { useState, useEffect } from 'react';
 import { fetchLogs as fetchLogsApi, type OperationLog } from '../../api/client';
-import { Activity, CheckCircle2, AlertCircle, Info, Clock, Search } from 'lucide-react';
+import { Activity, CheckCircle2, AlertCircle, Info, Clock, Search, Download } from 'lucide-react';
 import { formatDateSafe } from '../../lib/formatDate';
+
+const EXPORT_PER_PAGE = 50;
+const EXPORT_MAX_PAGES = 20;
+const EXPORT_MAX_ROWS = EXPORT_PER_PAGE * EXPORT_MAX_PAGES;
+
+function csvField(value: string | number | null | undefined): string {
+  const s = value === null || value === undefined ? '' : String(value);
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+function logToCsvRow(log: OperationLog): string {
+  return [
+    csvField(log.created_at ? formatDateSafe(log.created_at, 'yyyy-MM-dd HH:mm:ss', '-') : '-'),
+    csvField(log.result),
+    csvField(log.action),
+    csvField(log.team_name),
+    csvField(log.team_id),
+    csvField(log.team_owner_email),
+    csvField(log.target_email),
+    csvField(log.trigger_type),
+    csvField(log.detail),
+    csvField(log.error_message),
+  ].join(',');
+}
 
 interface SystemLogsProps {
   embedded?: boolean;
@@ -67,6 +91,55 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     };
   }, [page, scope, debouncedSearch]);
 
+  const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+
+  const handleExportCsv = async () => {
+    setExporting(true);
+    setExportMessage(null);
+    try {
+      const first = await fetchLogsApi({ page: 1, per_page: EXPORT_PER_PAGE, q: debouncedSearch, scope });
+      const allLogs: OperationLog[] = [...first.logs];
+      const totalPagesForExport = Math.max(1, first.total_pages || 1);
+      const pagesToFetch = Math.min(totalPagesForExport, EXPORT_MAX_PAGES);
+      const truncated = totalPagesForExport > EXPORT_MAX_PAGES;
+
+      for (let p = 2; p <= pagesToFetch; p++) {
+        const res = await fetchLogsApi({ page: p, per_page: EXPORT_PER_PAGE, q: debouncedSearch, scope });
+        allLogs.push(...res.logs);
+      }
+
+      const rows = allLogs.slice(0, EXPORT_MAX_ROWS);
+      const header = ['时间', '状态', '操作', 'Team', 'Team ID', 'Team 负责人', '目标', '触发方', '详情', '错误信息']
+        .map(csvField)
+        .join(',');
+      const csvBody = [header, ...rows.map(logToCsvRow)].join('\r\n');
+      const csvContent = '﻿' + csvBody;
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const filename = `system-logs-${formatDateSafe(new Date(), 'yyyyMMdd-HHmmss')}.csv`;
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      if (truncated) {
+        setExportMessage(`已导出 ${rows.length} 条记录，超过上限（最多 ${EXPORT_MAX_ROWS} 条），结果已截断。`);
+      } else {
+        setExportMessage(`已导出 ${rows.length} 条记录。`);
+      }
+    } catch (error) {
+      console.error(error);
+      setExportMessage('导出失败，请稍后重试。');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const getStatusIcon = (result: string | null) => {
     switch (result?.toLowerCase()) {
       case 'success':
@@ -90,17 +163,31 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
             </h1>
             <p className="text-gray-500 dark:text-slate-400 text-sm">查阅近期系统活动与事件记录。</p>
           </div>
-          <div className="relative">
-            <Search className="w-4 h-4 text-gray-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setLocalSearch(e.target.value)}
-              placeholder="搜索日志、Team 或邮箱..."
-              className="pl-9 pr-4 py-2 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-lg text-sm text-gray-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
-            />
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <Search className="w-4 h-4 text-gray-400 dark:text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setLocalSearch(e.target.value)}
+                placeholder="搜索日志、Team 或邮箱..."
+                className="pl-9 pr-4 py-2 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-lg text-sm text-gray-800 dark:text-slate-200 focus:outline-none focus:border-indigo-500 transition-colors"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              disabled={exporting}
+              className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 hover:bg-gray-50 dark:hover:bg-slate-800 rounded-lg text-sm text-gray-700 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Download className="w-4 h-4" />
+              {exporting ? '导出中...' : '导出 CSV'}
+            </button>
           </div>
         </div>
+      )}
+      {!embedded && exportMessage && (
+        <div className="text-sm text-gray-500 dark:text-slate-400 -mt-4">{exportMessage}</div>
       )}
 
       <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-xl overflow-hidden">

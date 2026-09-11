@@ -670,6 +670,7 @@ export async function redeemAccessToken(data: {
 
 export async function queryMembershipStatus(data: {
   query: string;
+  token?: string;
 }): Promise<MembershipStatusResult> {
   return request<MembershipStatusResult>('/api/self-service/query', {
     method: 'POST',

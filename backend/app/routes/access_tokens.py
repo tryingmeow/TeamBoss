@@ -153,10 +153,14 @@ class ResolvePendingConfirmationRequest(BaseModel):
 
 class QueryMembershipRequest(BaseModel):
     email: str
+    # 兑换历史属于隐私数据，只有能出示这个邮箱自己用过的兑换码才给看。
+    # 不传（或传错）时响应结构不变，只是 redemption_history 为空列表。
+    token: Optional[str] = None
 
 
 class QuerySelfServiceRequest(BaseModel):
     query: str = Field(..., description="邮箱或 token")
+    token: Optional[str] = None
 
 
 class RedemptionHistoryItem(BaseModel):
@@ -290,6 +294,34 @@ async def _get_redemption_history(email: str, limit: int = 20) -> list[dict[str,
             item["error_message"] = mask_secrets(str(item["error_message"]))
         history.append(item)
     return history
+
+
+async def _history_proof_accepted(email: str, raw_token: Optional[str]) -> bool:
+    """出示的兑换码是否确实是这个邮箱自己用过的码。
+
+    ``/status`` 和 ``/query`` 是匿名接口：只给一个邮箱地址就能拿到该邮箱最近的
+    兑换记录（动作、结果、车队、码前缀、面额、到期时间、报错原文、时间戳），等于
+    任何人猜中邮箱就能看别人的消费流水。成员身份和到期时间照旧公开（用户要靠它
+    自查），历史则要求出示凭据：这张码必须存在，且这张码的使用记录就落在这个邮箱
+    名下。
+    """
+    token = (raw_token or "").strip()
+    if not token:
+        return False
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return False
+    token_row = await _get_token_by_raw(token)
+    if not token_row:
+        return False
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT 1 FROM access_token_uses
+               WHERE token_id = ? AND lower(email) = ?
+               LIMIT 1""",
+            (int(token_row["id"]), normalized_email),
+        )
+        return await cursor.fetchone() is not None
 
 
 async def _get_token_by_raw(raw_token: str) -> Optional[dict[str, Any]]:
@@ -903,9 +935,19 @@ async def _invite_to_available_team(
                     "expires_at": None,
                 }
 
-            if mutation_status == "rejected" or "error" in result:
+            if mutation_status == "rejected":
                 # 上游明确拒绝：这一次调用没有任何远端副作用，把消耗标记撤回，
                 # 换下一个 Team 重试；全部失败时 finally 才能把码退给用户。
+                #
+                # 判定只看 mutation_status，绝不能再补一个 `or "error" in result`：
+                # ChatGPTClient._error() 给每一种结果（含 uncertain）都塞了 error 键，
+                # 那个条件对所有不确定结果恒为真——上面那段"超时后重新拉快照、看到人
+                # 就升级成 confirmed"的补救会被直接架空，一次超时但其实成功的邀请
+                # 会被当成拒绝退码，然后同一张码去下一个 Team 再发一次（一码两座），
+                # 或者把码整个退还而用户已经占着席位。2xx 响应体里恰好带 error 字段
+                # 的情况同理：分类是 confirmed 就不是拒绝。
+                # 上面 `mutation_status is None` 的兼容推断已经把"裸 error 字典"映射
+                # 成 rejected，这里不需要第二层。
                 if on_invite_rejected is not None:
                     on_invite_rejected()
                 last_error = str(result.get("error") or "OpenAI rejected the invite")
@@ -916,7 +958,7 @@ async def _invite_to_available_team(
                         email,
                         "seat_type=default",
                         "failed",
-                        result["error"],
+                        last_error,
                         "manual",
                     )
                 except Exception:
@@ -1795,16 +1837,24 @@ async def query_self_service(req: QuerySelfServiceRequest, request: Request):
         return await _query_token(query)
 
     email = _normalize_email(query)
-    membership = await _query_membership_status(email)
+    membership = await _query_membership_status(email, req.token)
     return {
         "query_type": "email",
         "membership": membership,
     }
 
 
-async def _query_membership_status(email: str):
-    """Membership lookup core; callers apply their public endpoint limiter once."""
-    history = await _get_redemption_history(email)
+async def _query_membership_status(email: str, proof_token: Optional[str] = None):
+    """Membership lookup core; callers apply their public endpoint limiter once.
+
+    ``proof_token``：调用方转交的兑换码。只有它确实属于这个邮箱时才附带兑换历史，
+    否则 ``redemption_history`` 返回空列表——响应结构对老客户端保持不变。
+    """
+    history = (
+        await _get_redemption_history(email)
+        if await _history_proof_accepted(email, proof_token)
+        else []
+    )
     teams = await load_active_teams()
     hits = (
         await _find_all_memberships(email, teams, use_cache_only=True) if teams else []
@@ -1857,4 +1907,4 @@ async def query_membership_status(req: QueryMembershipRequest, request: Request)
     await _check_rate_limit(request, _limiter_query)
 
     email = _normalize_email(req.email)
-    return await _query_membership_status(email)
+    return await _query_membership_status(email, req.token)

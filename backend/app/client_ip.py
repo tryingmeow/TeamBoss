@@ -81,9 +81,45 @@ def is_trusted_proxy(peer: Optional[str]) -> bool:
     return any(address in network for network in _trusted_proxy_networks())
 
 
-def get_client_ip(request: Request) -> str:
+# ── 身份坍缩检测 ────────────────────────────────────────────────────────────
+# 直连来源可信时，解析出的"访客 IP"正常情况下几乎不可能等于代理自己的连接地址
+# （peer）——除非反代和后端之间的这一跳本身就丢失了真实来源（典型情况：
+# compose.yaml 把 web 端口绑在 127.0.0.1，Docker 走用户态 docker-proxy 转发，
+# nginx 侧的 $remote_addr 从一开始就是网桥网关，而不是访客地址；nginx 又原样把
+# $remote_addr 抄进 X-Real-IP）。单次命中可能是巧合（小内网部署里访客恰好也在
+# 同一地址），所以攒够一批连续样本、且全部命中才报警；报警只打一次，不阻塞启动，
+# 也不改变限流行为本身——发现方式和处理方式是两件事。
+_COLLAPSE_SAMPLE_THRESHOLD = 20
+_collapse_samples = 0
+_collapse_warned = False
+
+
+def _note_identity_sample(peer: str, is_self: bool) -> None:
+    global _collapse_samples, _collapse_warned
+    if _collapse_warned:
+        return
+    if not is_self:
+        _collapse_samples = 0
+        return
+    _collapse_samples += 1
+    if _collapse_samples >= _COLLAPSE_SAMPLE_THRESHOLD:
+        _collapse_warned = True
+        logger.warning(
+            "检测到客户端身份坍缩：最近 %d 个经可信代理（%s）转发的请求，解析出的"
+            "访客 IP 全部等于代理自身的连接地址。这通常意味着 compose.yaml 把 web "
+            "端口绑在了 127.0.0.1，Docker 用户态转发（docker-proxy）导致后端看到的 "
+            "每个访客都是同一个网桥网关地址——全站共享一个限流/登录失败锁定身份，"
+            "任意匿名访客发 5 次错误密码就能把管理员锁在后台外 15 分钟。"
+            "请检查 docker/nginx.conf 的 set_real_ip_from 是否覆盖了实际的反代来源，"
+            "以及 compose.yaml 的端口绑定方式（README『部署』一节有说明）。",
+            _collapse_samples,
+            peer,
+        )
+
+
+def get_client_ip_info(request: Request) -> tuple[str, bool]:
     """
-    从请求中获取用于限流计数的客户端 IP。
+    从请求中获取用于限流计数的客户端 IP，以及一个"这个身份其实就是代理自己"的标记。
 
     安全要点一：转发头只有在**直连来源是可信代理**时才可信。否则谁都能自带一个
     X-Real-IP，每次换一个假值就绕开了限流（开源用户把端口直接暴露在公网时就是
@@ -96,24 +132,42 @@ def get_client_ip(request: Request) -> str:
     所以：不可信来源 → 直接用直连地址；可信来源 → 优先 X-Real-IP（等于代理看到的
     $remote_addr），没有则取 XFF 里**最后一个合法 IP**（离本服务最近的那一跳），
     再退回直连地址。
+
+    第二个返回值（is_proxy_self_identity）：当且仅当来源可信、且最终解析出的 IP
+    与代理自己的直连地址完全相同时为 True——这是"这个请求根本没有真实的每访客
+    身份，大家全共享代理自己的地址"这一状态的唯一判据，调用方（登录失败锁定）
+    据此决定要不要把这个共享身份锁死。
     """
     peer = request.client.host if request.client else ""
+    peer_norm = normalize_ip(peer)
 
     if not is_trusted_proxy(peer):
-        return normalize_ip(peer) or (peer or "unknown")[:64]
+        return normalize_ip(peer) or (peer or "unknown")[:64], False
 
+    ip = ""
     real_ip = normalize_ip(request.headers.get("X-Real-IP"))
     if real_ip:
-        return real_ip
+        ip = real_ip
+    else:
+        x_forwarded_for = request.headers.get("X-Forwarded-For")
+        if x_forwarded_for:
+            for part in reversed(x_forwarded_for.split(",")):
+                normalized = normalize_ip(part)
+                if normalized:
+                    ip = normalized
+                    break
 
-    x_forwarded_for = request.headers.get("X-Forwarded-For")
-    if x_forwarded_for:
-        for part in reversed(x_forwarded_for.split(",")):
-            normalized = normalize_ip(part)
-            if normalized:
-                return normalized
+    if not ip:
+        ip = peer_norm or "unknown"
 
-    return normalize_ip(peer) or "unknown"
+    is_self = bool(peer_norm) and ip == peer_norm
+    _note_identity_sample(peer_norm, is_self)
+    return ip, is_self
+
+
+def get_client_ip(request: Request) -> str:
+    """从请求中获取用于限流计数的客户端 IP。详见 get_client_ip_info。"""
+    return get_client_ip_info(request)[0]
 
 
 # ── 限流实现 ────────────────────────────────────────────────────────────────

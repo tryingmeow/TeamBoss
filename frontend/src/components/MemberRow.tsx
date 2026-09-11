@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Crown, Trash2, Pencil } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import type { Member, ShowToast } from '../types';
-import { removeMember, changeSeat, setExpiry, removeExpiry } from '../api/client';
+import { removeMember, changeSeat, setExpiry, removeExpiry, updateMemberExpiry } from '../api/client';
 import {
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
@@ -10,7 +10,8 @@ import {
   seatTypeBadgeClass,
   seatUpdateErrorMessage,
 } from '../lib/seatType';
-import ExpiryPicker from './ExpiryPicker';
+import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
+import { useKickPolicy } from '../hooks/useKickPolicy';
 import ConfirmDialog from './ConfirmDialog';
 
 interface MemberRowProps {
@@ -32,6 +33,7 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, sh
   const [expiryOpen, setExpiryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [loading, setLoading] = useState(false);
+  const kickPolicy = useKickPolicy();
 
   const handleChangeSeat = async (newSeat: string) => {
     setLoading(true);
@@ -48,13 +50,16 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, sh
     }
   };
 
-  const handleSetExpiry = async (value: string) => {
+  const handleSetExpiry = async (selection: ExpirySelection) => {
     setLoading(true);
     try {
-      if (value === '永不') {
+      if (selection.kind === 'never') {
+        // 永不过期走的仍然是"删除到期时间"这个接口，语义没变。
         await removeExpiry(teamId, member.id);
+      } else if (selection.kind === 'duration') {
+        await setExpiry(teamId, member.id, selection.value, member.email);
       } else {
-        await setExpiry(teamId, member.id, value, member.email);
+        await updateMemberExpiry(teamId, member.id, selection.iso);
       }
       onUpdate();
       setExpiryOpen(false);
@@ -110,13 +115,15 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, sh
               </Popover.Trigger>
               <Popover.Portal>
                 <Popover.Content
-                  className="bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] rounded-xl p-3 shadow-xl z-50 w-64"
+                  className="bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] rounded-xl p-3 shadow-xl z-50 w-[19rem]"
                   sideOffset={5}
                 >
                   <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">设置过期时间</p>
                   <ExpiryPicker
-                    value=""
-                    onChange={handleSetExpiry}
+                    onSubmit={handleSetExpiry}
+                    joinedAt={member.created_time}
+                    policy={kickPolicy}
+                    disabled={loading}
                   />
                 </Popover.Content>
               </Popover.Portal>

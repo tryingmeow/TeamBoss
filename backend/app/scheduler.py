@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import sqlite3
 import os
 from datetime import datetime, timezone, timedelta
@@ -28,6 +29,8 @@ from .services.team_health_alerts import (
     report_team_recovery_sync,
 )
 from .services.team_locks import member_operation_claim_sync
+
+logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler(
     # APScheduler 3.11 默认 misfire_grace_time=1（秒）：member_watch_job(30s 间隔)/
@@ -385,10 +388,18 @@ def _reactivate_or_insert_detected_member(conn, team_id, user_id, email, now):
         (team_id, uid, uid, normalized_email, normalized_email),
     ).fetchone()
     if row:
+        # source 只在这一行本来就是"外部发现"时才写 'detected'。复用的是一条
+        # kicked=0 的已有记录：它可能是付过钱的 self_service / system 行，只是上游
+        # user_id 漂移导致这一轮按邮箱重新匹配上。无条件改写会把自己人降级成外人
+        # ——管理端的"检测到的成员"列表里出现一个等着被手工清掉的付费用户。
         conn.execute(
             """UPDATE member_expiry
                SET user_id = ?, email = ?, kicked = 0, kicked_at = NULL, kick_source = NULL,
-                   first_seen_at = COALESCE(first_seen_at, ?), source = 'detected'
+                   first_seen_at = COALESCE(first_seen_at, ?),
+                   source = CASE
+                       WHEN COALESCE(source, '') IN ('', 'detected') THEN 'detected'
+                       ELSE source
+                   END
                WHERE id = ?""",
             (uid, normalized_email, now, row["id"]),
         )
@@ -404,6 +415,44 @@ def _reactivate_or_insert_detected_member(conn, team_id, user_id, email, now):
     return True
 
 
+def _too_new_to_judge_absent(row_created_at, snapshot_taken_at) -> bool:
+    """这行成员记录是不是"比本轮快照还新，还没资格判缺席"。
+
+    成员名单在 snapshot_taken_at 那一刻拍下，member_expiry 是之后才读的。夹在中间
+    落地的一次兑换写出的行当然不在名单里；判它缺席会 kicked=1 + kick_source
+    ='detected'，下一轮 _reactivate_or_insert_detected_member 只复用 kicked=0 的行，
+    于是补插一条 source='detected'、expires_at=NULL、auto_kick=0 的新行——付过钱的
+    到期时间没了，人反而正好长成 patrol 的踢人目标。
+
+    这里只排除"太新、判不了"的行，不是给所有人加宽限期：时间戳缺失的历史行照旧
+    参与判定。
+    """
+    created = _parse_datetime(row_created_at)
+    return bool(created and created > snapshot_taken_at)
+
+
+def _purchased_duration(row):
+    """``kind='extend'`` 兜底行代表的购买时长，其它行返回 None。
+
+    这类行的 ``expires_at`` 是落盘那一刻算出的 ``now + duration``（见
+    ``member_expiry._persist_confirmed_membership``），所以购买时长就是
+    ``expires_at - created_at``。行内没有单独的时长列，这是还原它的唯一途径。
+    """
+    try:
+        if (row["kind"] or "backfill") != "extend":
+            return None
+    except (IndexError, KeyError):
+        return None
+    created = _parse_datetime(row["created_at"])
+    target = _parse_datetime(row["expires_at"])
+    if not created or not target:
+        return None
+    delta = target - created
+    if delta <= timedelta(0):
+        return None
+    return delta
+
+
 def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now):
     """Backfill confirmed invites before unknown-member detection runs.
 
@@ -416,7 +465,8 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
     # 是 NULL，按下面的回填语义会被当成永久直接落库。这类行的时长结算只能走
     # access_tokens.reconcile_pending_redemptions 的累加语义，这里必须原样留着。
     rows = conn.execute(
-        """SELECT id, user_id, email, expires_at, source, token_use_id
+        """SELECT id, user_id, email, expires_at, source, token_use_id,
+                  COALESCE(kind, 'backfill') AS kind, created_at
            FROM pending_invite_reconciliations
            WHERE team_id = ? AND resolved = 0
              AND COALESCE(kind, 'backfill') != 'barrier'
@@ -476,6 +526,7 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
         if existing:
             pending_expires = _parse_datetime(row["expires_at"])
             current_expires = _parse_datetime(existing["expires_at"])
+            purchased = _purchased_duration(row)
             if row["expires_at"] is None:
                 # 这次确认的邀请本身就是永久。
                 resolved_expires = None
@@ -485,6 +536,16 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                 resolved_expires = None
             elif existing["expires_at"] is None:
                 resolved_expires = row["expires_at"]
+            elif purchased is not None:
+                # kind='extend'：这行代表一次"买到的时长"，必须按
+                # extend_member_expiry 的语义追加：max(现有到期, 现在) + 时长。
+                # 只取 max(行内到期, 现有到期) 会让一个到期时间更远的成员把这次
+                # 购买的时长整个吃掉，而兑换还被置成 success——用户和管理员都看
+                # 不到任何异常。
+                base = _parse_datetime(now) or datetime.now(timezone.utc)
+                if current_expires and current_expires > base:
+                    base = current_expires
+                resolved_expires = (base + purchased).isoformat()
             elif pending_expires and current_expires:
                 resolved_expires = max(pending_expires, current_expires).isoformat()
             else:
@@ -541,6 +602,21 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
             conn.execute(
                 "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
                 (token_use_id,),
+            )
+            # 同一次兑换可能同时留下两行：这条 backfill 行，和 uncertain 分支立的
+            # kind='barrier' 行。上面刚把这次兑换置为终态，
+            # access_tokens.reconcile_pending_redemptions 只扫 pending/uncertain，
+            # 以后再也够不到它，唯一的 resolve_invite_barrier 调用点也就永远不会
+            # 触发。屏障若留在 resolved=0：auto_kick_job 永远对这个 (team,email)
+            # 返回 defer 而跳过踢人，patrol 又因为 source='self_service' 不碰它——
+            # 一份无限期免费的会员。谁结清了 token_use_id，谁就必须在同一个事务里
+            # 把它的屏障一起撤掉。
+            conn.execute(
+                """UPDATE pending_invite_reconciliations
+                   SET resolved = 1, resolved_at = ?
+                   WHERE token_use_id = ? AND resolved = 0
+                     AND COALESCE(kind, 'backfill') = 'barrier'""",
+                (now, token_use_id),
             )
 
         conn.execute(
@@ -762,12 +838,57 @@ def auto_kick_job():
         _log_operation_sync(None, "auto_kick_job_error", None, None, "failed", str(e))
 
 
+# 执行链路的输入：patrol 用它们判超员、挑人。任何一项失败，这一轮就不算刷新过。
+_ENFORCEMENT_OVERVIEW_KEYS = ("subscription", "seat_counts")
+
+
+def _classify_overview_failures(
+    *, subscription, seat_counts, balance_info, payment_methods, account_info
+):
+    """把 overview 的子接口失败拆成 (全部, 纯展示, 执行链路) 三份。
+
+    被限流跳过的接口传 None，不算失败——否则每轮都会误报 partial，并压着
+    last_full_sync_at 不更新。
+
+    为什么要单独拆出执行链路：挂起判定（连续 24 小时失败就停止定时请求）只能看
+    这几项。一个成员名单、订阅、席位数全都正常、只有余额接口持续报错的 Team，按
+    "全绿才算成功"会在 24 小时后被挂起，而手动同步按钮用的是同一套全绿判定，于是
+    它再也恢复不了。展示接口失败照常播报（合并播报 + 一行 warning 日志），仅此而已。
+    """
+    overview_failures: list[str] = []
+    display_failures: list[str] = []
+    enforcement_failures: list[str] = []
+
+    def _failed(payload):
+        return payload is not None and "error" in payload
+
+    for key, payload in (
+        ("subscription", subscription),
+        ("balance", balance_info),
+        ("seat_counts", seat_counts),
+        ("payment_methods", payment_methods),
+        ("account_info", account_info),
+    ):
+        if not _failed(payload):
+            continue
+        overview_failures.append(key)
+        if key in _ENFORCEMENT_OVERVIEW_KEYS:
+            enforcement_failures.append(key)
+        else:
+            display_failures.append(key)
+
+    return overview_failures, display_failures, enforcement_failures
+
+
 def data_sync_job():
     sync_completed = False
     failed_team_ids: set[str] = set()
     # 已挂起的 Team：本轮根本没打请求，既不算失败（不能一直压着摘要不发），
     # 也不能让 patrol 拿着冻住的快照去判超员。
     suspended_team_ids: set[str] = set()
+    # 本轮真正刷新成功的 team（成员/邀请名单 + 订阅 + 席位数全部拿到）。这是巡逻
+    # 的白名单：没进这个集合的 team，这一轮巡逻一个都不碰。
+    refreshed_team_ids: set[str] = set()
     newly_suspended: list[tuple[str, str]] = []  # (team_id, team_name)
     resumed_from_suspension: list[tuple[str, str]] = []
     teams_with_overview_failures: list[tuple[str, str, list[str]]] = []  # (team_id, team_name, failed_keys)
@@ -825,21 +946,15 @@ def data_sync_job():
                 # Track overview sub-interface failures for later notification
                 # 被限流跳过的接口不算失败，否则每轮都会误报 partial 并压着
                 # last_full_sync_at 不更新。
-                overview_failures = []
-                display_failures = []
-                if "error" in subscription:
-                    overview_failures.append("subscription")
-                if balance_info is not None and "error" in balance_info:
-                    overview_failures.append("balance")
-                    display_failures.append("balance")
-                if "error" in seat_counts:
-                    overview_failures.append("seat_counts")
-                if payment_methods is not None and "error" in payment_methods:
-                    overview_failures.append("payment_methods")
-                    display_failures.append("payment_methods")
-                if account_info is not None and "error" in account_info:
-                    overview_failures.append("account_info")
-                    display_failures.append("account_info")
+                overview_failures, display_failures, enforcement_failures = (
+                    _classify_overview_failures(
+                        subscription=subscription,
+                        seat_counts=seat_counts,
+                        balance_info=balance_info,
+                        payment_methods=payment_methods,
+                        account_info=account_info,
+                    )
+                )
 
                 updates = []
                 params = []
@@ -1032,6 +1147,9 @@ def data_sync_job():
                     pass
 
                 # ── 成员检测：发现未跟踪的手动拉入成员 ──
+                # 快照时刻：下面这两次拉取之后写进 member_expiry 的行，不可能出现在
+                # 这份名单里。反向缺席判定必须以此为界（见 absence 分支）。
+                snapshot_taken_at = datetime.now(timezone.utc)
                 members_items, m_err = _fetch_all_api_items_sync(client.get_members, "users")
                 pending_items, p_err = _fetch_all_api_items_sync(client.get_pending_invites, "invites")
 
@@ -1059,7 +1177,9 @@ def data_sync_job():
                         )
 
                     expiry_rows = conn.execute(
-                        "SELECT id, user_id, email FROM member_expiry WHERE team_id = ? AND kicked = 0",
+                        "SELECT id, user_id, email, "
+                        "COALESCE(created_at, first_seen_at) AS row_created_at "
+                        "FROM member_expiry WHERE team_id = ? AND kicked = 0",
                         (team_id,)
                     ).fetchall()
                     tracked_ids = set()
@@ -1143,6 +1263,19 @@ def data_sync_job():
                             or (email and email in api_pending_emails)
                         )
                         if still_present:
+                            continue
+
+                        # 这份名单是 snapshot_taken_at 那一刻的。在那之后才写进来的
+                        # 行（典型场景：同一时刻正在落地的一次自助兑换）当然不在名单
+                        # 里，它"缺席"只是因为太新，还没资格判。误判的代价是整条链：
+                        # 本轮 kicked=1/kick_source='detected'，下一轮
+                        # _reactivate_or_insert_detected_member 只复用 kicked=0 的行，
+                        # 于是补插一条 source='detected'、expires_at=NULL、auto_kick=0
+                        # 的新行——付过钱的到期时间没了，人反而正好长成 patrol 的踢人
+                        # 目标。这里只排除"太新、判不了"的行，不是给所有人加宽限期。
+                        if _too_new_to_judge_absent(
+                            er["row_created_at"], snapshot_taken_at
+                        ):
                             continue
 
                         conn.execute(
@@ -1261,8 +1394,24 @@ def data_sync_job():
                         "chatgpt_auth",
                         source="scheduled_data_sync",
                     )
-                    # 成员快照拉到了，overview 也一个没漏，才算这一轮成功。
-                    round_ok = not overview_failures
+                    # 成员快照拉到了，且执行链路的输入（成员/邀请名单、订阅、
+                    # 席位数）一个没漏，才算这一轮成功。展示接口失败照常播报，
+                    # 但不参与挂起计时——见 enforcement_failures 处的说明。
+                    round_ok = not enforcement_failures
+                    if display_failures and not enforcement_failures:
+                        logger.warning(
+                            "data_sync: display-only sub-interface failures on team=%s: %s "
+                            "(enforcement inputs all green; not counted toward suspension)",
+                            team_id,
+                            ", ".join(display_failures),
+                        )
+                        _log_operation_sync(
+                            team_id,
+                            "data_sync_display_degraded",
+                            None,
+                            "display-only failures: " + ", ".join(display_failures),
+                            "warning",
+                        )
                 else:
                     failed_team_ids.add(team_id)
                     sync_error = "; ".join(
@@ -1287,6 +1436,9 @@ def data_sync_job():
                         sync_error,
                         source="scheduled_data_sync",
                     )
+
+                if round_ok:
+                    refreshed_team_ids.add(team_id)
 
                 event = _record_team_sync_outcome(
                     conn,
@@ -1431,10 +1583,10 @@ def data_sync_job():
     # ── 巡逻踢人：必须在成员缓存刷新完之后跑，保证"自动刷新后才踢" ──────────
     # 独立 try/except：巡逻出任何问题都绝不能拖垮 data_sync_job 本身。
     #
-    # 每个 team 独立判断，不再一票否决：以前的逻辑是任何一个 team 同步失败，整轮
-    # 所有健康 team 都不巡逻。现在无论本轮是否有 team 同步失败都会调用 run_patrol，
-    # 只把这一轮同步失败的 team id 传进去跳过——它们的缓存本来就没刷新到最新，
-    # run_patrol 会原样跳过，不会拿旧数据处理候选；下一轮同步成功后自动恢复正常。
+    # 每个 team 独立判断，不再一票否决。传的是**白名单**：只有本轮刚刚刷新成功的
+    # team 才巡逻。同步失败的、已挂起的、以及这个函数在中途 return/抛异常时一个都
+    # 没刷新到的，全都自动落在白名单外——黑名单在同样的情况下会交出一个空集合，
+    # 巡逻就会拿着所有 team 的陈旧缓存全量开工。
     try:
         from .services.patrol import run_patrol
 
@@ -1444,23 +1596,23 @@ def data_sync_job():
         ).fetchone()
         patrol_conn.close()
         patrol_live = bool(kick_row and kick_row["value"] == "1")
-        # 挂起的 Team 这一轮没刷新过快照，和同步失败一样必须跳过巡逻：
-        # 拿冻住的席位数和成员名单去判超员，会踢错人。
         run_patrol(
             dry_run=not patrol_live,
-            skip_team_ids=failed_team_ids | suspended_team_ids,
+            allow_team_ids=refreshed_team_ids,
         )
     except Exception as e:
         _log_operation_sync(None, "patrol_job_error", None, None, "failed", str(e))
 
-    if failed_team_ids:
+    if failed_team_ids or suspended_team_ids:
+        not_patrolled = sorted((failed_team_ids | suspended_team_ids) - refreshed_team_ids)
         _log_operation_sync(
             None,
             "patrol_partial_skip",
             None,
-            f"skipped {len(failed_team_ids)} team(s) with failed sync this round; other teams patrolled normally",
+            f"patrolled {len(refreshed_team_ids)} freshly synced team(s); "
+            f"{len(not_patrolled)} team(s) not refreshed this round were left alone",
             "success",
-            ",".join(sorted(failed_team_ids)),
+            ",".join(not_patrolled) or None,
         )
 
     # 摘要只在同步主流程完整走完后尝试发送；服务内部负责开关和间隔节流。

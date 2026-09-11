@@ -12,12 +12,13 @@ import {
   Moon,
   Repeat,
   RepeatOff,
+  LogOut,
 } from 'lucide-react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import type { Team, Settings as SettingsType } from '../types';
 import { useTeams } from '../hooks/useTeams';
 import { useSettings } from '../hooks/useSettings';
-import { exportAllSessions, importSessions, inviteGptMembers, type InviteGptMembersResult } from '../api/client';
+import { exportAllSessions, importSessions, inviteGptMembers, type InviteGptMembersResult, clearStoredAdminApiKey } from '../api/client';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import Dashboard from './Dashboard';
 import DashboardSortControl, { type SortDirection, type SortKey } from './DashboardSortControl';
@@ -385,6 +386,27 @@ export default function Layout() {
                 <Tooltip.Portal>
                   <Tooltip.Content className="bg-white dark:bg-[#2a2d3a] text-gray-900 dark:text-gray-200 text-xs px-3 py-1.5 rounded-md shadow-xl border border-gray-100 dark:border-transparent" sideOffset={5}>
                     设置
+                  </Tooltip.Content>
+                </Tooltip.Portal>
+              </Tooltip.Root>
+
+              <Tooltip.Root>
+                <Tooltip.Trigger asChild>
+                  <button
+                    onClick={() => {
+                      clearStoredAdminApiKey();
+                      window.location.href = '/admin';
+                    }}
+                    aria-label="退出登录"
+                    title="退出登录"
+                    className="p-2 text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400 hover:bg-gray-100 dark:hover:bg-[#1a1d27] rounded-xl transition-all duration-200"
+                  >
+                    <LogOut size={18} />
+                  </button>
+                </Tooltip.Trigger>
+                <Tooltip.Portal>
+                  <Tooltip.Content className="bg-white dark:bg-[#2a2d3a] text-gray-900 dark:text-gray-200 text-xs px-3 py-1.5 rounded-md shadow-xl border border-gray-100 dark:border-transparent" sideOffset={5}>
+                    退出登录
                   </Tooltip.Content>
                 </Tooltip.Portal>
               </Tooltip.Root>

@@ -11,13 +11,13 @@ import {
   updateUserDisplayName,
   createTgMemberCode,
 } from '../../api/client';
-import { Edit2, Trash2, UserX, Check, Copy, MessageCircle, Search, ArrowUpDown, ChevronDown, ChevronLeft, ChevronRight, Plus, Zap } from 'lucide-react';
+import { Edit2, Trash2, UserX, Check, Copy, MessageCircle, Search, ArrowUpDown, ChevronDown, Zap } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Popover from '@radix-ui/react-popover';
-import { DayPicker } from 'react-day-picker';
-import { zhCN } from 'date-fns/locale';
-import { format } from 'date-fns';
 import type { SeatType } from '../../types';
+import ExpiryPicker, { type ExpirySelection } from '../../components/ExpiryPicker';
+import { useKickPolicy } from '../../hooks/useKickPolicy';
+import type { KickPolicy } from '../../lib/expiry';
 import Toast from '../../components/Toast';
 import SystemLogs from './SystemLogs';
 import {
@@ -355,112 +355,25 @@ function SearchInput({
   );
 }
 
-const EXPIRY_PRESETS = [
-  { label: '7 天', value: '7d' },
-  { label: '14 天', value: '14d' },
-  { label: '30 天', value: '30d' },
-  { label: '90 天', value: '90d' },
-  { label: '180 天', value: '180d' },
-  { label: '永不过期', value: 'never' },
-];
-
+// 加入时间那一列的展示时区。到期/踢人时间的计算口径统一在 lib/expiry.ts。
 const APP_TIME_ZONE = 'Asia/Shanghai';
-const APP_TIME_ZONE_OFFSET = '+08:00';
-
-function localHourMinuteFromTimestamp(value: string | null | undefined): { hour: string; minute: string } | null {
-  if (!value) return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: APP_TIME_ZONE,
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-
-  const hour = parts.find((part) => part.type === 'hour')?.value;
-  const minute = parts.find((part) => part.type === 'minute')?.value;
-  if (!hour || !minute) return null;
-  return { hour, minute };
-}
-
-function expiryIsoForSelectedDate(dateValue: string, firstSeenAt: string | null | undefined): string {
-  const time = localHourMinuteFromTimestamp(firstSeenAt) ?? { hour: '00', minute: '00' };
-  return `${dateValue}T${time.hour}:${time.minute}:00${APP_TIME_ZONE_OFFSET}`;
-}
-
-function CalendarEditor({ onSubmit }: { onSubmit: (value: string) => void }) {
-  const [selected, setSelected] = useState<Date | undefined>(new Date());
-
-  return (
-    <div className="w-[280px]">
-      <DayPicker
-        mode="single"
-        locale={zhCN}
-        selected={selected}
-        onSelect={setSelected}
-        disabled={{ before: new Date() }}
-        defaultMonth={selected || new Date()}
-        classNames={{
-          root: 'p-2',
-          months: 'flex flex-col space-y-4',
-          month: 'space-y-4',
-          month_caption: 'flex justify-center pt-1 relative items-center',
-          caption_label: 'text-sm font-medium text-gray-800 dark:text-slate-200',
-          nav: 'space-x-1 flex items-center',
-          button_previous: 'absolute left-1 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100 flex items-center justify-center text-gray-500 dark:text-slate-400 hover:text-gray-800 dark:text-slate-200',
-          button_next: 'absolute right-1 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100 flex items-center justify-center text-gray-500 dark:text-slate-400 hover:text-gray-800 dark:text-slate-200',
-          month_grid: 'w-full border-collapse space-y-1',
-          weekdays: 'flex',
-          weekday: 'text-gray-400 dark:text-slate-500 rounded-md w-8 font-normal text-[0.8rem]',
-          week: 'flex w-full mt-2',
-          day: 'h-8 w-8 text-center text-sm p-0 relative focus-within:relative focus-within:z-20',
-          day_button: 'h-8 w-8 p-0 font-normal hover:bg-gray-200 dark:bg-slate-700 hover:text-gray-900 dark:text-slate-100 rounded-md transition-colors inline-flex items-center justify-center text-gray-700 dark:text-slate-300',
-          selected: 'bg-indigo-500 text-white hover:bg-indigo-500 hover:text-white focus:bg-indigo-500 focus:text-white rounded-md',
-          today: 'bg-gray-100 dark:bg-slate-800 text-gray-900 dark:text-slate-100',
-          outside: 'text-gray-400 dark:text-slate-600 opacity-50',
-          disabled: 'text-gray-400 dark:text-slate-600 opacity-50',
-          hidden: 'invisible',
-        }}
-        components={{
-          Chevron: ({ orientation }) => {
-            const Icon = orientation === 'left' ? ChevronLeft : ChevronRight;
-            return <Icon className="h-4 w-4" />;
-          },
-        }}
-      />
-      {selected && (
-        <div className="mt-2 flex items-center justify-between px-2">
-          <span className="text-xs text-gray-500 dark:text-slate-400">
-            选中：{format(selected, 'yyyy-MM-dd')}
-          </span>
-          <button
-            type="button"
-            onClick={() => onSubmit(format(selected, 'yyyy-MM-dd'))}
-            className="px-4 py-1.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-xs font-medium transition-colors"
-          >
-            确认
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
 
 function ExpiryCell({
   display,
   grace,
   editable,
+  joinedAt,
+  policy,
   onSubmit,
 }: {
   display: string;
   grace?: string;
   editable: boolean;
-  onSubmit: (value: string, mode: 'preset' | 'date') => void;
+  joinedAt?: string | null;
+  policy: KickPolicy;
+  onSubmit: (selection: ExpirySelection) => void;
 }) {
-  const [openCalendar, setOpenCalendar] = useState(false);
-  const [openPlus, setOpenPlus] = useState(false);
+  const [open, setOpen] = useState(false);
 
   return (
     <td className="px-6 py-4">
@@ -474,60 +387,31 @@ function ExpiryCell({
           )}
         </div>
         {editable && (
-          <>
-            <Popover.Root open={openCalendar} onOpenChange={setOpenCalendar}>
-              <Popover.Trigger asChild>
-                <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="修改日期">
-                  <Edit2 className="w-3.5 h-3.5" />
-                </button>
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  className="z-50 p-2 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
-                  sideOffset={5}
-                >
-                  <CalendarEditor onSubmit={(val) => { onSubmit(val, 'date'); setOpenCalendar(false); }} />
-                  <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
-
-            <Popover.Root open={openPlus} onOpenChange={setOpenPlus}>
-              <Popover.Trigger asChild>
-                <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="增加时长">
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  className="z-50 p-3 w-64 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
-                  sideOffset={5}
-                >
-                  <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">增加时长</div>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {EXPIRY_PRESETS.map((preset) => (
-                      <button
-                        key={preset.value}
-                        type="button"
-                        onClick={() => {
-                          onSubmit(preset.value, 'preset');
-                          setOpenPlus(false);
-                        }}
-                        className={`px-2 py-2 rounded-lg text-xs font-medium border transition-all ${
-                          preset.value === 'never'
-                            ? 'bg-white dark:bg-slate-900 text-amber-400 border-amber-500/30 hover:bg-amber-500/10 hover:border-amber-500/50'
-                            : 'bg-white dark:bg-slate-900 text-gray-700 dark:text-slate-300 border-gray-300 dark:border-slate-700 hover:bg-indigo-500/20 hover:text-indigo-300 hover:border-indigo-500/40'
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
-                  <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
-          </>
+          <Popover.Root open={open} onOpenChange={setOpen}>
+            <Popover.Trigger asChild>
+              <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="修改到期时间">
+                <Edit2 className="w-3.5 h-3.5" />
+              </button>
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content
+                className="z-50 w-[19rem] p-3 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
+                sideOffset={5}
+              >
+                <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">修改到期时间</div>
+                <ExpiryPicker
+                  tone="indigo"
+                  policy={policy}
+                  joinedAt={joinedAt}
+                  onSubmit={(selection) => {
+                    onSubmit(selection);
+                    setOpen(false);
+                  }}
+                />
+                <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
         )}
       </div>
     </td>
@@ -854,6 +738,7 @@ function MemberList({
   const [copyingBindingEmail, setCopyingBindingEmail] = useState<string | null>(null);
   const [copiedBindingEmail, setCopiedBindingEmail] = useState<string | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
+  const kickPolicy = useKickPolicy();
 
   const fetchMembers = (showLoading = true) => {
     if (showLoading) setLoading(true);
@@ -946,19 +831,16 @@ function MemberList({
     teamId: string,
     userId: string,
     email: string,
-    value: string,
-    mode: 'preset' | 'date',
-    firstSeenAt?: string | null
+    selection: ExpirySelection
   ) => {
     try {
-      if (mode === 'preset') {
-        if (value === 'never') {
-          await removeExpiry(teamId, userId);
-        } else {
-          await setExpiry(teamId, userId, value, email);
-        }
+      if (selection.kind === 'never') {
+        await removeExpiry(teamId, userId);
+      } else if (selection.kind === 'duration') {
+        await setExpiry(teamId, userId, selection.value, email);
       } else {
-        await updateMemberExpiry(teamId, userId, expiryIsoForSelectedDate(value, firstSeenAt));
+        // 绝对时刻已经带上 +08:00 偏移，后端 parse_optional_datetime 直接收。
+        await updateMemberExpiry(teamId, userId, selection.iso);
       }
       void fetchMembers(false);
       showToast('到期时间已更新');
@@ -1161,14 +1043,14 @@ function MemberList({
                   display={memberExpiryDisplay(member.expiry).primary}
                   grace={memberExpiryDisplay(member.expiry).grace}
                   editable={member.status === 'joined'}
-                  onSubmit={(value, mode) =>
+                  joinedAt={member.expiry?.first_seen_at}
+                  policy={kickPolicy}
+                  onSubmit={(selection) =>
                     handleUpdateExpiry(
                       member.team_id,
                       member.user_id,
                       member.email,
-                      value,
-                      mode,
-                      member.expiry?.first_seen_at
+                      selection
                     )
                   }
                 />

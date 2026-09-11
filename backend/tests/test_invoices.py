@@ -209,7 +209,12 @@ class InvoiceStorageTest(unittest.TestCase):
         )
         self.assertEqual(FakeInvoiceClient.calls, 2)
 
-    def test_upstream_error_does_not_touch_the_sync_marker(self):
+    def test_upstream_error_backs_off_instead_of_retrying_every_round(self):
+        """失败也要推进节流时间戳。
+
+        原先失败不落标记，于是一个上游持续报错的 team 会在每一轮 data_sync 里被
+        重试，24 小时一次的设计完全失效。（这条用例以前断言的正是那个行为。）
+        """
         run_call = lambda fn, *a, **kw: fn(*a, **kw)
         client = FakeInvoiceClient(payload={"error": "boom"})
         err = refresh_invoices_if_stale_sync(
@@ -219,7 +224,21 @@ class InvoiceStorageTest(unittest.TestCase):
         marker = self.conn.execute(
             "SELECT invoices_synced_at FROM teams WHERE id = 'team-1'"
         ).fetchone()[0]
-        self.assertIsNone(marker)
+        self.assertEqual(marker, "2026-08-17T00:00:00+00:00")
+
+        # 下一轮（1 小时后）不再重试。
+        calls_before = FakeInvoiceClient.calls
+        refresh_invoices_if_stale_sync(
+            self.conn, client, "team-1", "2026-08-17T01:00:00+00:00", run_call
+        )
+        self.assertEqual(FakeInvoiceClient.calls, calls_before)
+
+        # 但用户手动展开发票子表（force）必须立刻重试。
+        refresh_invoices_if_stale_sync(
+            self.conn, client, "team-1", "2026-08-17T01:00:01+00:00", run_call,
+            force=True,
+        )
+        self.assertEqual(FakeInvoiceClient.calls, calls_before + 1)
 
 
 if __name__ == "__main__":
