@@ -122,7 +122,7 @@ export default function ExpiryPicker({
 
   const [customOpen, setCustomOpen] = useState(dateOnly);
   const [customMode, setCustomMode] = useState<'days' | 'date'>(dateOnly ? 'date' : 'days');
-  const [amountText, setAmountText] = useState('45');
+  const [amountText, setAmountText] = useState('');
   const [amountUnit, setAmountUnit] = useState<'d' | 'h' | 'm'>('d');
   const [calendarDate, setCalendarDate] = useState<Date | undefined>(undefined);
 
@@ -366,7 +366,6 @@ export default function ExpiryPicker({
           <span className="text-amber-600 dark:text-amber-400">永不过期，不会被自动移出</span>
         ) : previewExpiry && previewKick ? (
           <span className={t.muted}>
-            到期 {formatAppLocalMinute(previewExpiry)} ·{' '}
             <span className={t.accentText}>预计 {formatAppLocalMinute(previewKick)} 移出</span>
             <span className="text-gray-400 dark:text-gray-500">（{kickPolicyLabel(policy)}）</span>
           </span>

@@ -158,9 +158,12 @@ export function appLocalHourMinute(value: string | null | undefined): { hour: nu
   return { hour: p.hour, minute: p.minute };
 }
 
-/** 宽限规则的一句话描述，放在预览旁边，让管理员知道这个时间是怎么算出来的。 */
+/**
+ * 宽限规则的一句话描述，放在预览里说明这个时刻是怎么算出来的。
+ * 「系统已选择」= 这不是这次选的，是设置里定好的全局规则。
+ */
 export function kickPolicyLabel(policy: KickPolicy): string {
-  if (policy.mode === 'day_end') return '当天 23:59 移出';
+  if (policy.mode === 'day_end') return '系统已选择当日末移出';
   const delay = Math.min(Math.max(Number(policy.delayHours) || 0, 0), 720);
-  return delay > 0 ? `到期后 ${delay} 小时移出` : '到期即移出';
+  return delay > 0 ? `系统已选择 +${delay}h 移出` : '系统已选择到期即移出';
 }

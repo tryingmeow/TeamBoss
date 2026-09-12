@@ -80,6 +80,16 @@ interface TgCode {
 
 type ToastType = 'success' | 'error';
 
+/**
+ * 踢人规则只写一遍，卡片和确认弹窗共用——两处各写一份会各自漂移。
+ * 「本轮刷新成功的队」是真实行为：巡逻只处理同步刚刷新过的队，
+ * 同步失败或已挂起的队这一轮完全不碰。
+ */
+function patrolRuleText(intervalMinutes: number): string {
+  return `每 ${intervalMinutes} 分钟随数据刷新巡逻，只处理这一轮刷新成功的队；同步失败或已挂起的队这一轮不碰。`
+    + '开启时先豁免当前成员；此后只处理 Codex 未开启、GPT 席位实际超额且从系统外新加入的成员。系统内拉人不受影响。';
+}
+
 function PatrolSection() {
   const [status, setStatus] = useState<PatrolStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -162,7 +172,7 @@ function PatrolSection() {
     try {
       setRunning(true);
       const result = await runPatrol({ dry_run: true });
-      showToast(`空跑完成: ${result.would_kick} 人会被踢`);
+      showToast(`演练完成: ${result.would_kick} 人会被踢`);
       await loadStatus();
     } catch (err) {
       console.error(err);
@@ -241,8 +251,7 @@ function PatrolSection() {
                 )}
               </div>
               <div className="text-sm text-gray-500 dark:text-slate-400 mt-1 leading-6">
-                每 {status.sync_interval_minutes} 分钟随数据刷新巡逻。开启时先豁免当前成员；此后只处理
-                Codex 未开启、GPT 席位实际超额且从系统外新加入的成员。系统内拉人不受影响。
+                {patrolRuleText(status.sync_interval_minutes)}
                 {status.baseline_at && (
                   <span className="block text-xs mt-1">
                     上次保护：{formatDateSafe(status.baseline_at, 'MM-dd HH:mm:ss')}
@@ -261,9 +270,10 @@ function PatrolSection() {
           {/* Dry Run Button */}
           <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-slate-800/50 rounded-lg border border-gray-200 dark:border-slate-700">
             <div className="flex-1">
-              <div className="font-medium text-gray-800 dark:text-slate-200">立即空跑</div>
+              <div className="font-medium text-gray-800 dark:text-slate-200">演练空跑</div>
               <div className="text-sm text-gray-500 dark:text-slate-400 mt-1">
-                执行一次巡逻演练，显示会被踢的成员数量和名单。
+                先实时刷新各队成员和席位，再按当前规则算一遍会被踢的人和名单。
+                开启自动踢人之前，可以拿它先看一眼效果。不会真的踢人。
               </div>
             </div>
             <button
@@ -271,7 +281,7 @@ function PatrolSection() {
               disabled={running}
               className="flex shrink-0 items-center gap-2 px-4 py-2 rounded-lg border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-slate-200 font-medium hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-60"
             >
-              {running ? '运行中…' : '立即空跑'}
+              {running ? '运行中…' : '演练空跑'}
             </button>
           </div>
         </div>
@@ -343,7 +353,7 @@ function PatrolSection() {
               <br />
               <br />
               确认后会实时刷新全部成员，将当前成员和邀请统一列为受保护对象，再开启自动踢人。
-              开启后每 {status.sync_interval_minutes} 分钟巡逻一次，只处理系统外新增、Codex 未开启且 GPT 席位实际超额的成员。
+              {patrolRuleText(status.sync_interval_minutes)}
             </Dialog.Description>
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Dialog.Close asChild>

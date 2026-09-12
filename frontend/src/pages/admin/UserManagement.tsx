@@ -1179,10 +1179,12 @@ function MemberList({
 }
 
 export default function UserManagement() {
-  const [activeTab, setActiveTab] = useState<'owner' | 'members' | 'logs'>('owner');
+  // 日常主要在看加入成员，开页就落在这个 tab。
+  const [activeTab, setActiveTab] = useState<'owner' | 'members' | 'logs'>('members');
   const [search, setSearch] = useState('');
   const [ownerSortOrder, setOwnerSortOrder] = useState<SortOrder>('asc');
-  const [memberSortOrder, setMemberSortOrder] = useState<SortOrder>('desc');
+  // 正序 = 到期近的排前面，最该处理的人在第一屏。
+  const [memberSortOrder, setMemberSortOrder] = useState<SortOrder>('asc');
   const [seatFilter, setSeatFilter] = useState<SeatFilter>('all');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [statusFilters, setStatusFilters] = useState<Set<MemberStatus>>(
