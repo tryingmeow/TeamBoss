@@ -114,7 +114,9 @@ export default function CostTrendChart() {
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [view]);
+    // loading 也要进依赖：加载中时 wrapRef 指向的节点还没挂上，
+    // 只依赖 view 的话测量永远停在初始宽度，图表在任何视口都只占半张卡。
+  }, [view, loading]);
 
   useEffect(() => {
     let cancelled = false;

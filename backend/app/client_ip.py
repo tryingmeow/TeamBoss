@@ -91,30 +91,56 @@ def is_trusted_proxy(peer: Optional[str]) -> bool:
 # 也不改变限流行为本身——发现方式和处理方式是两件事。
 _COLLAPSE_SAMPLE_THRESHOLD = 20
 _collapse_samples = 0
+_collapse_last_ip = ""
 _collapse_warned = False
 
 
-def _note_identity_sample(peer: str, is_self: bool) -> None:
-    global _collapse_samples, _collapse_warned
-    if _collapse_warned:
+def _is_collapsed_identity(ip: str, is_self: bool) -> bool:
+    """这个请求有没有真实的每访客身份。
+
+    判据不能只看 ``ip == peer``。compose 的实际拓扑是
+    访客 → docker-proxy → nginx 容器 → 后端容器：后端看到的直连地址是 **nginx
+    容器的 IP**，而 X-Real-IP 里是 **网桥网关**，两者本来就不相等。只比这一条，
+    恰恰在最需要它的那个部署里永远不触发。
+
+    真正的信号是"解析出来的访客地址本身就属于可信代理网段"——正常部署里访客是
+    公网地址，绝不会落在 AUTO_TEAM_TRUSTED_PROXIES 里。判定必须**当场生效**而不
+    是攒够样本再生效：攒样本期间登录锁定仍然有效，而攻击者只需要 5 个请求。
+
+    代价：全部访客都在可信网段内的纯内网部署（例如把 10.0.0.0/8 设为可信代理），
+    会被判成坍缩，从而只限流、不锁定。这种部署本来就不对公网暴露，而 10/min 的
+    请求限流依然生效——比"面板能被任意匿名访客锁死"划算得多。
+    """
+    return bool(ip) and (is_self or is_trusted_proxy(ip))
+
+
+def _note_identity_sample(peer: str, ip: str, collapsed: bool) -> None:
+    """只负责告警节流：连续命中够多次才打一次日志，避免偶发抖动刷屏。"""
+    global _collapse_samples, _collapse_warned, _collapse_last_ip
+
+    if not collapsed or ip != _collapse_last_ip:
+        _collapse_last_ip = ip if collapsed else ""
+        _collapse_samples = 1 if collapsed else 0
         return
-    if not is_self:
-        _collapse_samples = 0
-        return
+
     _collapse_samples += 1
-    if _collapse_samples >= _COLLAPSE_SAMPLE_THRESHOLD:
-        _collapse_warned = True
-        logger.warning(
-            "检测到客户端身份坍缩：最近 %d 个经可信代理（%s）转发的请求，解析出的"
-            "访客 IP 全部等于代理自身的连接地址。这通常意味着 compose.yaml 把 web "
-            "端口绑在了 127.0.0.1，Docker 用户态转发（docker-proxy）导致后端看到的 "
-            "每个访客都是同一个网桥网关地址——全站共享一个限流/登录失败锁定身份，"
-            "任意匿名访客发 5 次错误密码就能把管理员锁在后台外 15 分钟。"
-            "请检查 docker/nginx.conf 的 set_real_ip_from 是否覆盖了实际的反代来源，"
-            "以及 compose.yaml 的端口绑定方式（README『部署』一节有说明）。",
-            _collapse_samples,
-            peer,
-        )
+    if _collapse_warned or _collapse_samples < _COLLAPSE_SAMPLE_THRESHOLD:
+        return
+
+    _collapse_warned = True
+    logger.warning(
+        "检测到客户端身份坍缩：最近 %d 个经可信代理（%s）转发的请求，解析出的"
+        "访客 IP 全部是同一个地址（%s），而它属于可信代理网段。这通常意味着 "
+        "compose.yaml 把 web 端口绑在了 127.0.0.1，Docker 用户态转发（docker-proxy）"
+        "导致后端看到的每个访客都是同一个网桥网关地址——全站共享一个限流身份。"
+        "登录失败锁定已对这个共享身份自动关闭（否则任意匿名访客发 5 次错误密码"
+        "就能把管理员锁在后台外），但请检查 docker/nginx.conf 的 set_real_ip_from "
+        "是否覆盖了实际的反代来源，以及 compose.yaml 的端口绑定方式"
+        "（README『部署』一节有说明）。",
+        _collapse_samples,
+        peer,
+        ip,
+    )
 
 
 def get_client_ip_info(request: Request) -> tuple[str, bool]:
@@ -133,10 +159,11 @@ def get_client_ip_info(request: Request) -> tuple[str, bool]:
     $remote_addr），没有则取 XFF 里**最后一个合法 IP**（离本服务最近的那一跳），
     再退回直连地址。
 
-    第二个返回值（is_proxy_self_identity）：当且仅当来源可信、且最终解析出的 IP
-    与代理自己的直连地址完全相同时为 True——这是"这个请求根本没有真实的每访客
-    身份，大家全共享代理自己的地址"这一状态的唯一判据，调用方（登录失败锁定）
-    据此决定要不要把这个共享身份锁死。
+    第二个返回值（is_proxy_self_identity）：为 True 表示"这个请求根本没有真实的
+    每访客身份，大家共享同一个代理侧地址"。判据见 _note_identity_sample——它不只
+    比对代理自身地址，还认"解析出的 IP 落在可信代理网段且连续重复"，因为 compose
+    的多层容器拓扑里坍缩地址是网桥网关，并不等于后端看到的直连地址。调用方
+    （登录失败锁定）据此决定要不要把这个共享身份锁死。
     """
     peer = request.client.host if request.client else ""
     peer_norm = normalize_ip(peer)
@@ -161,8 +188,9 @@ def get_client_ip_info(request: Request) -> tuple[str, bool]:
         ip = peer_norm or "unknown"
 
     is_self = bool(peer_norm) and ip == peer_norm
-    _note_identity_sample(peer_norm, is_self)
-    return ip, is_self
+    collapsed = _is_collapsed_identity(ip, is_self)
+    _note_identity_sample(peer_norm, ip, collapsed)
+    return ip, collapsed
 
 
 def get_client_ip(request: Request) -> str:

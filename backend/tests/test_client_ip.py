@@ -103,3 +103,32 @@ class CollapseDetectionWarningTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ComposeTopologyCollapseTest(unittest.TestCase):
+    """compose 的真实拓扑：后端直连来源是 nginx 容器，头里是网桥网关。
+
+    两者不相等，所以"解析出的 IP 等于代理自身地址"这一条在这里永远不成立——
+    而这恰恰是身份坍缩最常发生的部署。判据必须认"访客地址落在可信代理网段"。
+    """
+
+    def test_bridge_gateway_in_header_is_collapsed(self):
+        ip, collapsed = client_ip.get_client_ip_info(
+            _FakeRequest("172.18.0.3", {"X-Real-IP": "172.18.0.1"})
+        )
+        self.assertEqual(ip, "172.18.0.1")
+        self.assertTrue(collapsed)
+
+    def test_real_public_visitor_behind_the_same_proxy_is_not_collapsed(self):
+        ip, collapsed = client_ip.get_client_ip_info(
+            _FakeRequest("172.18.0.3", {"X-Real-IP": "203.0.113.9"})
+        )
+        self.assertEqual(ip, "203.0.113.9")
+        self.assertFalse(collapsed)
+
+    def test_collapse_is_immediate_not_after_a_sample_streak(self):
+        # 攒样本期间锁定仍然生效，而攻击者只需要 5 个请求，所以第一次就必须成立。
+        _, collapsed = client_ip.get_client_ip_info(
+            _FakeRequest("172.18.0.3", {"X-Real-IP": "172.18.0.1"})
+        )
+        self.assertTrue(collapsed)
