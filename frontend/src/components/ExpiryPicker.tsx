@@ -89,6 +89,13 @@ interface ExpiryPickerProps {
   policy: KickPolicy;
   tone?: Tone;
   disabled?: boolean;
+  /**
+   * 'both'     九宫格 + 自定义（时长/日期两个分页）——默认，成员行与新增对话框用。
+   * 'duration' 只给时长：九宫格 + 自定义天数，没有日历。
+   * 'date'     只给日期：直接展开日历 + 时分，没有九宫格。
+   * 用户管理那一列坚持保留「修改日期」和「增加时长」两个按钮，各自只干一件事。
+   */
+  mode?: 'both' | 'duration' | 'date';
 }
 
 function clampInt(raw: string, min: number, max: number, fallback: number): number {
@@ -105,14 +112,16 @@ export default function ExpiryPicker({
   policy,
   tone = 'blue',
   disabled = false,
+  mode = 'both',
 }: ExpiryPickerProps) {
+  const dateOnly = mode === 'date';
   const t = TONE[tone];
   const controlled = value !== undefined;
   const [internal, setInternal] = useState<ExpirySelection | null>(null);
   const current = controlled ? value ?? null : internal;
 
-  const [customOpen, setCustomOpen] = useState(false);
-  const [customMode, setCustomMode] = useState<'days' | 'date'>('days');
+  const [customOpen, setCustomOpen] = useState(dateOnly);
+  const [customMode, setCustomMode] = useState<'days' | 'date'>(dateOnly ? 'date' : 'days');
   const [amountText, setAmountText] = useState('45');
   const [amountUnit, setAmountUnit] = useState<'d' | 'h' | 'm'>('d');
   const [calendarDate, setCalendarDate] = useState<Date | undefined>(undefined);
@@ -197,6 +206,7 @@ export default function ExpiryPicker({
 
   return (
     <div className="space-y-2.5">
+      {!dateOnly && (
       <div className="grid grid-cols-3 gap-1.5">
         {TILES.map((tile) => {
           const isActive = activeId === tile.id;
@@ -216,9 +226,11 @@ export default function ExpiryPicker({
           );
         })}
       </div>
+      )}
 
-      {customOpen && (
+      {(customOpen || dateOnly) && (
         <div className={`rounded-lg border p-2.5 space-y-2.5 ${t.panelBorder}`}>
+          {mode === 'both' && (
           <div className="flex gap-1">
             {([
               { id: 'days' as const, label: '按时长', Icon: Hash },
@@ -239,6 +251,7 @@ export default function ExpiryPicker({
               </button>
             ))}
           </div>
+          )}
 
           {customMode === 'days' ? (
             <div className="flex items-center gap-2">

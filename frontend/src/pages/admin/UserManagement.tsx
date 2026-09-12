@@ -11,7 +11,7 @@ import {
   updateUserDisplayName,
   createTgMemberCode,
 } from '../../api/client';
-import { Edit2, Trash2, UserX, Check, Copy, MessageCircle, Search, ArrowUpDown, ChevronDown, Zap } from 'lucide-react';
+import { Edit2, Plus, Trash2, UserX, Check, Copy, MessageCircle, Search, ArrowUpDown, ChevronDown, Zap } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Popover from '@radix-ui/react-popover';
 import type { SeatType } from '../../types';
@@ -373,7 +373,8 @@ function ExpiryCell({
   policy: KickPolicy;
   onSubmit: (selection: ExpirySelection) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [dateOpen, setDateOpen] = useState(false);
+  const [durationOpen, setDurationOpen] = useState(false);
 
   return (
     <td className="px-6 py-4">
@@ -387,31 +388,62 @@ function ExpiryCell({
           )}
         </div>
         {editable && (
-          <Popover.Root open={open} onOpenChange={setOpen}>
-            <Popover.Trigger asChild>
-              <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="修改到期时间">
-                <Edit2 className="w-3.5 h-3.5" />
-              </button>
-            </Popover.Trigger>
-            <Popover.Portal>
-              <Popover.Content
-                className="z-50 w-[19rem] p-3 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
-                sideOffset={5}
-              >
-                <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">修改到期时间</div>
-                <ExpiryPicker
-                  tone="indigo"
-                  policy={policy}
-                  joinedAt={joinedAt}
-                  onSubmit={(selection) => {
-                    onSubmit(selection);
-                    setOpen(false);
-                  }}
-                />
-                <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
-              </Popover.Content>
-            </Popover.Portal>
-          </Popover.Root>
+          <>
+            {/* 两个入口各管一件事，不合并：日历改到哪一天，加号加多少时长。 */}
+            <Popover.Root open={dateOpen} onOpenChange={setDateOpen}>
+              <Popover.Trigger asChild>
+                <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="修改日期">
+                  <Edit2 className="w-3.5 h-3.5" />
+                </button>
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Content
+                  className="z-50 w-[19rem] p-3 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
+                  sideOffset={5}
+                >
+                  <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">修改日期</div>
+                  <ExpiryPicker
+                    mode="date"
+                    tone="indigo"
+                    policy={policy}
+                    joinedAt={joinedAt}
+                    onSubmit={(selection) => {
+                      onSubmit(selection);
+                      setDateOpen(false);
+                    }}
+                  />
+                  <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
+
+            <Popover.Root open={durationOpen} onOpenChange={setDurationOpen}>
+              <Popover.Trigger asChild>
+                <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="增加时长">
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Content
+                  className="z-50 w-[19rem] p-3 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
+                  sideOffset={5}
+                >
+                  <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">增加时长</div>
+                  <ExpiryPicker
+                    mode="duration"
+                    tone="indigo"
+                    policy={policy}
+                    joinedAt={joinedAt}
+                    onSubmit={(selection) => {
+                      onSubmit(selection);
+                      setDurationOpen(false);
+                    }}
+                  />
+                  <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
+          </>
         )}
       </div>
     </td>
