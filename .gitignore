@@ -37,8 +37,6 @@ __pycache__/
 .vscode/
 .idea/
 
-/API_REFERENCE.md
-/更多接口(先不需要看).md
 
 # Windows 本地开发启动脚本（会把初始密码打到控制台，不随仓库分发）
 /start.ps1
