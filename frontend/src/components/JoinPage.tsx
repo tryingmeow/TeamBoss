@@ -209,7 +209,6 @@ export default function JoinPage() {
           </div>
           <div>
             <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Team Access</h1>
-            <p className="text-xs text-gray-500 dark:text-gray-500">加入 / 续期 / 查询</p>
           </div>
         </div>
 
@@ -261,7 +260,7 @@ export default function JoinPage() {
                 Token
                 {tab === 'query' && (
                   <span className="font-normal text-xs text-gray-400 dark:text-gray-500">
-                    选填，填写后可查看兑换记录
+                    （可选）
                   </span>
                 )}
               </span>
@@ -324,7 +323,7 @@ export default function JoinPage() {
                 </div>
                 {redeemResult.choices.some((choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged') && (
                   <p className="text-xs text-blue-700/80 dark:text-blue-300/80">
-                    标记为「未纳入到期管理」的车队目前没有到期记录，续期会给该车队的成员身份新建一条到期时间，到期后自动移出。
+                    续期未管理车队将自动设定到期时间，到期后自动移出。
                   </p>
                 )}
               </div>

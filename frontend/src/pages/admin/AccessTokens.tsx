@@ -231,7 +231,6 @@ export default function AccessTokens() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">一次性兑换码</h1>
-          <p className="text-sm text-gray-600 dark:text-slate-400 mt-1">生成与管理成员使用的一次性兑换码</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -257,7 +256,7 @@ export default function AccessTokens() {
             <div>
               <div className="text-sm font-medium text-gray-900 dark:text-slate-100">生成一个兑换码</div>
               <p className="text-xs text-gray-600 dark:text-slate-400 mt-0.5">
-                一码一次：兑换成功即失效。完整 Code 只在生成后显示这一次。
+                兑换成功即失效。生成后仅显示一次。
               </p>
             </div>
             <button
@@ -274,7 +273,7 @@ export default function AccessTokens() {
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1.5">
-                授予时长（成员能用多久）
+                授予时长
               </label>
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {GRANT_PRESETS.map((preset) => (
@@ -301,7 +300,7 @@ export default function AccessTokens() {
 
             <div>
               <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1.5">
-                Code 有效期（多久内必须兑换）
+                兑换有效期
               </label>
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {TTL_PRESETS.map((preset) => (
@@ -329,7 +328,7 @@ export default function AccessTokens() {
 
           <div>
             <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1.5">
-              备注（仅内部可见，不会出现在用户查询结果里）
+              备注（仅内部可见）
             </label>
             <input
               value={note}
@@ -355,7 +354,6 @@ export default function AccessTokens() {
                 {created.token_expires_at
                   ? `${formatDate(created.token_expires_at)} 前有效`
                   : 'Code 永不过期'}
-                　—　完整 Code 只显示这一次，关掉就看不到了
               </div>
               <div className="flex items-center gap-2">
                 <code className="flex-1 min-w-0 px-3 py-2 bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-800 rounded-lg font-mono text-sm text-gray-900 dark:text-slate-100 break-all select-all">
@@ -382,7 +380,7 @@ export default function AccessTokens() {
               待确认的兑换（{pending.length}）
             </div>
             <p className="text-xs text-amber-800 dark:text-amber-300/80 mt-1">
-              这些兑换发出邀请后没能拿到确定结果，兑换码一直锁着。系统不会按时间自动退码——请到 OpenAI 后台看一眼再选。
+              邀请状态未确认，兑换码已锁定。请核对真实状态后手动确认。
             </p>
           </div>
           <div className="divide-y divide-gray-200 dark:divide-slate-700">
@@ -397,7 +395,7 @@ export default function AccessTokens() {
                     <code className="font-mono">{item.token_prefix}</code> · {formatDate(item.created_at)}
                   </div>
                   <div className="text-xs text-gray-500 dark:text-slate-500 mt-0.5">
-                    最近一次名单里{item.seen_in_cached_snapshot ? '看得到' : '看不到'}这个人
+                    最新快照：{item.seen_in_cached_snapshot ? '已找到' : '未找到'}
                     {item.cache_updated_at ? `（${formatDate(item.cache_updated_at)}）` : ''}
                     {item.error_message ? ` · ${item.error_message}` : ''}
                   </div>
@@ -500,15 +498,6 @@ export default function AccessTokens() {
         </div>
       )}
 
-      <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-blue-900 dark:text-blue-300 text-sm">
-        <p className="font-medium mb-2">💡 如何使用</p>
-        <ul className="space-y-1 text-xs">
-          <li>• 点右上角「生成兑换码」直接在这里生成并复制；也可以在 Telegram 中向机器人发送 <code className="bg-blue-100 dark:bg-blue-900/50 px-1 rounded">/token 30</code></li>
-          <li>• 完整 Code 只在生成的那一刻显示一次，复制后转发给成员使用</li>
-          <li>• 成员在自助页面兑换 Code 后会自动加入车队或续期</li>
-          <li>• 可以在此页面查看 Code 的使用状态和停用已发布的 Code</li>
-        </ul>
-      </div>
 
       <div className="flex gap-2 text-xs text-gray-600 dark:text-slate-400">
         <div className="px-3 py-2 bg-gray-100 dark:bg-slate-800 rounded">

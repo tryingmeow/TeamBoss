@@ -23,6 +23,7 @@ from ..services.team_locks import team_invite_lock
 from ..services.team_locks import reserve_default_seat, reserved_default_seats
 from ..services.team_clients import get_team_client
 from ..services.tg_notify import notify_member_event
+from ..services.user_display_names import attach_display_names
 from ..utils.durations import DurationError, parse_optional_datetime
 
 
@@ -137,16 +138,16 @@ async def _ensure_default_seat_available(
 async def get_members(team_id: str, refresh: bool = False):
     cached = None if refresh else await get_cached_members(team_id)
     if cached is not None:
-        return {
+        return await attach_display_names({
             "members": cached["members"],
             "pending_invites": cached["pending_invites"],
             "total": len(cached["members"]) + len(cached["pending_invites"]),
             "cached": True,
             "cached_at": cached["updated_at"],
-        }
+        })
 
     client = await get_team_client(team_id)
-    return await fetch_and_cache_members(team_id, client)
+    return await attach_display_names(await fetch_and_cache_members(team_id, client))
 
 
 @router.post("/members/invite")

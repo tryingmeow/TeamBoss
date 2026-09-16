@@ -201,6 +201,19 @@ export default function TeamCard({
     }
   };
 
+  // 备注只存在本机（user_display_names，按邮箱），ChatGPT 那边没有这个概念：
+  // 保存后就地改这张卡片的成员列表,不要走 startMemberSettle 那条轮询 ChatGPT 的链。
+  const handleRemarkSaved = (email: string, remark: string | null) => {
+    const key = email.trim().toLowerCase();
+    const apply = <T extends { email: string; system_display_name?: string | null }>(rows: T[]): T[] =>
+      rows.map((row) => (row.email.trim().toLowerCase() === key ? { ...row, system_display_name: remark } : row));
+    setMembersData((prev) =>
+      prev
+        ? { ...prev, members: apply(prev.members), pending_invites: apply(prev.pending_invites) }
+        : prev
+    );
+  };
+
   // 请求排序守卫:手动同步和轮询同步共用同一个自增 id,只有最新发出的那次
   // 请求的结果才允许写 state,避免慢的旧响应覆盖后到的新响应。
   const latestRequestId = useRef(0);
@@ -410,7 +423,7 @@ export default function TeamCard({
               </div>
               {isSyncSuspended && (
                 <div className="text-xs text-gray-500 dark:text-gray-500">
-                  已停止定时同步 · 每 6 小时探活一次
+                  已暂停自动同步
                 </div>
               )}
               <div className="break-words text-base font-bold text-gray-900 dark:text-gray-100">
@@ -685,7 +698,7 @@ export default function TeamCard({
                 {isSyncSuspended && !authBlocked && (
                   <span
                     className="ml-2 rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400"
-                    title={`连续同步失败${syncFailingFor ? ` · ${syncFailingFor}` : ''}，已停止定时请求，每 6 小时探活一次`}
+                    title={`连续同步失败${syncFailingFor ? ` · ${syncFailingFor}` : ''}，已暂停自动同步`}
                   >
                     同步已暂停
                   </span>
@@ -707,6 +720,7 @@ export default function TeamCard({
               settling={settling}
               isCodexEnabled={team.is_codex_enabled}
               onRefresh={startMemberSettle}
+              onRemarkSaved={handleRemarkSaved}
               showToast={showToast}
             />
           </div>
@@ -717,7 +731,7 @@ export default function TeamCard({
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
         title="处理 Team"
-        message={`“${team.name}”可能只需要更新 Session。重新导入会保留备注、成员期限和管理记录；仍然删除会清除本地管理数据，但不会取消订阅或移除 OpenAI 团队里的成员。`}
+        message={`“${team.name}”仅删除本地管理数据，不会影响 OpenAI 端订阅与成员。如需刷新凭证请使用「重新导入」。`}
         secondaryLabel="重新导入"
         onSecondary={handleReimportInstead}
         confirmLabel="仍然删除"
@@ -753,11 +767,10 @@ export default function TeamCard({
               </div>
             </div>
 
-            <div className="mt-5 space-y-3 text-sm leading-6 text-gray-600 dark:text-gray-300">
-              <p><span className="font-semibold text-gray-900 dark:text-gray-100">管理员：</span>邀请时可以覆盖默认值并选择其他席位，但仍受 Workspace 权限和官方策略限制。</p>
-              <p><span className="font-semibold text-gray-900 dark:text-gray-100">普通成员：</span>不能覆盖邀请席位，邀请会跟随 Workspace 的默认席位类型。</p>
+            <div className="mt-5 space-y-2 text-sm leading-6 text-gray-600 dark:text-gray-300">
+              <p>管理员邀请可自选席位，成员邀请跟随此默认值。</p>
               <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-                默认设为 Codex 通常不会占用 GPT 席位，可能降低意外新增 GPT 计费席位的风险；实际权限、计费和可用性以 OpenAI 实时规则为准。（即：将默认席位设为 Codex 可防止超拉人，策略可能根据官方调整，以实测为准）
+                默认设为 Codex 可防意外占用 GPT 计费席位。（可能可以防止超拉人 官测为准）
               </p>
             </div>
 

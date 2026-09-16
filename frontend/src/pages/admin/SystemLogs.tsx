@@ -161,7 +161,6 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
               <Activity className="w-6 h-6 text-indigo-400" />
               系统日志
             </h1>
-            <p className="text-gray-500 dark:text-slate-400 text-sm">查阅近期系统活动与事件记录。</p>
           </div>
           <div className="flex items-center gap-3">
             <div className="relative">

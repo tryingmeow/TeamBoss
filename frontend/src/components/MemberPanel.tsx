@@ -1,6 +1,7 @@
 import { X, MailPlus, Loader2 } from 'lucide-react';
 import type { MembersData, ShowToast } from '../types';
 import MemberRow from './MemberRow';
+import MemberRemarkEditor from './MemberRemarkEditor';
 import LoadingSpinner from './LoadingSpinner';
 import { revokeInvite } from '../api/client';
 import { formatSeatTypeLabel } from '../lib/seatType';
@@ -13,6 +14,7 @@ interface MemberPanelProps {
   settling?: boolean;
   isCodexEnabled?: boolean;
   onRefresh: () => void;
+  onRemarkSaved: (email: string, remark: string | null) => void;
   showToast: ShowToast;
 }
 
@@ -22,7 +24,7 @@ function formatDate(dateStr: string | null): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-export default function MemberPanel({ teamId, data, loading, settling, isCodexEnabled, onRefresh, showToast }: MemberPanelProps) {
+export default function MemberPanel({ teamId, data, loading, settling, isCodexEnabled, onRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
   const [revoking, setRevoking] = useState<string | null>(null);
 
   const handleRevoke = async (email: string) => {
@@ -53,7 +55,7 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
       {settling && (
         <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-blue-500 dark:text-blue-400">
           <Loader2 size={12} className="animate-spin" />
-          同步中…改动生效后自动刷新
+          同步中…
         </div>
       )}
       <table className="w-full text-left text-sm">
@@ -73,17 +75,31 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
               teamId={teamId}
               isCodexEnabled={isCodexEnabled}
               onUpdate={onRefresh}
+              onRemarkSaved={onRemarkSaved}
               showToast={showToast}
             />
           ))}
-          {data.pending_invites.map((inv) => (
+          {data.pending_invites.map((inv) => {
+            const remark = inv.system_display_name?.trim() || '';
+            return (
             <tr key={inv.id} className="hover:bg-gray-50 dark:hover:bg-[#222533] group transition-colors">
               <td className="py-2 px-3 min-w-[120px]">
-                <div className="text-gray-700 dark:text-gray-300 truncate max-w-[120px] sm:max-w-[160px] flex items-center gap-1">
-                  {inv.email}
+                <div
+                  className="text-gray-700 dark:text-gray-300 truncate max-w-[120px] sm:max-w-[160px] flex items-center gap-1"
+                  title={remark ? `${remark} · ${inv.email}` : inv.email}
+                >
+                  <span className="truncate">{remark || inv.email}</span>
                   <MailPlus size={14} className="text-yellow-500 shrink-0" />
+                  <MemberRemarkEditor
+                    email={inv.email}
+                    remark={remark}
+                    onSaved={onRemarkSaved}
+                    showToast={showToast}
+                  />
                 </div>
-                <div className="text-xs text-gray-400">待接受</div>
+                <div className="text-xs text-gray-400 truncate max-w-[120px] sm:max-w-[160px]">
+                  {remark ? `待接受 · ${inv.email}` : '待接受'}
+                </div>
               </td>
               <td className="py-2 px-3">
                 {inv.expires_at ? (
@@ -110,7 +126,8 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
                 </button>
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
 

@@ -176,7 +176,7 @@ export default function TeamManagement() {
           .map((item) => item.team_name || item.team_id)
           .join('、');
         failures.push(
-          `${usageResult.value.errors.length} 个 Team 刷新失败（${names}），当前显示旧缓存并已发送 TG 告警`
+          `${usageResult.value.errors.length} 个队伍刷新失败（${names}）`
         );
       }
     } else {
@@ -258,7 +258,6 @@ export default function TeamManagement() {
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">队伍概览</h1>
-          <p className="mt-1 text-sm text-gray-500 dark:text-slate-400">容量、成本和近期到期事项。</p>
         </div>
         <button
           type="button"
@@ -315,7 +314,7 @@ export default function TeamManagement() {
             <StatCard
               title="月预计支出"
               value={formatMoney(finance?.monthly_total_base, baseCurrency)}
-              detail={finance?.excluded_teams_count ? `${finance.excluded_teams_count} 个队伍未计入（年付/计费周期未知）` : '活跃且计划续费的队伍'}
+              detail={finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常队伍` : '仅计入活跃续费队伍'}
               icon={Wallet}
               color="emerald"
             />

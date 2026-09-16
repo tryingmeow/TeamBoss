@@ -221,7 +221,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
 
                 <div className="block">
                   <label htmlFor="kickDelay" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    踢人延迟
+                    移除延迟
                   </label>
                   <div className={`flex items-center w-full px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg focus-within:ring-2 focus-within:ring-blue-500/50 transition-all ${kickMode !== 'delay_hours' ? 'opacity-50' : ''}`}>
                     <input

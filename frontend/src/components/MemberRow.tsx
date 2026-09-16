@@ -11,6 +11,7 @@ import {
   seatUpdateErrorMessage,
 } from '../lib/seatType';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
+import MemberRemarkEditor from './MemberRemarkEditor';
 import { useKickPolicy } from '../hooks/useKickPolicy';
 import ConfirmDialog from './ConfirmDialog';
 
@@ -19,6 +20,7 @@ interface MemberRowProps {
   teamId: string;
   isCodexEnabled?: boolean;
   onUpdate: () => void;
+  onRemarkSaved: (email: string, remark: string | null) => void;
   showToast: ShowToast;
 }
 
@@ -28,7 +30,7 @@ function formatDate(dateStr: string | null): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, showToast }: MemberRowProps) {
+export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, onRemarkSaved, showToast }: MemberRowProps) {
   const [seatOpen, setSeatOpen] = useState(false);
   const [expiryOpen, setExpiryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -88,19 +90,36 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, sh
 
   const seatLabel = formatSeatTypeLabel(member.seat_type);
   const seatColor = seatTypeBadgeClass(member.seat_type);
+  // 备注优先显示：管理员认人靠自己写的备注，ChatGPT 侧的 name 退到第二行，不丢。
+  const remark = member.system_display_name?.trim() || '';
+  const profileName = member.name?.trim() || '';
+  const primaryName = remark || profileName || member.email.split('@')[0];
+  const secondaryLine = remark && profileName ? `${profileName} · ${member.email}` : member.email;
 
   return (
     <>
       <tr className="hover:bg-gray-50 dark:hover:bg-[#222533] group transition-colors">
         <td className="py-2 px-3 min-w-[120px]">
-          <div className="text-sm text-gray-900 dark:text-gray-200 font-medium truncate max-w-[120px] sm:max-w-[160px] flex items-center gap-1">
-            {member.name || member.email.split('@')[0]}
+          <div
+            className="text-sm text-gray-900 dark:text-gray-200 font-medium truncate max-w-[120px] sm:max-w-[160px] flex items-center gap-1"
+            title={[remark, profileName, member.email].filter(Boolean).join(' · ')}
+          >
+            <span className="truncate">{primaryName}</span>
             {member.is_owner && (
               <Crown size={14} className="text-yellow-500 shrink-0" />
             )}
+            <MemberRemarkEditor
+              email={member.email}
+              remark={remark}
+              onSaved={onRemarkSaved}
+              showToast={showToast}
+            />
           </div>
-          <div className="text-xs text-gray-500 truncate max-w-[120px] sm:max-w-[160px]">
-            {member.email}
+          <div
+            className="text-xs text-gray-500 truncate max-w-[120px] sm:max-w-[160px]"
+            title={secondaryLine}
+          >
+            {secondaryLine}
           </div>
         </td>
 

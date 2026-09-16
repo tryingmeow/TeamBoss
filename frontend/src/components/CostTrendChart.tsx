@@ -196,7 +196,7 @@ export default function CostTrendChart() {
             支出趋势
           </div>
           <div className="mt-1 text-xs text-gray-500 dark:text-slate-400">
-            每日快照的月预计支出合计{currency ? `（${currency}）` : ''}
+            月预计支出趋势{currency ? `（${currency}）` : ''}
           </div>
         </div>
 
@@ -235,7 +235,7 @@ export default function CostTrendChart() {
         <div className="py-10 text-center text-sm text-rose-600 dark:text-rose-400">{error}</div>
       ) : points.length === 0 ? (
         <div className="py-10 text-center text-sm text-gray-500 dark:text-slate-400">
-          这段时间还没有账单快照
+          暂无账单数据
         </div>
       ) : (
         <>
@@ -261,7 +261,7 @@ export default function CostTrendChart() {
               </span>
             )}
             <span className="text-xs text-gray-400 dark:text-slate-500">
-              {points.length} 个快照日
+              统计天数：{points.length} 天
             </span>
           </div>
 

@@ -86,8 +86,7 @@ type ToastType = 'success' | 'error';
  * 同步失败或已挂起的队这一轮完全不碰。
  */
 function patrolRuleText(intervalMinutes: number): string {
-  return `每 ${intervalMinutes} 分钟随数据刷新巡逻，只处理这一轮刷新成功的队；同步失败或已挂起的队这一轮不碰。`
-    + '开启时先豁免当前成员；此后只处理 Codex 未开启、GPT 席位实际超额且从系统外新加入的成员。系统内拉人不受影响。';
+  return `每 ${intervalMinutes} 分钟自动巡逻，仅清理未受保护车队中外部新增的超额成员。`;
 }
 
 function PatrolSection() {
@@ -232,9 +231,6 @@ function PatrolSection() {
               <Shield className="w-5 h-5 text-indigo-400" />
               巡逻自动踢人
             </h2>
-            <p className="text-sm text-gray-500 dark:text-slate-400 mt-1">
-              管理自动踢人安全入口和车队豁免名单。
-            </p>
           </div>
         </div>
 
@@ -272,8 +268,7 @@ function PatrolSection() {
             <div className="flex-1">
               <div className="font-medium text-gray-800 dark:text-slate-200">演练空跑</div>
               <div className="text-sm text-gray-500 dark:text-slate-400 mt-1">
-                先实时刷新各队成员和席位，再按当前规则算一遍会被踢的人和名单。
-                开启自动踢人之前，可以拿它先看一眼效果。不会真的踢人。
+                按当前规则预览将被清理的违规成员（不会真正执行）。
               </div>
             </div>
             <button
@@ -299,7 +294,7 @@ function PatrolSection() {
           </span>
         </div>
         <div className="mb-4 flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-700 dark:border-indigo-500/20 dark:bg-indigo-500/10 dark:text-indigo-300">
-          👆 点击车队切换「豁免保护」（需二次确认）。🛡️ = 已豁免 / Codex 自动豁免。
+          点击车队切换保护状态。带有 🛡️ 标记的车队超员时不自动清理。
         </div>
         <div className="flex flex-wrap gap-2">
           {status.teams.map((team) => {

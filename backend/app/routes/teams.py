@@ -15,6 +15,7 @@ from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
 from ..services.tg_commands import sync_email_chat_commands_sync
 from ..services.team_clients import get_team_client
 from ..services.team_health_alerts import report_team_failure, report_team_recovery
+from ..services.user_display_names import attach_display_names
 from ..team_sync_service import (
     TEAM_CACHE_TTL_SECONDS,
     cached_default_seat_type,
@@ -162,7 +163,7 @@ async def sync_team(team_id: str, force: bool = Query(False)):
     team["cached_member_emails"] = member_emails_from_members_data(result["members"])
     return {
         "team": team,
-        "members": result["members"],
+        "members": await attach_display_names(result["members"]),
         "workspace_settings": result["workspace_settings"],
         "cached": result["cached"],
         "refreshed": result["refreshed"],

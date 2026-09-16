@@ -132,7 +132,7 @@ function memberExpiryDisplay(expiry?: MemberExpiryView): { primary: string; grac
     return { primary };
   }
   const label = expiry.kick_label && expiry.kick_label !== '到期' ? expiry.kick_label : '系统宽限';
-  return { primary, grace: `${label} 系统宽限（不计时长）` };
+  return { primary, grace: `${label} (系统宽限)` };
 }
 
 function formatShortDate(dateStr: string | null): string {
@@ -382,7 +382,7 @@ function ExpiryCell({
         <div className="flex flex-col gap-0.5">
           <span className="text-gray-700 dark:text-slate-300">{display}</span>
           {grace && (
-            <span className="whitespace-nowrap text-[10px] text-amber-600 dark:text-amber-400" title="系统宽限不计入购买时长">
+            <span className="whitespace-nowrap text-[10px] text-amber-600 dark:text-amber-400">
               {grace}
             </span>
           )}
@@ -579,7 +579,7 @@ function UserIdentityCell({
             type="text"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="留空则使用邮箱作为主显示名称"
+            placeholder="留空使用邮箱"
             className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-gray-300 dark:border-slate-700 rounded-lg text-sm text-gray-800 dark:text-slate-200 placeholder:text-gray-400 dark:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             maxLength={120}
           />
@@ -793,7 +793,7 @@ function MemberList({
         const failed = (res.errors ?? []) as Array<{ team_name?: string | null; team_id?: string }>;
         if (failed.length) {
           const names = failed.map((e) => e.team_name || e.team_id).filter(Boolean).join('、');
-          showToast(`${failed.length} 个车队的成员数据未能载入（${names}），列表与角标可能不完整`, 'error');
+          showToast(`${failed.length} 个车队数据载入失败（${names}）`, 'error');
         }
       })
       .catch(console.error)

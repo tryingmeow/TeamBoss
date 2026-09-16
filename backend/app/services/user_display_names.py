@@ -60,3 +60,21 @@ async def set_display_name(email: Optional[str], system_display_name: Optional[s
             await db.execute("DELETE FROM user_display_names WHERE email = ?", (key,))
         await db.commit()
     return value or None
+
+
+async def attach_display_names(payload: Optional[dict]) -> Optional[dict]:
+    """给成员/待接受邀请补上备注（system_display_name），返回新对象。
+
+    只在响应边界调用，不写进 member_cache：备注存在本地表里、随时可改，写进
+    成员缓存后就是一份不会跟着改的副本，改完备注要等下一次成员刷新才生效。
+    """
+    if not payload:
+        return payload
+    names = await load_display_name_map()
+    result = dict(payload)
+    for key in ("members", "pending_invites"):
+        result[key] = [
+            {**row, "system_display_name": names.get(normalize_email(row.get("email"))) or None}
+            for row in (payload.get(key) or [])
+        ]
+    return result

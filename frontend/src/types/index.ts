@@ -58,6 +58,9 @@ export interface Member {
   id: string;
   email: string;
   name: string | null;
+  // 管理员在"人员管理"里给这个邮箱写的备注（后端表 user_display_names）。
+  // 按邮箱走，不属于某个 Team，同一个人在几个 Team 里看到的是同一条备注。
+  system_display_name?: string | null;
   role: string;
   seat_type: string;
   is_owner: boolean;
@@ -68,6 +71,7 @@ export interface Member {
 export interface PendingInvite {
   id: string;
   email: string;
+  system_display_name?: string | null;
   seat_type: string;
   created_time: string;
   expires_at: string | null;

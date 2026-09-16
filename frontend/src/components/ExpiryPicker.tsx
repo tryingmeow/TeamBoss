@@ -343,9 +343,6 @@ export default function ExpiryPicker({
                   aria-label="分钟"
                   className={`w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-center text-sm text-gray-900 focus:outline-none focus:ring-2 dark:border-[#2a2d3a] dark:bg-[#0f1117] dark:text-gray-200 ${t.ring}`}
                 />
-                <span className="text-[10px] text-gray-400 dark:text-gray-500">
-                  {joinedAt ? '默认 = 加入时间' : '默认 = 当前时刻'}
-                </span>
               </div>
             </div>
           )}
@@ -363,7 +360,7 @@ export default function ExpiryPicker({
 
       <div className="min-h-[1rem] text-[11px] leading-4">
         {previewSelection?.kind === 'never' ? (
-          <span className="text-amber-600 dark:text-amber-400">永不过期，不会被自动移出</span>
+          <span className="text-amber-600 dark:text-amber-400">永不过期</span>
         ) : previewExpiry && previewKick ? (
           <span className={t.muted}>
             <span className={t.accentText}>预计 {formatAppLocalMinute(previewKick)} 移出</span>

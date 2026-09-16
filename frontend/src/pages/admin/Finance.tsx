@@ -618,9 +618,6 @@ export default function Finance() {
             <Wallet className="h-6 w-6 shrink-0 text-blue-400" />
             财务总览
           </h1>
-          <p className="text-gray-500 dark:text-slate-400 text-sm">
-            查看团队预计成本、Credit 和续费计划。
-          </p>
         </div>
         <div className="grid w-full grid-cols-2 gap-3 sm:flex sm:w-auto sm:items-center">
           <div>
