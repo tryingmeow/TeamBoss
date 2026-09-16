@@ -101,16 +101,24 @@ function daysUntil(value: string) {
   return isValid(date) ? differenceInCalendarDays(date, new Date()) : null;
 }
 
+/**
+ * 列表不再截断在 7 天内，因此必须区分「已逾期」和「还剩几天」：
+ * 否则逾期一个月的条目会和明天到期的共用同一个红角标，看上去只是今天要处理。
+ * 角标分档与财务总览页保持一致。
+ */
 function dueLabel(days: number) {
+  if (days < 0) return `已逾期 ${Math.abs(days)} 天`;
   if (days === 0) return '今天';
   if (days === 1) return '明天';
   return `${days}天后`;
 }
 
 function dueBadgeClass(days: number) {
+  if (days < 0) return 'bg-rose-600 text-white ring-1 ring-rose-700 dark:bg-rose-600 dark:text-white dark:ring-rose-400/60';
   if (days <= 1) return 'bg-rose-50 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300';
   if (days <= 3) return 'bg-orange-50 text-orange-700 dark:bg-orange-500/20 dark:text-orange-300';
-  return 'bg-amber-50 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300';
+  if (days <= 7) return 'bg-amber-50 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300';
+  return 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300';
 }
 
 function SectionHeader({
@@ -214,8 +222,6 @@ export default function TeamManagement() {
       .map((item) => ({ item, daysUntil: daysUntil(item.date) }))
       .filter((row): row is { item: FinanceTimelineItem; daysUntil: number } => (
         row.daysUntil !== null
-        && row.daysUntil >= 0
-        && row.daysUntil <= 7
         && row.item.will_renew === 1
       ))
       .sort((a, b) => {
@@ -229,7 +235,7 @@ export default function TeamManagement() {
       const expiresAt = member.expiry?.expires_at;
       if (!expiresAt) return [];
       const remaining = daysUntil(expiresAt);
-      if (remaining === null || remaining < 0 || remaining > 7) return [];
+      if (remaining === null) return [];
       return [{ ...member, expiresAt, daysUntil: remaining }];
     })
     .sort((a, b) => {
@@ -250,7 +256,11 @@ export default function TeamManagement() {
     }, 0);
   }, [data, finance]);
 
-  const renewalAmount = renewalItems.reduce((total, row) => total + (row.item.amount_base ?? 0), 0);
+  // 列表是全量，但金额只取七天内：把跨度不同的账单日加在一起得到的总额没有对应的支出行为。
+  const renewalAmountNext7 = renewalItems.reduce(
+    (total, row) => (row.daysUntil >= 0 && row.daysUntil <= 7 ? total + (row.item.amount_base ?? 0) : total),
+    0,
+  );
   const baseCurrency = finance?.base_currency || 'USD';
 
   return (
@@ -326,14 +336,14 @@ export default function TeamManagement() {
               color="amber"
             />
             <StatCard
-              title="7 天内续费"
+              title="近期续费团队"
               value={renewalItems.length}
-              detail={`${formatMoney(renewalAmount, baseCurrency)} · 按日期排序`}
+              detail={`七天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
               icon={CalendarClock}
               color="orange"
             />
             <StatCard
-              title="7 天内到期成员"
+              title="近期到期成员"
               value={expiringMembers.length}
               detail="按服务到期时间排序"
               icon={UserRound}
@@ -344,19 +354,19 @@ export default function TeamManagement() {
           <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
             <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none">
               <SectionHeader
-                title="7 天内续费团队"
+                title="近期续费团队"
                 count={renewalItems.length}
-                description={`预计扣款 ${formatMoney(renewalAmount, baseCurrency)}`}
+                description={`七天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
                 to="/admin/finance"
               />
               <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-slate-800/70">
                 {renewalItems.length === 0 ? (
-                  <div className="px-5 py-12 text-center text-sm text-gray-400 dark:text-slate-500">未来 7 天没有续费团队</div>
+                  <div className="px-5 py-12 text-center text-sm text-gray-400 dark:text-slate-500">暂无待续费团队</div>
                 ) : renewalItems.map(({ item, daysUntil: remaining }) => (
                   <div key={`${item.team_id}:${item.date}`} className="flex items-start gap-3 px-5 py-4 transition-colors hover:bg-gray-50 dark:hover:bg-slate-800/40">
-                    <div className="w-16 shrink-0">
+                    <div className="w-20 shrink-0 sm:w-24">
                       <div className="text-xs tabular-nums text-gray-500 dark:text-slate-400">{format(parseISO(item.date), 'MM-dd')}</div>
-                      <span className={`mt-1 inline-flex rounded px-2 py-0.5 text-[11px] font-medium ${dueBadgeClass(remaining)}`}>
+                      <span className={`mt-1 inline-flex whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium ${dueBadgeClass(remaining)}`}>
                         {dueLabel(remaining)}
                       </span>
                     </div>
@@ -392,22 +402,22 @@ export default function TeamManagement() {
 
             <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none">
               <SectionHeader
-                title="7 天内到期成员"
+                title="近期到期成员"
                 count={expiringMembers.length}
                 description="服务到期时间，最近的排在前面"
                 to="/admin/users"
               />
               <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-slate-800/70">
                 {expiringMembers.length === 0 ? (
-                  <div className="px-5 py-12 text-center text-sm text-gray-400 dark:text-slate-500">未来 7 天没有到期成员</div>
+                  <div className="px-5 py-12 text-center text-sm text-gray-400 dark:text-slate-500">暂无到期成员</div>
                 ) : expiringMembers.map((member) => {
                   const displayName = member.system_display_name?.trim() || member.name?.trim() || member.email;
                   const showEmail = displayName.toLowerCase() !== member.email.toLowerCase();
                   return (
                     <div key={`${member.team_id}:${member.email}`} className="flex items-start gap-3 px-5 py-4 transition-colors hover:bg-gray-50 dark:hover:bg-slate-800/40">
-                      <div className="w-16 shrink-0">
+                      <div className="w-20 shrink-0 sm:w-24">
                         <div className="text-xs tabular-nums text-gray-500 dark:text-slate-400">{format(parseISO(member.expiresAt), 'MM-dd')}</div>
-                        <span className={`mt-1 inline-flex rounded px-2 py-0.5 text-[11px] font-medium ${dueBadgeClass(member.daysUntil)}`}>
+                        <span className={`mt-1 inline-flex whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium ${dueBadgeClass(member.daysUntil)}`}>
                           {dueLabel(member.daysUntil)}
                         </span>
                       </div>
