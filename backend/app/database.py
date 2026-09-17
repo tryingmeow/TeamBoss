@@ -273,6 +273,22 @@ async def init_database():
             )
         """)
 
+        # 管理员手工续期也可能在提交已落库、响应却丢失的边界被重试。把请求收据和
+        # 到期写入放进同一事务，重复同一 request_id 只能读回第一次的结果，绝不能
+        # 再加一次时长。
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_expiry_extension_receipts (
+                team_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                duration TEXT NOT NULL,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (team_id, user_id, request_id)
+            )
+        """)
+
         # 邀请已在 OpenAI 侧成功、但本地 member_expiry 落库重试多次后仍失败的兜底队列。
         # OpenAI 邀请动作不可回滚，这里必须留痕以便人工/后续流程补齐，绝不能让记录悄悄丢失
         # （否则下一轮同步会把系统自己拉的人误判成外部乱拉的人）。

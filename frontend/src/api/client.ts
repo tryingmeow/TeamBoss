@@ -291,6 +291,19 @@ export async function setExpiry(
   });
 }
 
+export async function extendMemberExpiry(
+  teamId: string,
+  userId: string,
+  expiresIn: string,
+  email: string,
+  requestId: string
+): Promise<void> {
+  return request<void>(`/api/teams/${teamId}/members/${userId}/expiry/extend`, {
+    method: 'POST',
+    body: JSON.stringify({ expires_in: expiresIn, email, request_id: requestId }),
+  });
+}
+
 export async function removeExpiry(teamId: string, userId: string): Promise<void> {
   return request<void>(`/api/teams/${teamId}/members/${userId}/expiry`, { method: 'DELETE' });
 }

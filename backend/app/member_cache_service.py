@@ -97,20 +97,21 @@ async def update_cached_member_expiry(
 
         changed = False
         for member in members:
+            member_id = (member.get("id") or member.get("user_id") or "").strip()
             member_email = (member.get("email") or "").strip().lower()
-            if (
-                normalized_user_id
-                and member.get("id") == normalized_user_id
-            ) or (
-                normalized_email
-                and member_email == normalized_email
-            ):
+            # A caller with a user id has already resolved the canonical
+            # Team member.  Do not OR-match its email against another row.
+            member_matches = (
+                member_id == normalized_user_id
+                and (not normalized_email or member_email == normalized_email)
+            ) if normalized_user_id else (normalized_email and member_email == normalized_email)
+            if member_matches:
                 member["expires_at"] = expires_at
                 changed = True
 
         for invite in pending_invites:
             invite_email = (invite.get("email") or "").strip().lower()
-            if normalized_email and invite_email == normalized_email:
+            if not normalized_user_id and normalized_email and invite_email == normalized_email:
                 invite["expires_at"] = expires_at
                 changed = True
 

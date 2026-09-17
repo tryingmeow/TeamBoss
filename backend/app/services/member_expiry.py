@@ -49,6 +49,10 @@ class PermanentMembershipError(Exception):
     """
 
 
+class ExtensionReceiptMismatchError(Exception):
+    """A request id was reused for a different member extension."""
+
+
 async def get_active_expiry_state(team_id: str, user_id: str, email: str) -> str:
     """这个人在这个 Team 里当前的到期管理状态。
 
@@ -163,6 +167,8 @@ async def extend_member_expiry(
     keep_permanent: bool = False,
     token_use_id: Optional[int] = None,
     token_action: Optional[str] = None,
+    admin_request_id: Optional[str] = None,
+    admin_audit_detail: Optional[str] = None,
 ) -> Optional[str]:
     """在成员**现有**到期时间之上追加 ``duration``，而不是覆盖它。
 
@@ -203,6 +209,22 @@ async def extend_member_expiry(
         async with get_db() as db:
             # 立刻拿写锁，让并发的另一次续期排队等待，而不是读到同一个旧值。
             await db.execute("BEGIN IMMEDIATE")
+            if admin_request_id:
+                cursor = await db.execute(
+                    """SELECT email, duration, expires_at
+                       FROM admin_expiry_extension_receipts
+                       WHERE team_id = ? AND user_id = ? AND request_id = ?""",
+                    (team_id, normalized_user_id, admin_request_id),
+                )
+                receipt = await cursor.fetchone()
+                if receipt is not None:
+                    if receipt["email"] != normalized_email or receipt["duration"] != duration:
+                        await db.rollback()
+                        raise ExtensionReceiptMismatchError(
+                            "request_id 已用于另一笔续期，不能复用"
+                        )
+                    await db.rollback()
+                    return receipt["expires_at"]
             if token_use_id is not None:
                 cursor = await db.execute(
                     "SELECT result, expires_at FROM access_token_uses WHERE id = ?",
@@ -254,6 +276,17 @@ async def extend_member_expiry(
                     normalized_user_id,
                     expires_iso,
                 )
+                await _finalize_admin_extension(
+                    db,
+                    team_id,
+                    normalized_user_id,
+                    normalized_email,
+                    duration,
+                    expires_iso,
+                    admin_request_id,
+                    admin_audit_detail,
+                    now_iso,
+                )
                 await db.commit()
                 return expires_iso
 
@@ -278,6 +311,17 @@ async def extend_member_expiry(
                     team_id,
                     normalized_user_id,
                     None,
+                )
+                await _finalize_admin_extension(
+                    db,
+                    team_id,
+                    normalized_user_id,
+                    normalized_email,
+                    duration,
+                    None,
+                    admin_request_id,
+                    admin_audit_detail,
+                    now.isoformat(),
                 )
                 await db.commit()
                 return None
@@ -306,6 +350,17 @@ async def extend_member_expiry(
                     team_id,
                     normalized_user_id,
                     None,
+                )
+                await _finalize_admin_extension(
+                    db,
+                    team_id,
+                    normalized_user_id,
+                    normalized_email,
+                    duration,
+                    None,
+                    admin_request_id,
+                    admin_audit_detail,
+                    now.isoformat(),
                 )
                 await db.commit()
                 return None
@@ -337,6 +392,17 @@ async def extend_member_expiry(
                     normalized_user_id,
                     new_expires.isoformat(),
                 )
+                await _finalize_admin_extension(
+                    db,
+                    team_id,
+                    normalized_user_id,
+                    normalized_email,
+                    duration,
+                    new_expires.isoformat(),
+                    admin_request_id,
+                    admin_audit_detail,
+                    now.isoformat(),
+                )
                 await db.commit()
                 return new_expires.isoformat()
             await db.rollback()
@@ -353,6 +419,34 @@ async def extend_member_expiry(
         f"extend_member_expiry: gave up after {_EXTEND_WRITE_ATTEMPTS} attempts "
         f"(concurrent writers) team_id={team_id!r} email={normalized_email!r}"
     )
+
+
+async def _finalize_admin_extension(
+    db,
+    team_id: str,
+    user_id: str,
+    email: str,
+    duration: str,
+    expires_at: Optional[str],
+    request_id: Optional[str],
+    audit_detail: Optional[str],
+    now_iso: str,
+) -> None:
+    """Persist an admin extension receipt and audit row in the expiry transaction."""
+    if request_id:
+        await db.execute(
+            """INSERT INTO admin_expiry_extension_receipts
+               (team_id, user_id, request_id, email, duration, expires_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (team_id, user_id, request_id, email, duration, expires_at, now_iso),
+        )
+    if audit_detail is not None:
+        await db.execute(
+            """INSERT INTO operation_logs
+               (team_id, action, target_email, detail, result, error_message, trigger_type, created_at)
+               VALUES (?, 'extend_expiry', ?, ?, 'success', NULL, 'manual', ?)""",
+            (team_id, email, audit_detail, now_iso),
+        )
 
 
 async def _finalize_token_use(

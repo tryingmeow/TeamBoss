@@ -20,7 +20,7 @@ type PresetTile =
   | { id: string; label: string; selection: ExpirySelection }
   | { id: 'custom'; label: string; selection: null };
 
-/** 九宫格。顺序即视觉顺序：三行三列，最后一格永远是「自定义」。 */
+/** 九宫格。默认模式的最后一格是「自定义」。 */
 const TILES: PresetTile[] = [
   { id: '7d', label: '7 天', selection: { kind: 'duration', value: '7d' } },
   { id: '14d', label: '14 天', selection: { kind: 'duration', value: '14d' } },
@@ -115,12 +115,14 @@ export default function ExpiryPicker({
   mode = 'both',
 }: ExpiryPickerProps) {
   const dateOnly = mode === 'date';
+  const durationOnly = mode === 'duration';
   const t = TONE[tone];
   const controlled = value !== undefined;
   const [internal, setInternal] = useState<ExpirySelection | null>(null);
   const current = controlled ? value ?? null : internal;
 
-  const [customOpen, setCustomOpen] = useState(dateOnly);
+  // 单独的「增加时长」浮层始终展示输入框，避免还要先点一次「自定义」。
+  const [customOpen, setCustomOpen] = useState(dateOnly || durationOnly);
   const [customMode, setCustomMode] = useState<'days' | 'date'>(dateOnly ? 'date' : 'days');
   const [amountText, setAmountText] = useState('');
   const [amountUnit, setAmountUnit] = useState<'d' | 'h' | 'm'>('d');
@@ -152,12 +154,12 @@ export default function ExpiryPicker({
   }
 
   const activeId = useMemo(() => {
-    if (customOpen) return 'custom';
+    if (customOpen && !durationOnly) return 'custom';
     if (!current) return null;
     if (current.kind === 'never') return 'never';
     if (current.kind === 'duration' && PRESET_IDS.has(current.value)) return current.value;
     return 'custom';
-  }, [current, customOpen]);
+  }, [current, customOpen, durationOnly]);
 
   /** 自定义面板当前这一刻会提交什么。 */
   const draft: ExpirySelection | null = useMemo(() => {
@@ -179,7 +181,7 @@ export default function ExpiryPicker({
     };
   }, [customMode, amountText, amountUnit, calendarDate, hourText, minuteText]);
 
-  const previewSelection = customOpen ? draft : current;
+  const previewSelection = durationOnly ? draft ?? current : customOpen ? draft : current;
   const previewExpiry = selectionExpiryDate(previewSelection);
   const previewKick = previewExpiry ? computeEffectiveKickAt(previewExpiry, policy) : null;
 
@@ -194,21 +196,21 @@ export default function ExpiryPicker({
       setCustomOpen((open) => !open);
       return;
     }
-    setCustomOpen(false);
+    if (!durationOnly) setCustomOpen(false);
     if (tile.selection) commit(tile.selection);
   };
 
   const handleCustomConfirm = () => {
     if (!draft) return;
     commit(draft);
-    setCustomOpen(false);
+    if (!durationOnly) setCustomOpen(false);
   };
 
   return (
     <div className="space-y-2.5">
       {!dateOnly && (
       <div className="grid grid-cols-3 gap-1.5">
-        {TILES.map((tile) => {
+        {(durationOnly ? TILES.filter((tile) => tile.id !== 'custom') : TILES).map((tile) => {
           const isActive = activeId === tile.id;
           return (
             <button
@@ -260,6 +262,7 @@ export default function ExpiryPicker({
                 min={1}
                 value={amountText}
                 onChange={(e) => setAmountText(e.target.value)}
+                aria-label="自定义时长数值"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();

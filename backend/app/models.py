@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Literal, Optional, List
 
 
@@ -120,6 +120,19 @@ class SetExpiryRequest(BaseModel):
     expires_in: Optional[str] = None
     expires_at: Optional[str] = None
     email: Optional[str] = None
+
+
+class ExtendExpiryRequest(BaseModel):
+    """A duration to append to a member's existing expiry.
+
+    This is intentionally separate from ``SetExpiryRequest``: the latter
+    overwrites the expiry with an absolute value (or a duration from now),
+    whereas this request preserves unused time before adding the duration.
+    """
+
+    expires_in: str
+    email: str = Field(min_length=1)
+    request_id: str
 
 
 class SettingsUpdate(BaseModel):

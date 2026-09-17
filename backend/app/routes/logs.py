@@ -32,6 +32,7 @@ MEMBER_LOG_ACTIONS = (
     "remove_member",
     "revoke_invite",
     "set_expiry",
+    "extend_expiry",
     "update_user_display_name",
 )
 

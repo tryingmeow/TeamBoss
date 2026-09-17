@@ -2,11 +2,11 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   fetchOwners,
   fetchAllMembers,
+  extendMemberExpiry,
   updateMemberExpiry,
   updateMemberSeat,
   kickMember,
   kickInvite,
-  setExpiry,
   removeExpiry,
   updateUserDisplayName,
   createTgMemberCode,
@@ -26,6 +26,7 @@ import {
   normalizeSeatType,
   seatTypeBadgeClass,
 } from '../../lib/seatType';
+import { ExpiryExtensionRequestIds } from '../../lib/expiryExtensionRequest';
 
 interface BillingCycle {
   active_start: string | null;
@@ -758,6 +759,7 @@ function MemberList({
   statusFilters: Set<MemberStatus>;
   showToast: ShowToast;
 }) {
+  const extensionRequestIds = useRef(new ExpiryExtensionRequestIds());
   const [members, setMembers] = useState<AdminMemberRow[]>([]);
   // Owner 行不进表格（表格是"成员"视图），但必须参与多车队角标的统计：
   // 一个邮箱在 A 队是成员、在 B 队是 Owner，正是最需要人工确认的那种情况。
@@ -867,18 +869,23 @@ function MemberList({
   ) => {
     try {
       if (selection.kind === 'never') {
+        extensionRequestIds.current.discardMember(teamId, userId);
         await removeExpiry(teamId, userId);
       } else if (selection.kind === 'duration') {
-        await setExpiry(teamId, userId, selection.value, email);
+        const intent = { teamId, userId, duration: selection.value };
+        const requestId = extensionRequestIds.current.get(intent);
+        await extendMemberExpiry(teamId, userId, selection.value, email, requestId);
+        extensionRequestIds.current.confirm(intent);
       } else {
         // 绝对时刻已经带上 +08:00 偏移，后端 parse_optional_datetime 直接收。
         await updateMemberExpiry(teamId, userId, selection.iso);
+        extensionRequestIds.current.discardMember(teamId, userId);
       }
       void fetchMembers(false);
       showToast('到期时间已更新');
     } catch (err) {
       console.error(err);
-      showToast('修改到期时间失败', 'error');
+      showToast(err instanceof Error ? err.message : '修改到期时间失败', 'error');
     }
   };
 

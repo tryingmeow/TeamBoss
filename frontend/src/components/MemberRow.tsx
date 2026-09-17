@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Crown, Trash2, Pencil } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import type { Member, ShowToast } from '../types';
-import { removeMember, changeSeat, setExpiry, removeExpiry, updateMemberExpiry } from '../api/client';
+import { removeMember, changeSeat, extendMemberExpiry, removeExpiry, updateMemberExpiry } from '../api/client';
 import {
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
@@ -14,6 +14,7 @@ import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import MemberRemarkEditor from './MemberRemarkEditor';
 import { useKickPolicy } from '../hooks/useKickPolicy';
 import ConfirmDialog from './ConfirmDialog';
+import { ExpiryExtensionRequestIds } from '../lib/expiryExtensionRequest';
 
 interface MemberRowProps {
   member: Member;
@@ -35,6 +36,7 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
   const [expiryOpen, setExpiryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [loading, setLoading] = useState(false);
+  const extensionRequestIds = useRef(new ExpiryExtensionRequestIds());
   const kickPolicy = useKickPolicy();
 
   const handleChangeSeat = async (newSeat: string) => {
@@ -57,11 +59,16 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
     try {
       if (selection.kind === 'never') {
         // 永不过期走的仍然是"删除到期时间"这个接口，语义没变。
+        extensionRequestIds.current.discardMember(teamId, member.id);
         await removeExpiry(teamId, member.id);
       } else if (selection.kind === 'duration') {
-        await setExpiry(teamId, member.id, selection.value, member.email);
+        const intent = { teamId, userId: member.id, duration: selection.value };
+        const requestId = extensionRequestIds.current.get(intent);
+        await extendMemberExpiry(teamId, member.id, selection.value, member.email, requestId);
+        extensionRequestIds.current.confirm(intent);
       } else {
         await updateMemberExpiry(teamId, member.id, selection.iso);
+        extensionRequestIds.current.discardMember(teamId, member.id);
       }
       onUpdate();
       setExpiryOpen(false);

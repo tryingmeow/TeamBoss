@@ -258,6 +258,7 @@ def _member_actions(team_id: str, user_id: str, email: str, status_value: str) -
             "kick": f"/api/teams/{team_id}/members/{user_id}",
             "change_seat": f"/api/teams/{team_id}/members/{user_id}/seat",
             "set_expiry": f"/api/teams/{team_id}/members/{user_id}/expiry",
+            "extend_expiry": f"/api/teams/{team_id}/members/{user_id}/expiry/extend",
             "remove_expiry": f"/api/teams/{team_id}/members/{user_id}/expiry",
         }
     if status_value == "pending":
