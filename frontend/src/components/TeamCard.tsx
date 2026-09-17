@@ -132,6 +132,7 @@ export default function TeamCard({
   showToast,
 }: TeamCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [showExactTime, setShowExactTime] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -606,12 +607,20 @@ export default function TeamCard({
             <div className="flex items-center justify-between text-sm">
               <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
                 <Calendar size={14} />
-                <span
-                  title={team.active_until ? `续费：${formatBeijingDateTime(team.active_until)}` : undefined}
-                  className={team.active_until ? 'cursor-help' : undefined}
-                >
+                <span>
                   {formatShortDate(team.active_start)} - {formatShortDate(team.active_until)}
                 </span>
+                {team.active_until && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setShowExactTime((v) => !v); }}
+                    aria-expanded={showExactTime}
+                    aria-label="具体续费时间"
+                    className="rounded p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                  >
+                    <ChevronDown size={14} className={`transition-transform ${showExactTime ? 'rotate-180' : ''}`} />
+                  </button>
+                )}
                 {team.days_remaining !== null && (
                   <span className={`ml-1 px-1.5 py-0.5 rounded text-xs font-semibold ${
                     isWarning ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400' 
@@ -635,6 +644,11 @@ export default function TeamCard({
                 {openingAddMember ? '加载中' : '添加成员'}
               </button>
             </div>
+            {showExactTime && team.active_until && (
+              <div className="-mt-1 pl-5 text-xs text-gray-500 dark:text-gray-400">
+                续费 {formatBeijingDateTime(team.active_until)}
+              </div>
+            )}
 
             <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-500 pt-3 border-t border-gray-100 dark:border-gray-800">
               <div className="flex items-center gap-1.5">

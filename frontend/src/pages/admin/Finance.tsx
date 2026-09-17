@@ -437,6 +437,7 @@ export default function Finance() {
   const [activeBillingTab, setActiveBillingTab] = useState<'timeline' | 'cards' | 'details'>('timeline');
   const [timelineSort, setTimelineSort] = useState<'date' | 'card'>('date');
   const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null);
+  const [exactTimeTeamId, setExactTimeTeamId] = useState<string | null>(null);
   const [invoicesByTeam, setInvoicesByTeam] = useState<Record<string, FinanceInvoiceRow[] | 'loading' | 'error'>>({});
 
   useEffect(() => {
@@ -1123,17 +1124,30 @@ export default function Finance() {
                         </td>
                         <td className="px-4 py-3.5">
                           {team.active_until ? (
-                            <div className="flex items-center gap-2 whitespace-nowrap">
-                              <span
-                                className="cursor-help text-gray-900 dark:text-slate-100"
-                                title={`续费：${formatBeijingDateTime(team.active_until)}`}
-                              >
-                                {formatDateSafe(team.active_until, 'MM-dd')}
-                              </span>
-                              {team.days_left !== null && (
-                                <span className={`rounded px-2 py-0.5 text-xs font-medium ${daysBadge}`}>
-                                  {team.days_left > 0 ? `${team.days_left}天` : '已过期'}
+                            <div>
+                              <div className="flex items-center gap-2 whitespace-nowrap">
+                                <span className="text-gray-900 dark:text-slate-100">
+                                  {formatDateSafe(team.active_until, 'MM-dd')}
                                 </span>
+                                <button
+                                  type="button"
+                                  onClick={(e) => { e.stopPropagation(); setExactTimeTeamId((prev) => (prev === team.team_id ? null : team.team_id)); }}
+                                  aria-expanded={exactTimeTeamId === team.team_id}
+                                  aria-label="具体续费时间"
+                                  className="rounded p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-slate-200"
+                                >
+                                  <ChevronDown size={14} className={`transition-transform ${exactTimeTeamId === team.team_id ? 'rotate-180' : ''}`} />
+                                </button>
+                                {team.days_left !== null && (
+                                  <span className={`rounded px-2 py-0.5 text-xs font-medium ${daysBadge}`}>
+                                    {team.days_left > 0 ? `${team.days_left}天` : '已过期'}
+                                  </span>
+                                )}
+                              </div>
+                              {exactTimeTeamId === team.team_id && (
+                                <div className="mt-1 whitespace-nowrap text-xs text-gray-500 dark:text-slate-400">
+                                  续费 {formatBeijingDateTime(team.active_until)}
+                                </div>
                               )}
                             </div>
                           ) : (
