@@ -226,9 +226,19 @@ def _tg_binding_payload(email: str, bindings: dict[str, dict]) -> dict:
 
 
 def _expiry_maps(expiry_rows: list[dict]) -> tuple[dict, dict]:
+    """Index only live expiry records for current member/invite payloads.
+
+    ``expiry_rows`` deliberately still includes kicked records: the caller uses
+    those later to build its historical ``kicked`` output.  A re-invited member
+    can share a user id with that archived record while their live expiry is
+    currently keyed only by email, so allowing the archive into ``by_user``
+    would make the current row display the old expiry.
+    """
     by_user: dict[tuple[str, str], dict] = {}
     by_email: dict[tuple[str, str], dict] = {}
     for row in expiry_rows:
+        if row.get("kicked") != 0:
+            continue
         team_id = row.get("team_id") or ""
         user_id = row.get("user_id") or ""
         email = _normalize_email(row.get("email"))
