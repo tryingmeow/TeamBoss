@@ -13,7 +13,7 @@ import {
 import { AlertTriangle, ChevronDown, Clock, CreditCard, ExternalLink, KeyRound, Loader2, Mail, Pencil, Plus, Wallet, TrendingUp, Zap } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
-import { formatDateSafe } from '../../lib/formatDate';
+import { formatDateSafe, formatBeijingDateTime } from '../../lib/formatDate';
 import CostTrendChart from '../../components/CostTrendChart';
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
@@ -1124,7 +1124,10 @@ export default function Finance() {
                         <td className="px-4 py-3.5">
                           {team.active_until ? (
                             <div className="flex items-center gap-2 whitespace-nowrap">
-                              <span className="text-gray-900 dark:text-slate-100">
+                              <span
+                                className="cursor-help text-gray-900 dark:text-slate-100"
+                                title={`续费：${formatBeijingDateTime(team.active_until)}`}
+                              >
                                 {formatDateSafe(team.active_until, 'MM-dd')}
                               </span>
                               {team.days_left !== null && (

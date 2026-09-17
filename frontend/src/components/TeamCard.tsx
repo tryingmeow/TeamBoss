@@ -11,6 +11,7 @@ import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark } from '../api/client';
 import { activeChatGptSeats } from '../lib/seatCapacity';
 import { formatSeatTypeLabel } from '../lib/seatType';
+import { formatBeijingDateTime } from '../lib/formatDate';
 
 interface TeamCardProps {
   team: Team;
@@ -605,7 +606,10 @@ export default function TeamCard({
             <div className="flex items-center justify-between text-sm">
               <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
                 <Calendar size={14} />
-                <span>
+                <span
+                  title={team.active_until ? `续费：${formatBeijingDateTime(team.active_until)}` : undefined}
+                  className={team.active_until ? 'cursor-help' : undefined}
+                >
                   {formatShortDate(team.active_start)} - {formatShortDate(team.active_until)}
                 </span>
                 {team.days_remaining !== null && (
