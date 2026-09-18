@@ -9,6 +9,16 @@ from ..models import SettingsUpdate
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
+# 只有这四个 key 会经 GET /api/settings 返回给前端；settings 表里还存着
+# admin_api_key / admin_password_hash / tg_bot_token 等敏感项，绝不能随
+# 普通页面加载泄露出去。PATCH 也只写这四个 key，二者保持一致。
+PUBLIC_SETTINGS_KEYS = (
+    "sync_interval_minutes",
+    "api_concurrency",
+    "expiry_kick_mode",
+    "expiry_kick_delay_hours",
+)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -28,8 +38,12 @@ async def _write_settings(values: dict[str, Any]) -> None:
 
 @router.get("")
 async def get_settings():
+    placeholders = ",".join("?" * len(PUBLIC_SETTINGS_KEYS))
     async with get_db() as db:
-        cursor = await db.execute("SELECT key, value, updated_at FROM settings")
+        cursor = await db.execute(
+            f"SELECT key, value, updated_at FROM settings WHERE key IN ({placeholders})",
+            PUBLIC_SETTINGS_KEYS,
+        )
         rows = await cursor.fetchall()
     return {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]} for row in rows}
 

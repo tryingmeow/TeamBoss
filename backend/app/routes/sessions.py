@@ -66,7 +66,13 @@ async def import_sessions(body: dict | list):
             result = await upsert_team_from_session(parsed, log_action="import_session")
             imported.append(result["team_id"])
         except ValidationError as e:
-            errors.append({"error": "invalid_session", "detail": e.errors(include_context=False)})
+            # include_input=False：Pydantic 默认会把整个提交的 payload（含
+            # accessToken / sessionToken）塞进 errors() 里再原样回显给客户端；
+            # 这里只保留字段路径和报错原因，不回显提交的值本身。
+            errors.append({
+                "error": "invalid_session",
+                "detail": e.errors(include_context=False, include_input=False, include_url=False),
+            })
         except HTTPException as e:
             errors.append({"error": "import_failed", "detail": e.detail})
         except Exception as e:

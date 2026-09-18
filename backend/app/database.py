@@ -4,6 +4,8 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from .chatgpt_client import mask_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -637,6 +639,11 @@ async def log_operation(team_id: str, action: str, target_email: str = None,
                         detail: str = None, result: str = None,
                         error_message: str = None, trigger_type: str = "manual"):
     now = datetime.now(timezone.utc).isoformat()
+    # detail / error_message 是自由文本，调用方经常直接把异常 str() 塞进来（代理
+    # URL 的 user:pass@、token 等都可能混在里面），且这里落库后会经 GET /api/logs
+    # 原样返回给前端。统一在写入这一处掩码，调用方不用各自记得脱敏。
+    detail = mask_secrets(detail) if detail else detail
+    error_message = mask_secrets(error_message) if error_message else error_message
     async with get_db() as db:
         await db.execute(
             """INSERT INTO operation_logs
