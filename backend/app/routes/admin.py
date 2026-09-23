@@ -98,6 +98,51 @@ class _FailureTracker:
 
 
 
+class _SharedIdentityCooldown:
+    """共享身份（is_proxy_self_identity=True）专用的站点级递增冷却。
+
+    这种身份下所有访客共享同一个计数 IP，不能用 _FailureTracker 的按 IP 锁定
+    （会把管理员和所有访客一起锁死），但也不能完全不设防——只靠 10/min 的请求
+    限流，匿名者一天仍能试 14400 次密码。折中方案：连续失败次数全站累计，前
+    max_free_failures 次和现在一样只是普通密码错误，从下一次失败起，每次失败
+    都把「下一次允许尝试」的时间往后顺延一段递增的冷却（下面 cooldown_seconds
+    定义翻倍规律），冷却期内的请求在校验密码之前就直接拒绝。成功登录一次即清零。
+    """
+
+    def __init__(self, max_free_failures: int, initial_cooldown: int, max_cooldown: int):
+        self.max_free_failures = max_free_failures
+        self.initial_cooldown = initial_cooldown
+        self.max_cooldown = max_cooldown
+        self.count = 0
+        self.last_failure_at = 0.0
+        self.cooldown_until = 0.0
+
+    def is_active(self, now: float) -> bool:
+        return self.cooldown_until > now
+
+    def record_failure(self, now: float) -> None:
+        # 距上次失败超过 1 小时，视为新一轮，计数从头开始。按「上次失败」而不是
+        # 「本轮第一次失败」计时：持续尝试的人每 15 分钟就会失败一次，计数永远不会
+        # 被窗口清零，冷却也就一直停在封顶值上。
+        if self.count and now - self.last_failure_at > 3600:
+            self.count = 0
+            self.cooldown_until = 0.0
+
+        self.last_failure_at = now
+        self.count += 1
+
+        if self.count > self.max_free_failures:
+            # 第 5 次失败对应第 1 级冷却（60s），第 6 次翻倍，以此类推，封顶 900s。
+            level = self.count - self.max_free_failures - 1
+            seconds = min(self.initial_cooldown * (2 ** level), self.max_cooldown)
+            self.cooldown_until = now + seconds
+
+    def record_success(self) -> None:
+        self.count = 0
+        self.last_failure_at = 0.0
+        self.cooldown_until = 0.0
+
+
 # 登录限流器：10 req/min
 # 取值理由：正常用户手动登录频率不会超过 10/min（即 6 秒一次），
 # 但爆破会以 100+ req/s 速率尝试，故 10/min 对正常用户无感、对爆破有效。
@@ -108,6 +153,14 @@ _limiter_login = _RateLimiter(max_requests=10, window_seconds=60)
 # 5 次失败是合理的容错；15 分钟锁定让爆破陷入困境（每 IP 只能每 15 min 尝试一轮），
 # 同时对正常用户来说 15 分钟后自动解锁是可接受的。
 _failure_tracker = _FailureTracker(max_failures=5, lockout_seconds=900)
+
+# 共享身份（见下方 login 里的 is_proxy_self_identity 分支）专用的递增冷却：
+# 前 4 次失败不受影响，第 5 次起触发 60s 冷却，此后每次再失败翻倍，封顶 900s，
+# 成功登录一次清零。取值和上面的按 IP 锁定对齐（同样是 5 次容错、同样 15 分钟
+# 封顶），只是把「锁定一个身份」换成了「让下一次尝试变慢」。
+_shared_identity_cooldown = _SharedIdentityCooldown(
+    max_free_failures=4, initial_cooldown=60, max_cooldown=900
+)
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -156,9 +209,18 @@ async def login(req: AdminLoginRequest, request: Request):
 
     # 失败锁定检查。is_proxy_self_identity=True 说明这个 IP 其实是可信代理自己的
     # 地址（部署把每个访客都坍缩成了同一个身份，见 client_ip.get_client_ip_info），
-    # 锁住它等于把全站所有访客一起锁掉、管理员也不例外——所以这种情况下只限流、
-    # 不锁定；真实的每访客身份（正确配置下的正常情况）锁定逻辑完全不变。
-    if not is_proxy_self_identity and _failure_tracker.is_locked(client_ip):
+    # 按 IP 锁定会把全站所有访客一起锁掉、管理员也不例外，所以这种情况不走
+    # _failure_tracker，改用 _shared_identity_cooldown：全站共享一份计数，冷却期内
+    # 直接拒绝、不查密码，冷却时长随连续失败次数递增（见该类注释）。真实的每访客
+    # 身份（正确配置下的正常情况）走 _failure_tracker，锁定逻辑完全不变。
+    if is_proxy_self_identity:
+        if _shared_identity_cooldown.is_active(time.time()):
+            await log_operation(None, "admin_login", None, f"ip={client_ip}", "failed", "Shared identity cooldown active")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="登录失败次数过多，请稍后再试",
+            )
+    elif _failure_tracker.is_locked(client_ip):
         await log_operation(None, "admin_login", None, f"ip={client_ip}", "failed", "Account locked due to multiple failures")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -167,6 +229,18 @@ async def login(req: AdminLoginRequest, request: Request):
 
     # 校验密码
     if not await verify_admin_password(req.password):
+        if is_proxy_self_identity:
+            _shared_identity_cooldown.record_failure(time.time())
+            await log_operation(
+                None,
+                "admin_login",
+                None,
+                f"ip={client_ip}, shared_identity_failures={_shared_identity_cooldown.count}",
+                "failed",
+                "Invalid password",
+            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="密码错误")
+
         is_locked, remaining = _failure_tracker.record_failure(client_ip)
         await log_operation(
             None,
@@ -176,7 +250,7 @@ async def login(req: AdminLoginRequest, request: Request):
             "failed",
             "Invalid password",
         )
-        if is_locked and not is_proxy_self_identity:
+        if is_locked:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="登录失败次数过多，请 15 分钟后再试",
@@ -184,7 +258,10 @@ async def login(req: AdminLoginRequest, request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="密码错误")
 
     # 密码正确，重置失败计数
-    _failure_tracker.record_success(client_ip)
+    if is_proxy_self_identity:
+        _shared_identity_cooldown.record_success()
+    else:
+        _failure_tracker.record_success(client_ip)
 
     api_key = await get_admin_api_key()
     if not api_key:

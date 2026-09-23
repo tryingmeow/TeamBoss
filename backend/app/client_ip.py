@@ -108,8 +108,9 @@ def _is_collapsed_identity(ip: str, is_self: bool) -> bool:
     是攒够样本再生效：攒样本期间登录锁定仍然有效，而攻击者只需要 5 个请求。
 
     代价：全部访客都在可信网段内的纯内网部署（例如把 10.0.0.0/8 设为可信代理），
-    会被判成坍缩，从而只限流、不锁定。这种部署本来就不对公网暴露，而 10/min 的
-    请求限流依然生效——比"面板能被任意匿名访客锁死"划算得多。
+    会被判成坍缩，从而不走按 IP 锁定，改用站点级递增冷却（见 admin.py 的
+    _shared_identity_cooldown）。这种部署本来就不对公网暴露，而 10/min 的
+    请求限流、外加冷却依然生效——比"面板能被任意匿名访客锁死"划算得多。
     """
     return bool(ip) and (is_self or is_trusted_proxy(ip))
 
@@ -133,8 +134,9 @@ def _note_identity_sample(peer: str, ip: str, collapsed: bool) -> None:
         "访客 IP 全部是同一个地址（%s），而它属于可信代理网段。这通常意味着 "
         "compose.yaml 把 web 端口绑在了 127.0.0.1，Docker 用户态转发（docker-proxy）"
         "导致后端看到的每个访客都是同一个网桥网关地址——全站共享一个限流身份。"
-        "登录失败锁定已对这个共享身份自动关闭（否则任意匿名访客发 5 次错误密码"
-        "就能把管理员锁在后台外），但请检查 docker/nginx.conf 的 set_real_ip_from "
+        "对这个共享身份，登录失败已从「按 IP 锁定」换成「站点级递增冷却」（连续失败"
+        "5 次起逐次翻倍延迟，封顶 15 分钟，避免把所有访客连同管理员一起锁死），"
+        "但请检查 docker/nginx.conf 的 set_real_ip_from "
         "是否覆盖了实际的反代来源，以及 compose.yaml 的端口绑定方式"
         "（README『部署』一节有说明）。",
         _collapse_samples,
@@ -163,7 +165,7 @@ def get_client_ip_info(request: Request) -> tuple[str, bool]:
     每访客身份，大家共享同一个代理侧地址"。判据见 _note_identity_sample——它不只
     比对代理自身地址，还认"解析出的 IP 落在可信代理网段且连续重复"，因为 compose
     的多层容器拓扑里坍缩地址是网桥网关，并不等于后端看到的直连地址。调用方
-    （登录失败锁定）据此决定要不要把这个共享身份锁死。
+    （登录失败锁定）据此决定：对这个共享身份改走站点级递增冷却，而不是按 IP 锁定。
     """
     peer = request.client.host if request.client else ""
     peer_norm = normalize_ip(peer)
