@@ -904,7 +904,7 @@ def run_chatgpt_call_sync(func: Callable[..., T], *args: Any, **kwargs: Any) -> 
                         "superseded": "（刷新期间 Session 已被重新导入，改用新导入的 Token 重试仍失败）",
                     }
                     suffix = (
-                        "（登录已失效：Session 接口交不出可用的 access token，需重新导入）"
+                        "（登录已失效，需重新导入）"
                         if refresh_outcome.auth_rejected and refresh_outcome.status == "failed"
                         else suffix_by_status.get(
                             refresh_outcome.status,

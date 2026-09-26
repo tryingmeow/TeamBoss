@@ -8,7 +8,7 @@ import ConfirmDialog from './ConfirmDialog';
 import AddMemberDialog from './AddMemberDialog';
 import TeamSettingsDialog from './TeamSettingsDialog';
 import { useMembers } from '../hooks/useMembers';
-import { deleteTeam, syncTeam, updateTeamRemark } from '../api/client';
+import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
 import { activeChatGptSeats } from '../lib/seatCapacity';
 import { formatSeatTypeLabel } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
@@ -233,6 +233,12 @@ export default function TeamCard({
       onSyncSucceeded(result.team);
     } catch (err) {
       if (!mountedRef.current || requestId !== latestRequestId.current) return;
+      if (err instanceof TeamAuthRejectedError) {
+        // 后端刚把它判成 rejected，卡片立刻挂上遮罩，不用等下次刷新列表。
+        onSyncSucceeded({ ...team, auth_state: 'rejected' });
+        showToast(err.message, 'error');
+        return;
+      }
       await refreshMembers(false);
       const errorMsg = err instanceof Error ? err.message : '同步失败';
       showToast(`同步失败，当前显示的是缓存数据${errorMsg ? '：' + errorMsg : ''}`, 'error');
@@ -417,7 +423,7 @@ export default function TeamCard({
           <div className="absolute inset-0 bg-white/85 dark:bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-10 px-5 text-center">
             <div className="w-full space-y-1.5">
               <div className="text-xs font-semibold text-red-500 dark:text-red-400">
-                {isAuthExpired ? 'Session 失效' : '授权已被吊销'}
+                {isAuthExpired ? 'Session 失效' : '登录已失效'}
               </div>
               <div className="text-xs text-gray-600 dark:text-gray-400">
                 需重新导入 session

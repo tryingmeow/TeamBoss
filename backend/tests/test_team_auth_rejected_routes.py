@@ -125,7 +125,7 @@ class TeamAuthRejectedRoutesTest(unittest.TestCase):
         self._set_auth_state("rejected")
         exc = self._sync(MEMBERS_401)
         self.assertEqual(exc.status_code, 409)
-        self.assertEqual(exc.detail, TEAM_AUTH_REJECTED_DETAIL)
+        self.assertEqual(exc.detail["message"], TEAM_AUTH_REJECTED_DETAIL)
 
     def test_sync_401_of_healthy_team_keeps_original_error(self):
         self._set_auth_state("ok")
@@ -164,7 +164,7 @@ class TeamAuthRejectedRoutesTest(unittest.TestCase):
         self._set_auth_state("rejected")
         exc = self._extend()
         self.assertEqual(exc.status_code, 409)
-        self.assertEqual(exc.detail, TEAM_AUTH_REJECTED_DETAIL)
+        self.assertEqual(exc.detail["message"], TEAM_AUTH_REJECTED_DETAIL)
         conn = sqlite3.connect(self.db_path)
         expiry_rows = conn.execute("SELECT COUNT(*) FROM member_expiry").fetchone()[0]
         conn.close()
@@ -192,7 +192,7 @@ class TeamAuthRejectedRoutesTest(unittest.TestCase):
                 asyncio.run(teams.refresh_team_token(TEAM_ID))
 
         self.assertEqual(ctx.exception.status_code, 409)
-        self.assertEqual(ctx.exception.detail, TEAM_AUTH_REJECTED_DETAIL)
+        self.assertEqual(ctx.exception.detail["message"], TEAM_AUTH_REJECTED_DETAIL)
         self.assertEqual(self._row()[:2], ("active", "rejected"))
         report_failure.assert_awaited_once()
 

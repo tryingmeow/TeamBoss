@@ -23,6 +23,9 @@ export interface OverageCapacity {
   active_team_count?: number;
 }
 
+/** Team 的 ChatGPT 登录已失效（后端 auth_state 已是 rejected），只能重新导入 session。 */
+export class TeamAuthRejectedError extends Error {}
+
 export class OverageConfirmationError extends Error {
   capacity: OverageCapacity;
   remainingEmails: string[];
@@ -91,6 +94,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     if (res.status === 409) {
       try {
         const parsed = JSON.parse(body);
+        if (parsed?.detail?.code === 'team_auth_rejected') {
+          throw new TeamAuthRejectedError(parsed.detail.message ?? '登录已失效，请重新导入');
+        }
         if (parsed?.detail?.code === 'require_overage_confirmation') {
           const capacity = parsed.detail.capacity ?? {};
           throw new OverageConfirmationError(
@@ -108,7 +114,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
           );
         }
       } catch (e) {
-        if (e instanceof OverageConfirmationError) throw e;
+        if (e instanceof OverageConfirmationError || e instanceof TeamAuthRejectedError) throw e;
       }
     }
     throw new Error(errorMessageFromBody(body, `HTTP ${res.status}`));

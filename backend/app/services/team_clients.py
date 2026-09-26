@@ -7,14 +7,14 @@ from ..database import get_db
 # auth_state='rejected' 时，同步/续期等必须实时访问上游的操作只会一直 401。
 # 用 409 而不是 502：这不是上游偶发故障，重试没用，只有重新导入 session 才能恢复。
 # 也不能用 401——前端把任何 401 当作管理员登录失效，会直接把人踢回登录页。
-TEAM_AUTH_REJECTED_DETAIL = (
-    "该 Team 的 ChatGPT 登录已失效：access token 已过期或被拒绝，自动刷新也拿不到新的 token。"
-    "请重新导入该 Team 的 session 后再试。"
-)
+TEAM_AUTH_REJECTED_DETAIL = "登录已失效，请重新导入"
 
 
 def team_auth_rejected_error() -> HTTPException:
-    return HTTPException(status_code=409, detail=TEAM_AUTH_REJECTED_DETAIL)
+    return HTTPException(
+        status_code=409,
+        detail={"code": "team_auth_rejected", "message": TEAM_AUTH_REJECTED_DETAIL},
+    )
 
 
 async def is_team_auth_rejected(team_id: str) -> bool:
