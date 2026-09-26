@@ -93,6 +93,9 @@ class AuthRefreshOutcome:
     token_expires: str | None = None
     error: str | None = None
     cooldown_until: str | None = None
+    # 这次刷新把 Team 判成了 auth_state='rejected'：现有 access token 已不可用，
+    # 会话端点又明确交不出新的。调用方据此给出"需重新导入"而不是笼统的 502。
+    auth_rejected: bool = False
 
     @property
     def retry_original(self) -> bool:
@@ -267,6 +270,23 @@ def _parse_iso(value: str | None) -> datetime | None:
 def _access_token_expired(access_token: str, now: datetime) -> bool:
     expires_at = _parse_iso(_decode_token_expires(access_token))
     return bool(expires_at and expires_at <= now)
+
+
+def _session_answered_without_new_token(
+    refresh_result: dict,
+    current_access_token: str | None,
+) -> bool:
+    """会话端点正常应答（2xx），但明确没有交回新的 access token。
+
+    典型是 NextAuth 的 ``{"error": "RefreshAccessTokenError"}``：HTTP 200，body 里
+    带 error，不带新 token。超时、断网、429、5xx 要么没有 status_code，要么不是
+    2xx，都不算——那些只说明这一次没问成，不说明会话换不出 token。
+    """
+    status_code = refresh_result.get("status_code")
+    if not (isinstance(status_code, int) and 200 <= status_code < 300):
+        return False
+    returned = refresh_result.get("accessToken")
+    return not returned or returned == current_access_token
 
 
 def _access_token_due_for_refresh(access_token: str, now: datetime) -> bool:
@@ -448,16 +468,29 @@ def refresh_team_auth_sync(
             if "error" in refresh_result:
                 error = str(refresh_result.get("error") or "Unknown auth refresh error")
                 # A transient refresh/network failure does not prove that the
-                # browser session is dead. Only an explicit session-endpoint
-                # 401 may invalidate a Team, and only when the current access
-                # token is already unusable (expired or rejected by an API).
+                # browser session is dead. A Team is only classified when the
+                # current access token is already unusable (expired or rejected
+                # by an API) AND the session endpoint gave an explicit answer:
+                # - HTTP 401: the browser session itself is dead -> token_expired.
+                # - 2xx carrying an error and no new access token (NextAuth's
+                #   RefreshAccessTokenError): the session still answers but can
+                #   no longer mint a token -> auth_state='rejected', status stays
+                #   active so the scheduler keeps probing and can self-heal.
                 session_rejected = refresh_result.get("status_code") == 401
+                session_gave_no_token = _session_answered_without_new_token(
+                    refresh_result,
+                    db_access_token,
+                )
                 access_unusable = (
                     trigger == "api_401_retry"
                     or _access_token_expired(db_access_token, now)
                 )
-                if session_rejected and access_unusable:
+                auth_rejected = False
+                if access_unusable and session_rejected:
                     _mark_team_auth_expired(conn, team_id)
+                elif access_unusable and session_gave_no_token:
+                    _mark_team_auth_rejected(conn, team_id, now)
+                    auth_rejected = True
                 _insert_operation_log(
                     conn,
                     team_id,
@@ -473,6 +506,7 @@ def refresh_team_auth_sync(
                     error=error,
                     token_expires=_decode_token_expires(db_access_token),
                     cooldown_until=(now + AUTH_REFRESH_COOLDOWN).isoformat(),
+                    auth_rejected=auth_rejected,
                 )
 
             new_access_token = refresh_result.get("accessToken") or row["access_token"]
@@ -519,19 +553,22 @@ def refresh_team_auth_sync(
             # confuse "no new short-lived token yet" with session expiry.
             # An empty auth-session response is conclusive only after the
             # current access token is unusable.
-            if not session_has_access and (
+            access_unusable = (
                 trigger == "api_401_retry"
                 or _access_token_expired(new_access_token, now)
-            ):
+            )
+            if not session_has_access and access_unusable:
                 _mark_team_auth_expired(conn, team_id)
 
             # 第三种情况：会话端点正常应答、也确实交回了 access token，但那个 token
-            # 和库里那个一模一样，而业务接口刚刚 401。此时 token 本身往往还没到
-            # 期（JWT exp 还在未来），是上游把它吊销了，滚动会话已经换不出新的。
-            # 既不是"会话还活着"也不是"会话已死"，单独记一个授权状态，
-            # status 保持 active 以免掉出 scheduler 的扫描范围。
-            if trigger == "api_401_retry" and session_has_access and not access_changed:
+            # 和库里那个一模一样，而它已经用不了（业务接口刚刚 401，或 JWT exp 已过）。
+            # 401 时 token 往往还没到期，是上游把它吊销了；已过期时同样说明滚动会话
+            # 已经换不出新的。既不是"会话还活着"也不是"会话已死"，单独记一个授权
+            # 状态，status 保持 active 以免掉出 scheduler 的扫描范围。
+            auth_rejected = False
+            if access_unusable and session_has_access and not access_changed:
                 _mark_team_auth_rejected(conn, team_id, now)
+                auth_rejected = True
             elif access_changed:
                 _clear_team_auth_rejected(conn, team_id)
 
@@ -574,6 +611,7 @@ def refresh_team_auth_sync(
                 session_changed=session_changed,
                 token_expires=token_expires,
                 cooldown_until=cooldown_until,
+                auth_rejected=auth_rejected,
             )
         finally:
             conn.close()
@@ -644,9 +682,13 @@ def run_chatgpt_call_sync(func: Callable[..., T], *args: Any, **kwargs: Any) -> 
                         "session_rotated": "（仅轮换 session token，access token 未更新）",
                         "failed": "（自动刷新 Token 失败）",
                     }
-                    suffix = suffix_by_status.get(
-                        refresh_outcome.status,
-                        "（无法自动刷新 Token）",
+                    suffix = (
+                        "（登录已失效：Session 接口交不出可用的 access token，需重新导入）"
+                        if refresh_outcome.auth_rejected and refresh_outcome.status == "failed"
+                        else suffix_by_status.get(
+                            refresh_outcome.status,
+                            "（无法自动刷新 Token）",
+                        )
                     )
                     report_team_failure_sync(
                         client.team_id,

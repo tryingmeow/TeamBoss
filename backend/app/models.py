@@ -46,7 +46,8 @@ class TeamResponse(BaseModel):
     # 一个 Team 已经连续多久同步不上了。
     last_full_sync_at: Optional[str] = None
     last_sync_partial_failures: List[str] = []
-    # 'ok' | 'rejected'。rejected = 会话仍应答但交回的 token 已被上游吊销。
+    # 'ok' | 'rejected'。rejected = access token 已用不了（401 或 JWT 已过期），
+    # 而会话端点仍应答却交不出新 token（同一个 token 或 RefreshAccessTokenError）。
     auth_state: Literal['ok', 'rejected'] = 'ok'
     auth_state_since: Optional[str] = None
     # 定时同步挂起：连续失败满 24 小时后停止定时请求，只按低频探活。

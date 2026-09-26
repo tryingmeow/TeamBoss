@@ -549,9 +549,10 @@ async def init_database():
             # 官方结算页的 ChatGPT 占用分子来自 seat_type_counts.default。
             # 保留 seats_in_use 作为 ChatGPT+Codex 总占用，避免字段语义混用。
             "ALTER TABLE teams ADD COLUMN chatgpt_count INTEGER",
-            # 授权状态，与 status 分开。'rejected' 表示：/api/auth/session 仍然应答，
-            # 但它交回来的 access token 与库里那个一模一样，而业务接口正在 401——
-            # 也就是上游把这个 token 吊销了，会话已经换不出新的。
+            # 授权状态，与 status 分开。'rejected' 表示：库里的 access token 已经用不了
+            # （业务接口 401，或 JWT exp 已过），而 /api/auth/session 仍然应答却交不出
+            # 新的——交回同一个 token，或 200 带 RefreshAccessTokenError。会话已经换
+            # 不出新 token，只能重新导入。
             #
             # 这里刻意不动 status：scheduler / patrol / 成员缓存等十余处都按
             # `WHERE status = 'active'` 取 Team，一旦把状态改掉，这个 Team 会直接

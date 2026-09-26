@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 import tempfile
 import time
@@ -10,9 +11,11 @@ from unittest.mock import Mock, patch
 
 import sys
 import jwt
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import chatgpt_client as chatgpt_client_module
 from app.chatgpt_client import ChatGPTClient, mask_secrets
 from app import chatgpt_limiter
 from app import database as app_database
@@ -548,6 +551,218 @@ class ChatGPTLimiterTest(unittest.TestCase):
         self.assertTrue(
             all(result["authorization"] == "Bearer new-token" for result in results)
         )
+
+
+# NextAuth 刷新失败时的真实形状：HTTP 200，body 带 error、不带新 token。
+# ChatGPTClient.refresh_token 会给它补上 status_code=200（见 RefreshTokenClientShapeTest）。
+REFRESH_ACCESS_TOKEN_ERROR = {"error": "RefreshAccessTokenError", "status_code": 200}
+
+
+class AuthRejectedClassificationTest(unittest.TestCase):
+    """access token 用不了 + 会话端点明确交不出新 token => auth_state='rejected'。"""
+
+    # 复用同一套临时库夹具，但不继承 ChatGPTLimiterTest 以免它的用例重跑一遍。
+    setUp = ChatGPTLimiterTest.setUp
+    tearDown = ChatGPTLimiterTest.tearDown
+    _insert_team = ChatGPTLimiterTest._insert_team
+    _token_expiring_in = staticmethod(ChatGPTLimiterTest._token_expiring_in)
+
+    def _auth_row(self):
+        conn = sqlite3.connect(self.db_path)
+        try:
+            return conn.execute(
+                "SELECT status, COALESCE(auth_state, 'ok'), auth_state_since "
+                "FROM teams WHERE id = 'team-1'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+    def _refresh(self, refresh_result, *, trigger: str, force: bool = False):
+        with (
+            patch.object(ChatGPTClient, "refresh_token", return_value=refresh_result),
+            patch.object(chatgpt_limiter, "update_session_file_tokens", return_value=True),
+        ):
+            return chatgpt_limiter.refresh_team_auth_sync(
+                "team-1", trigger=trigger, force=force
+            )
+
+    def test_expired_token_and_refresh_access_token_error_marks_rejected_end_to_end(self):
+        """生产上的形状：JWT exp 已过，每次刷新都是 RefreshAccessTokenError。"""
+        expired = self._token_expiring_in(timedelta(hours=-12))
+        self._insert_team(expired)
+        client = AlwaysUnauthorizedClient(expired)
+
+        with (
+            patch.object(
+                ChatGPTClient, "refresh_token", return_value=dict(REFRESH_ACCESS_TOKEN_ERROR)
+            ),
+            patch.object(chatgpt_limiter, "report_team_failure_sync") as report_failure,
+            patch.object(chatgpt_limiter, "report_team_recovery_sync"),
+        ):
+            result = chatgpt_limiter.run_chatgpt_call_sync(client.get_subscription)
+
+        self.assertEqual(result["status_code"], 401)
+        status, auth_state, since = self._auth_row()
+        # status 必须保持 active，否则 Team 掉出 scheduler 扫描、永远不会自愈。
+        self.assertEqual((status, auth_state), ("active", "rejected"))
+        self.assertIsNotNone(since)
+        report_failure.assert_called_once()
+
+    def test_proactive_path_marks_expired_token_rejected(self):
+        self._insert_team(self._token_expiring_in(timedelta(hours=-1)))
+
+        outcome = self._refresh(
+            dict(REFRESH_ACCESS_TOKEN_ERROR), trigger="scheduled_expiry_refresh"
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertTrue(outcome.auth_rejected)
+        self.assertEqual(self._auth_row()[:2], ("active", "rejected"))
+
+    def test_reactive_401_path_marks_rejected_even_before_jwt_exp(self):
+        """业务接口 401 本身就证明 token 用不了，不必等 JWT exp。"""
+        token = self._token_expiring_in(timedelta(days=5))
+        self._insert_team(token)
+        client = AlwaysUnauthorizedClient(token)
+
+        with (
+            patch.object(
+                ChatGPTClient, "refresh_token", return_value=dict(REFRESH_ACCESS_TOKEN_ERROR)
+            ),
+            patch.object(chatgpt_limiter, "report_team_failure_sync") as report_failure,
+            patch.object(chatgpt_limiter, "report_team_recovery_sync"),
+        ):
+            chatgpt_limiter.run_chatgpt_call_sync(client.get_subscription)
+
+        self.assertEqual(self._auth_row()[:2], ("active", "rejected"))
+        self.assertIn("需重新导入", report_failure.call_args.args[2])
+
+    def test_manual_refresh_path_marks_expired_token_rejected(self):
+        self._insert_team(self._token_expiring_in(timedelta(hours=-1)))
+
+        outcome = self._refresh(
+            dict(REFRESH_ACCESS_TOKEN_ERROR), trigger="manual_token_refresh", force=True
+        )
+
+        self.assertTrue(outcome.auth_rejected)
+        self.assertEqual(self._auth_row()[:2], ("active", "rejected"))
+
+    def test_session_returning_the_same_expired_token_marks_rejected(self):
+        """200、无 error，但交回的还是那个已过期的 token：同样是换不出新 token。"""
+        expired = self._token_expiring_in(timedelta(hours=-1))
+        self._insert_team(expired)
+
+        outcome = self._refresh(
+            {"accessToken": expired, "sessionToken": "rotated-session"},
+            trigger="scheduled_expiry_refresh",
+        )
+
+        self.assertEqual(outcome.status, "session_rotated")
+        self.assertTrue(outcome.auth_rejected)
+        self.assertEqual(self._auth_row()[:2], ("active", "rejected"))
+
+    def test_rejection_since_is_kept_across_repeated_detections(self):
+        self._insert_team(self._token_expiring_in(timedelta(hours=-1)))
+        self._refresh(dict(REFRESH_ACCESS_TOKEN_ERROR), trigger="manual_token_refresh", force=True)
+        first_since = self._auth_row()[2]
+
+        self._refresh(dict(REFRESH_ACCESS_TOKEN_ERROR), trigger="manual_token_refresh", force=True)
+
+        self.assertEqual(self._auth_row(), ("active", "rejected", first_since))
+
+    def test_refresh_error_while_token_still_usable_stays_ok(self):
+        """token 还没过期、也没被 401：主动刷新失败只是机会没抓住，不算失效。"""
+        self._insert_team(self._token_expiring_in(timedelta(hours=12)))
+
+        outcome = self._refresh(
+            dict(REFRESH_ACCESS_TOKEN_ERROR), trigger="scheduled_expiry_refresh"
+        )
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertFalse(outcome.auth_rejected)
+        self.assertEqual(self._auth_row(), ("active", "ok", None))
+
+    def test_transient_refresh_failures_never_mark_rejected(self):
+        """超时、断网、403、429、5xx：就算 token 已过期也只是这次没问成。"""
+        transient_results = {
+            "timeout": {
+                "error": "HTTPSConnectionPool(host='chatgpt.com', port=443): Read timed out. (read timeout=60)"
+            },
+            "connection": {"error": "('Connection aborted.', RemoteDisconnected('closed'))"},
+            "403": {"error": "403 Client Error: Forbidden", "status_code": 403},
+            "429": {"error": "429 Client Error: Too Many Requests", "status_code": 429},
+            "500": {"error": "500 Server Error", "status_code": 500},
+            "503": {"error": "503 Server Error", "status_code": 503},
+            "525": {"error": "525 Server Error: <none>", "status_code": 525},
+        }
+        self._insert_team(self._token_expiring_in(timedelta(hours=-1)))
+
+        for name, refresh_result in transient_results.items():
+            for trigger in ("api_401_retry", "scheduled_expiry_refresh"):
+                with self.subTest(failure=name, trigger=trigger):
+                    outcome = self._refresh(refresh_result, trigger=trigger, force=True)
+                    self.assertEqual(outcome.status, "failed")
+                    self.assertFalse(outcome.auth_rejected)
+                    self.assertEqual(self._auth_row(), ("active", "ok", None))
+
+    def test_successful_refresh_clears_rejection(self):
+        self._insert_team(self._token_expiring_in(timedelta(hours=-1)))
+        self._refresh(dict(REFRESH_ACCESS_TOKEN_ERROR), trigger="manual_token_refresh", force=True)
+        self.assertEqual(self._auth_row()[1], "rejected")
+
+        outcome = self._refresh(
+            {
+                "accessToken": self._token_expiring_in(timedelta(days=10)),
+                "sessionToken": "fresh-session",
+            },
+            trigger="api_401_retry",
+            force=True,
+        )
+
+        self.assertEqual(outcome.status, "refreshed")
+        self.assertFalse(outcome.auth_rejected)
+        self.assertEqual(self._auth_row(), ("active", "ok", None))
+
+
+class RefreshTokenClientShapeTest(unittest.TestCase):
+    """refresh_token 必须让调用方分得清"上游明确答复"和"这次没问成"。"""
+
+    @staticmethod
+    def _http_response(status_code: int, body=None):
+        response = requests.Response()
+        response.status_code = status_code
+        response.url = "https://chatgpt.com/api/auth/session"
+        response.reason = "test"
+        response._content = json.dumps(body if body is not None else {}).encode()
+        return response
+
+    def _call(self, **get_kwargs):
+        with patch.object(chatgpt_client_module.requests, "get", **get_kwargs) as get:
+            result = ChatGPTClient.refresh_token("session-1")
+        get.assert_called_once()
+        return result
+
+    def test_in_band_refresh_error_carries_its_2xx_status(self):
+        result = self._call(
+            return_value=self._http_response(200, {"error": "RefreshAccessTokenError"})
+        )
+        self.assertEqual(result, {"error": "RefreshAccessTokenError", "status_code": 200})
+
+    def test_successful_session_body_is_returned_unchanged(self):
+        body = {"accessToken": "a", "sessionToken": "s"}
+        result = self._call(return_value=self._http_response(200, body))
+        self.assertEqual(result, body)
+
+    def test_timeout_has_no_status_code(self):
+        result = self._call(side_effect=requests.Timeout("Read timed out"))
+        self.assertIn("error", result)
+        self.assertNotIn("status_code", result)
+
+    def test_http_errors_keep_their_own_status(self):
+        for status_code in (401, 403, 429, 503):
+            with self.subTest(status_code=status_code):
+                result = self._call(return_value=self._http_response(status_code))
+                self.assertEqual(result["status_code"], status_code)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,12 @@ from ..services.seat_capacity import (
 )
 from ..services.team_locks import member_operation_claim, team_invite_lock
 from ..services.team_locks import reserve_default_seat, reserved_default_seats
-from ..services.team_clients import get_team_client
+from ..services.team_clients import (
+    get_team_client,
+    is_team_auth_rejected,
+    team_auth_rejected_error,
+)
+from ..services.team_health_alerts import is_auth_error
 from ..services.tg_notify import notify_member_event
 from ..services.user_display_names import attach_display_names
 from ..utils.durations import DurationError, normalize_duration, parse_optional_datetime
@@ -85,6 +90,9 @@ async def _resolve_member_identity(
             client = await get_team_client(team_id)
             cached = await fetch_and_cache_members(team_id, client)
         except Exception as exc:
+            # 登录已失效时"稍后重试"是误导：重试不会好，只能重新导入 session。
+            if is_auth_error(exc) and await is_team_auth_rejected(team_id):
+                raise team_auth_rejected_error() from exc
             raise HTTPException(status_code=502, detail="无法确认成员身份，请稍后重试") from exc
 
     matches = [

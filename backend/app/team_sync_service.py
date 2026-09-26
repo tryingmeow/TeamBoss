@@ -18,7 +18,11 @@ from .services.seat_capacity import (
     seat_type_count_from_seat_counts,
     update_member_seat_usage_cache,
 )
-from .services.team_clients import get_team_client
+from .services.team_clients import (
+    get_team_client,
+    is_team_auth_rejected,
+    team_auth_rejected_error,
+)
 from .services.team_health_alerts import (
     is_auth_error,
     report_team_failure,
@@ -394,6 +398,10 @@ async def sync_team_cache(team_id: str, force: bool = False, max_age_seconds: in
                 exc,
                 source="team_sync",
             )
+        # 上面的 401 重试链路刚把 Team 判成 rejected 时，别把 "Failed to fetch
+        # members: 401 ..." 原样甩给面板，直接告诉操作员要重新导入。
+        if is_auth_error(exc) and await is_team_auth_rejected(team_id):
+            raise team_auth_rejected_error() from exc
         raise
     except Exception as exc:
         await log_operation(team_id, "sync_team", None, None, "failed", str(exc), "manual")
@@ -404,6 +412,8 @@ async def sync_team_cache(team_id: str, force: bool = False, max_age_seconds: in
                 exc,
                 source="team_sync",
             )
+        if is_auth_error(exc) and await is_team_auth_rejected(team_id):
+            raise team_auth_rejected_error() from exc
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     _apply_member_seat_usage(overview_updates, overview_cache, members)

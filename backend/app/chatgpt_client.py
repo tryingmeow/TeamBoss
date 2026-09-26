@@ -80,7 +80,13 @@ class ChatGPTClient:
                 timeout=60
             )
             resp.raise_for_status()
-            return resp.json()
+            body = resp.json()
+            # NextAuth 刷新失败时照样回 200，只在 body 里带 error（例如
+            # RefreshAccessTokenError）。超时、断网的错误结果里没有 status_code，
+            # 不带上这个 200 调用方就分不清"上游明确答复拿不到 token"和"网络失败"。
+            if isinstance(body, dict) and "error" in body:
+                body["status_code"] = resp.status_code
+            return body
         except Exception as e:
             return ChatGPTClient._error(e)
 

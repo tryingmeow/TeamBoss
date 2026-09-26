@@ -13,7 +13,11 @@ from ..services.pricing import discounted_monthly_total
 from ..services.subscription_status import subscription_status_display
 from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
 from ..services.tg_commands import sync_email_chat_commands_sync
-from ..services.team_clients import get_team_client
+from ..services.team_clients import (
+    TEAM_AUTH_REJECTED_DETAIL,
+    get_team_client,
+    team_auth_rejected_error,
+)
 from ..services.team_health_alerts import report_team_failure, report_team_recovery
 from ..services.user_display_names import attach_display_names
 from ..team_sync_service import (
@@ -371,13 +375,16 @@ async def refresh_team_token(team_id: str):
     )
     if outcome.status == "not_found":
         raise HTTPException(status_code=404, detail="Team not found")
-    if outcome.status == "failed":
+    if outcome.status == "failed" or outcome.auth_rejected:
         await report_team_failure(
             team_id,
             "chatgpt_auth",
-            outcome.error or "Token refresh failed",
+            outcome.error
+            or (TEAM_AUTH_REJECTED_DETAIL if outcome.auth_rejected else "Token refresh failed"),
             source="manual_token_refresh",
         )
+        if outcome.auth_rejected:
+            raise team_auth_rejected_error()
         raise HTTPException(
             status_code=502,
             detail=f"Token refresh failed: {outcome.error}",
@@ -413,18 +420,23 @@ async def refresh_all_tokens():
                 trigger="manual_token_refresh_all",
                 force=True,
             )
-            if outcome.status in {"failed", "not_found"}:
+            if outcome.status in {"failed", "not_found"} or outcome.auth_rejected:
                 await report_team_failure(
                     team_id,
                     "chatgpt_auth",
-                    outcome.error or "Token refresh failed",
+                    outcome.error
+                    or (TEAM_AUTH_REJECTED_DETAIL if outcome.auth_rejected else "Token refresh failed"),
                     source="manual_token_refresh_all",
                 )
                 results.append(
                     {
                         "team_id": team_id,
                         "status": "failed",
-                        "error": outcome.error or "Token refresh failed",
+                        "error": (
+                            TEAM_AUTH_REJECTED_DETAIL
+                            if outcome.auth_rejected
+                            else outcome.error or "Token refresh failed"
+                        ),
                     }
                 )
             else:
