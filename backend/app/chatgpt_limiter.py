@@ -1,4 +1,6 @@
 import asyncio
+import json
+import logging
 import sqlite3
 import threading
 import time
@@ -11,7 +13,11 @@ import jwt
 
 from .database import get_db_path
 from .session_store import update_session_file_tokens
-from .chatgpt_client import ChatGPTClient
+from .chatgpt_client import (
+    REFRESH_DIAGNOSTICS_KEY,
+    ChatGPTClient,
+    access_token_summary,
+)
 from .services.team_health_alerts import (
     report_team_failure_sync,
     report_team_recovery_sync,
@@ -19,6 +25,7 @@ from .services.team_health_alerts import (
 
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 DEFAULT_API_CONCURRENCY = 4
 AUTH_REFRESH_COOLDOWN = timedelta(minutes=10)
 PROACTIVE_REFRESH_WINDOW = timedelta(hours=24)
@@ -99,7 +106,9 @@ class AuthRefreshOutcome:
 
     @property
     def retry_original(self) -> bool:
-        return self.status in {"refreshed", "reused"}
+        # superseded：刷新期间行上的 token 已被重新导入换掉，调用方已改用库里那个新
+        # token，和 reused 一样值得用它重试一次。
+        return self.status in {"refreshed", "reused", "superseded"}
 
 
 def _clamp_limit(value: int) -> int:
@@ -179,31 +188,6 @@ def _is_unauthorized_result(result: Any) -> bool:
 def _bound_chatgpt_client(func: Callable[..., Any]) -> ChatGPTClient | None:
     client = getattr(func, "__self__", None)
     return client if isinstance(client, ChatGPTClient) else None
-
-
-def _log_operation_sync(
-    team_id: str,
-    action: str,
-    detail: str | None,
-    result: str,
-    error_message: str | None = None,
-    trigger_type: str = "auto_refresh",
-) -> None:
-    try:
-        conn = sqlite3.connect(get_db_path())
-        _insert_operation_log(
-            conn,
-            team_id,
-            action,
-            detail,
-            result,
-            error_message,
-            trigger_type,
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
 
 
 def _insert_operation_log(
@@ -351,6 +335,178 @@ def _refresh_log_fields(
     )
 
 
+def refresh_diagnostic_fields(refresh_result: Any, current_access_token: str | None) -> dict:
+    """refresh_token() 附带的诊断摘要，加上需要库里现有 access token 才算得出的几项。
+
+    全是哈希、长度、布尔值、时间和键名，可以原样进日志。
+    """
+    is_dict = isinstance(refresh_result, dict)
+    diag = refresh_result.get(REFRESH_DIAGNOSTICS_KEY) if is_dict else None
+    fields = dict(diag) if isinstance(diag, dict) else {"diag_missing": True}
+    returned = refresh_result.get("accessToken") if is_dict else None
+    fields["access_changed"] = bool(returned) and returned != current_access_token
+    current = access_token_summary(current_access_token)
+    fields["cur_access_exp"] = current["exp"]
+    fields["cur_finalizer_claim"] = current["finalizer_claim"]
+    return fields
+
+
+def _diag_flag(value: Any) -> str:
+    if value is None:
+        return "-"
+    return "1" if value else "0"
+
+
+def _diag_fingerprint(fields: dict, prefix: str) -> str:
+    length = fields.get(f"{prefix}_len")
+    return f"{length}:{fields.get(f'{prefix}_sha8')}" if length else "-"
+
+
+def format_refresh_diagnostics(fields: dict) -> str:
+    """operation_logs.detail 里的一段紧凑摘要（access_changed 由调用方自己写在前缀里）。"""
+    sc_source = fields.get("sc_session_source") or "none"
+    if sc_source == "none":
+        sc_session = "-"
+    else:
+        chunk_count = fields.get("sc_session_chunks") if sc_source == "chunks" else ""
+        sc_session = f"{sc_source}{chunk_count}:{_diag_fingerprint(fields, 'sc_session')}"
+    keys = fields.get("json_keys")
+    cookie_names = fields.get("set_cookie_names")
+    parts = [
+        f"http={fields.get('http_status') or '-'}",
+        f"keys={','.join(keys) if keys else '-'}",
+        f"err={fields.get('error') or '-'}",
+    ]
+    if fields.get("exc_type"):
+        parts.append(f"exc={fields['exc_type']}")
+    parts += [
+        f"access={'present' if fields.get('access_present') else 'absent'}",
+        f"resp_iat={fields.get('access_iat') or '-'}",
+        f"resp_exp={fields.get('access_exp') or '-'}",
+        f"fin={_diag_flag(fields.get('access_finalizer_claim'))}",
+        f"cur_exp={fields.get('cur_access_exp') or '-'}",
+        f"cur_fin={_diag_flag(fields.get('cur_finalizer_claim'))}",
+        f"set_cookies={','.join(cookie_names) if cookie_names else '-'}",
+        f"sc_session={sc_session}",
+        f"sc_cleared={_diag_flag(fields.get('sc_session_cleared'))}",
+        f"json_session={_diag_fingerprint(fields, 'json_session')}",
+        f"sent_session={_diag_fingerprint(fields, 'sent_session')}",
+        f"sc_eq_json={_diag_flag(fields.get('sc_eq_json'))}",
+        f"sc_eq_sent={_diag_flag(fields.get('sc_eq_sent'))}",
+        f"json_eq_sent={_diag_flag(fields.get('json_eq_sent'))}",
+    ]
+    if fields.get("diag_missing"):
+        parts.insert(0, "missing=1")
+    return "diag: " + " ".join(parts)
+
+
+def log_refresh_diagnostics(
+    team_id: str,
+    trigger: str,
+    result: str,
+    fields: dict,
+    **extra: Any,
+) -> None:
+    """每次真正打到 /api/auth/session 的刷新写一行 JSON 到服务日志。
+
+    用 WARNING 是因为 uvicorn 只给它自己的 logger 配了 handler，``app.*`` 的 INFO
+    没有 handler 会被直接丢掉；WARNING 及以上经 logging.lastResort 落到 stderr，
+    也就是 journald。Team 只记 id 前 8 位，完整对应关系看同一次写入的
+    operation_logs 行。
+    """
+    record = {
+        "team": str(team_id or "")[:8],
+        "trigger": trigger,
+        "result": result,
+        **extra,
+        **fields,
+    }
+    try:
+        logger.warning(
+            "auth_refresh_diag %s",
+            json.dumps(record, ensure_ascii=True, separators=(",", ":"), default=str),
+        )
+    except Exception:
+        pass
+
+
+def _begin_refresh_write(
+    conn: sqlite3.Connection,
+    team_id: str,
+    session_token: str | None,
+    access_token: str | None,
+) -> bool:
+    """开写事务，并确认库里仍是发起刷新时读到的那对 token。
+
+    刷新要在网络上等最多 60 秒，期间操作员可能重新导入了 session（导入路径不拿
+    刷新锁）。旧会话换来的结果——新 token、rejected / token_expired 判定——只对旧
+    会话成立，不能落到新导入的行上。BEGIN IMMEDIATE 先拿写锁，比较与随后所有写入
+    之间不会再有别的写者插进来。
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    current = conn.execute(
+        "SELECT session_token, access_token FROM teams WHERE id = ?",
+        (team_id,),
+    ).fetchone()
+    return bool(
+        current
+        and current["session_token"] == session_token
+        and current["access_token"] == access_token
+    )
+
+
+def _finish_superseded(
+    conn: sqlite3.Connection,
+    *,
+    team_id: str,
+    trigger: str,
+    action: str,
+    trigger_type: str,
+    diag_fields: dict,
+    client: ChatGPTClient | None,
+) -> AuthRefreshOutcome:
+    """刷新结果已过时：只记一条 superseded 日志，不动 token、status、auth_state。
+
+    superseded 不在 _NEGATIVE_REFRESH_RESULTS 里，不会触发冷却，也不算失败。
+    调用方手上若有 client，就换成库里新导入的 access token。
+    """
+    current = conn.execute(
+        "SELECT access_token FROM teams WHERE id = ?",
+        (team_id,),
+    ).fetchone()
+    if current is None:
+        # 刷新途中 Team 被删了：不能按 superseded 重试，否则拿旧 token 再撞一次 401，
+        # 还会给一个已不存在的 Team 开健康告警。
+        conn.commit()
+        return AuthRefreshOutcome(status="not_found", error="Team not found")
+    current_access_token = current["access_token"]
+    _insert_operation_log(
+        conn,
+        team_id,
+        action,
+        f"trigger={trigger}; superseded=1; "
+        f"access_changed={int(diag_fields['access_changed'])}; "
+        f"{format_refresh_diagnostics(diag_fields)}",
+        "superseded",
+        None,
+        trigger_type,
+    )
+    conn.commit()
+    log_refresh_diagnostics(team_id, trigger, "superseded", diag_fields)
+    if (
+        client is not None
+        and current_access_token
+        and client.access_token != current_access_token
+    ):
+        client.update_access_token(current_access_token)
+    return AuthRefreshOutcome(
+        status="superseded",
+        token_expires=(
+            _decode_token_expires(current_access_token) if current_access_token else None
+        ),
+    )
+
+
 def _refresh_log_identity(trigger: str) -> tuple[str, str]:
     if trigger == "api_401_retry":
         return "token_auto_refresh", "auto_refresh"
@@ -464,6 +620,23 @@ def refresh_team_auth_sync(
             action, trigger_type = _refresh_log_identity(trigger)
             if not isinstance(refresh_result, dict):
                 refresh_result = {"error": "Invalid auth session response"}
+            diag_fields = refresh_diagnostic_fields(refresh_result, db_access_token)
+            diag_detail = format_refresh_diagnostics(diag_fields)
+
+            # 下面每一种写入（新 token、token_expired、rejected、清除 rejected）都只对
+            # 发起刷新时那对 token 成立；行已被重新导入换掉就整体作废。
+            if not _begin_refresh_write(
+                conn, team_id, row["session_token"], db_access_token
+            ):
+                return _finish_superseded(
+                    conn,
+                    team_id=team_id,
+                    trigger=trigger,
+                    action=action,
+                    trigger_type=trigger_type,
+                    diag_fields=diag_fields,
+                    client=client,
+                )
 
             if "error" in refresh_result:
                 error = str(refresh_result.get("error") or "Unknown auth refresh error")
@@ -486,8 +659,10 @@ def refresh_team_auth_sync(
                     or _access_token_expired(db_access_token, now)
                 )
                 auth_rejected = False
+                marked_expired = False
                 if access_unusable and session_rejected:
                     _mark_team_auth_expired(conn, team_id)
+                    marked_expired = True
                 elif access_unusable and session_gave_no_token:
                     _mark_team_auth_rejected(conn, team_id, now)
                     auth_rejected = True
@@ -495,12 +670,22 @@ def refresh_team_auth_sync(
                     conn,
                     team_id,
                     action,
-                    f"trigger={trigger}",
+                    f"trigger={trigger}; "
+                    f"access_changed={int(diag_fields['access_changed'])}; "
+                    f"{diag_detail}",
                     "failed",
                     error,
                     trigger_type,
                 )
                 conn.commit()
+                log_refresh_diagnostics(
+                    team_id,
+                    trigger,
+                    "failed",
+                    diag_fields,
+                    auth_rejected=auth_rejected,
+                    marked_token_expired=marked_expired,
+                )
                 return AuthRefreshOutcome(
                     status="failed",
                     error=error,
@@ -515,19 +700,27 @@ def refresh_team_auth_sync(
             access_changed = new_access_token != row["access_token"]
             session_changed = new_session_token != row["session_token"]
             token_expires = _decode_token_expires(new_access_token)
-            detail = _refresh_log_fields(
-                trigger,
-                access_changed,
-                session_changed,
-                new_access_token,
+            detail = (
+                _refresh_log_fields(
+                    trigger,
+                    access_changed,
+                    session_changed,
+                    new_access_token,
+                )
+                + "; "
+                + diag_detail
             )
 
             if access_changed or session_changed:
-                conn.execute(
+                # Compare-and-set on the session token this refresh started from.
+                # _begin_refresh_write already holds the write lock after the same
+                # check, so this cannot miss in practice; it keeps the write itself
+                # safe if the surrounding guard is ever reshuffled.
+                updated = conn.execute(
                     """UPDATE teams SET access_token = ?, session_token = ?,
                        token_expires = ?, updated_at = ?,
                        status = CASE WHEN ? THEN 'active' ELSE status END
-                       WHERE id = ?""",
+                       WHERE id = ? AND session_token IS ?""",
                     (
                         new_access_token,
                         new_session_token,
@@ -535,8 +728,19 @@ def refresh_team_auth_sync(
                         now.isoformat(),
                         int(access_changed),
                         team_id,
+                        row["session_token"],
                     ),
-                )
+                ).rowcount
+                if updated == 0:
+                    return _finish_superseded(
+                        conn,
+                        team_id=team_id,
+                        trigger=trigger,
+                        action=action,
+                        trigger_type=trigger_type,
+                        diag_fields=diag_fields,
+                        client=client,
+                    )
 
             if access_changed:
                 result_status = "success"
@@ -557,8 +761,10 @@ def refresh_team_auth_sync(
                 trigger == "api_401_retry"
                 or _access_token_expired(new_access_token, now)
             )
+            marked_expired = False
             if not session_has_access and access_unusable:
                 _mark_team_auth_expired(conn, team_id)
+                marked_expired = True
 
             # 第三种情况：会话端点正常应答、也确实交回了 access token，但那个 token
             # 和库里那个一模一样，而它已经用不了（业务接口刚刚 401，或 JWT exp 已过）。
@@ -581,8 +787,10 @@ def refresh_team_auth_sync(
                 None,
                 trigger_type,
             )
-            conn.commit()
 
+            # 会话文件在提交前、仍持有写锁时更新：重新导入是"先写库、后写文件"，
+            # 它的库写入要等这里提交，于是它的文件写入一定排在这次之后，旧会话不会
+            # 盖掉新导入的文件。失败日志走同一个连接——另开连接会被自己的写锁挡住。
             if access_changed or session_changed:
                 try:
                     update_session_file_tokens(
@@ -591,7 +799,8 @@ def refresh_team_auth_sync(
                         new_session_token,
                     )
                 except Exception as exc:
-                    _log_operation_sync(
+                    _insert_operation_log(
+                        conn,
                         team_id,
                         "session_file_update",
                         None,
@@ -599,6 +808,17 @@ def refresh_team_auth_sync(
                         str(exc),
                         trigger_type,
                     )
+            conn.commit()
+            log_refresh_diagnostics(
+                team_id,
+                trigger,
+                result_status,
+                diag_fields,
+                session_changed=session_changed,
+                auth_rejected=auth_rejected,
+                marked_token_expired=marked_expired,
+            )
+
             if access_changed and client is not None:
                 client.update_access_token(new_access_token)
 
@@ -681,6 +901,7 @@ def run_chatgpt_call_sync(func: Callable[..., T], *args: Any, **kwargs: Any) -> 
                         "unchanged": "（Session 接口未返回新的 access token）",
                         "session_rotated": "（仅轮换 session token，access token 未更新）",
                         "failed": "（自动刷新 Token 失败）",
+                        "superseded": "（刷新期间 Session 已被重新导入，改用新导入的 Token 重试仍失败）",
                     }
                     suffix = (
                         "（登录已失效：Session 接口交不出可用的 access token，需重新导入）"

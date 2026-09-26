@@ -742,16 +742,26 @@ class RefreshTokenClientShapeTest(unittest.TestCase):
         get.assert_called_once()
         return result
 
+    # refresh_token 只追加诊断字段，原有字段一个不少、值不变。
+    ADDED_KEYS = {"refresh_diagnostics", "set_cookie_session_token"}
+
+    def _without_added(self, result: dict) -> dict:
+        self.assertTrue(self.ADDED_KEYS <= set(result))
+        return {k: v for k, v in result.items() if k not in self.ADDED_KEYS}
+
     def test_in_band_refresh_error_carries_its_2xx_status(self):
         result = self._call(
             return_value=self._http_response(200, {"error": "RefreshAccessTokenError"})
         )
-        self.assertEqual(result, {"error": "RefreshAccessTokenError", "status_code": 200})
+        self.assertEqual(
+            self._without_added(result),
+            {"error": "RefreshAccessTokenError", "status_code": 200},
+        )
 
     def test_successful_session_body_is_returned_unchanged(self):
         body = {"accessToken": "a", "sessionToken": "s"}
-        result = self._call(return_value=self._http_response(200, body))
-        self.assertEqual(result, body)
+        result = self._call(return_value=self._http_response(200, dict(body)))
+        self.assertEqual(self._without_added(result), body)
 
     def test_timeout_has_no_status_code(self):
         result = self._call(side_effect=requests.Timeout("Read timed out"))

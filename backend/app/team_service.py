@@ -7,7 +7,11 @@ import jwt
 from fastapi import HTTPException
 
 from .chatgpt_client import ChatGPTClient
-from .chatgpt_limiter import run_chatgpt_call
+from .chatgpt_limiter import (
+    log_refresh_diagnostics,
+    refresh_diagnostic_fields,
+    run_chatgpt_call,
+)
 from .database import get_db, log_operation
 from .models import TeamSession
 from .services.pricing import account_billing_updates, fetch_seat_pricing
@@ -84,6 +88,12 @@ async def upsert_team_from_session(
     account_info = await run_chatgpt_call(client.get_account_info)
     if "error" in account_info:
         refresh_result = await run_chatgpt_call(ChatGPTClient.refresh_token, session_token, proxy_url)
+        log_refresh_diagnostics(
+            team_id,
+            "import_verify",
+            "failed" if not isinstance(refresh_result, dict) or "error" in refresh_result else "ok",
+            refresh_diagnostic_fields(refresh_result, access_token),
+        )
         if "error" in refresh_result:
             raise HTTPException(status_code=502, detail=f"Failed to verify account: {account_info['error']}")
 
