@@ -612,6 +612,10 @@ async def init_database():
             "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
             ("expiry_kick_delay_hours", "0", now)
         )
+        await db.execute(
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("skip_overage_confirmation", "false", now)
+        )
         # Telegram 机器人 & 巡逻踢人设置。token 明文只存 DB（不入代码/仓库），默认空、需运行时写入。
         for _skey, _sval in (
             ("tg_bot_token", ""),            # 机器人 token（运行时写入）

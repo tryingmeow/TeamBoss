@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { AlertTriangle, X } from 'lucide-react';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import { useKickPolicy } from '../hooks/useKickPolicy';
+import { useSettings } from '../hooks/useSettings';
 import { selectionToDuration } from '../lib/expiry';
 import { inviteMember, OverageConfirmationError } from '../api/client';
 import { SEAT_TYPE_OPTIONS } from '../lib/seatType';
@@ -68,10 +69,12 @@ export default function AddMemberDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const kickPolicy = useKickPolicy();
+  const { settings, save: saveSettings } = useSettings();
   const [confirmOverageOpen, setConfirmOverageOpen] = useState(false);
   const [overageMessage, setOverageMessage] = useState('');
   const [pendingInviteEmails, setPendingInviteEmails] = useState<string[]>([]);
   const [batchResult, setBatchResult] = useState<BatchInviteResultLike | null>(null);
+  const [skipOverageChecked, setSkipOverageChecked] = useState(false);
 
   const resetForm = () => {
     setEmail('');
@@ -82,6 +85,7 @@ export default function AddMemberDialog({
     setOverageMessage('');
     setPendingInviteEmails([]);
     setBatchResult(null);
+    setSkipOverageChecked(false);
   };
 
   // Esc / 点击遮罩关闭时 Radix 只会调用这里的 onOpenChange,不会走下面按钮上
@@ -98,7 +102,10 @@ export default function AddMemberDialog({
     setError('');
   };
 
-  const handleSubmit = async (allowOverage = false, emailsOverride?: string[]) => {
+  const handleSubmit = async (allowOverageArg?: boolean, emailsOverride?: string[]) => {
+    // 首次提交没显式传 allowOverage 时，跟随全局「不再提示」开关：开了就直接
+    // 超额添加，不用先撞一次 409 再弹确认框。
+    const allowOverage = allowOverageArg ?? settings.skip_overage_confirmation;
     if (!emailsOverride && !email.trim()) {
       setError('请输入邮箱地址');
       return;
@@ -305,10 +312,24 @@ export default function AddMemberDialog({
         destructive
         loading={loading}
         onConfirm={() => {
+          if (skipOverageChecked) {
+            // 存设置失败也不拦邀请，只是别声称保存成功了；下次照样弹确认框。
+            void saveSettings({ skip_overage_confirmation: true }).catch(() => {});
+          }
           const emails = pendingInviteEmails.length > 0 ? pendingInviteEmails : undefined;
           void handleSubmit(true, emails);
         }}
-      />
+      >
+        <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+          <input
+            type="checkbox"
+            checked={skipOverageChecked}
+            onChange={(e) => setSkipOverageChecked(e.target.checked)}
+            className="accent-blue-600 dark:accent-blue-500"
+          />
+          不再提示，以后超额直接添加
+        </label>
+      </ConfirmDialog>
     </>
   );
 }

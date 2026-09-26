@@ -64,6 +64,23 @@ class SettingsRouteTest(unittest.TestCase):
 
         self.assertEqual(result["sync_interval_minutes"]["value"], "15")
 
+    def test_skip_overage_confirmation_key_in_allowlist(self):
+        self.assertIn("skip_overage_confirmation", settings_route.PUBLIC_SETTINGS_KEYS)
+
+    def test_patch_skip_overage_confirmation_true(self):
+        from app.models import SettingsUpdate
+
+        asyncio.run(settings_route.update_settings(SettingsUpdate(skip_overage_confirmation=True)))
+        result = asyncio.run(settings_route.get_settings())
+        self.assertEqual(result["skip_overage_confirmation"]["value"], "true")
+
+    def test_patch_skip_overage_confirmation_false(self):
+        from app.models import SettingsUpdate
+
+        asyncio.run(settings_route.update_settings(SettingsUpdate(skip_overage_confirmation=False)))
+        result = asyncio.run(settings_route.get_settings())
+        self.assertEqual(result["skip_overage_confirmation"]["value"], "false")
+
 
 if __name__ == "__main__":
     unittest.main()

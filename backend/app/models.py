@@ -141,3 +141,4 @@ class SettingsUpdate(BaseModel):
     api_concurrency: Optional[int] = None
     expiry_kick_mode: Optional[Literal["delay_hours", "day_end", "day_start"]] = None
     expiry_kick_delay_hours: Optional[int] = None
+    skip_overage_confirmation: Optional[bool] = None

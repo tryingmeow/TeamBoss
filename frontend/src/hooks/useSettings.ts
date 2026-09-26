@@ -3,31 +3,63 @@ import type { Settings } from '../types';
 import { fetchSettings, updateSettings } from '../api/client';
 import { invalidateKickPolicy } from './useKickPolicy';
 
+const DEFAULT_SETTINGS: Settings = {
+  sync_interval_minutes: 15,
+  api_concurrency: 4,
+  expiry_kick_mode: 'delay_hours',
+  expiry_kick_delay_hours: 0,
+  skip_overage_confirmation: false,
+};
+
+// 多处（Settings 弹窗、AddMemberDialog 的超额确认弹窗）各自 useSettings()，
+// 但都要看到同一份设置：状态提到模块级，任何一个实例 load/save 之后广播给
+// 其余订阅者，而不是各拉各的、互相看不到对方刚存的值。
+let shared: Settings = DEFAULT_SETTINGS;
+const listeners = new Set<(next: Settings) => void>();
+// 每张车卡都挂着一个 AddMemberDialog，首屏几十个实例只该打一次 /api/settings。
+let loaded = false;
+let inflight: Promise<void> | null = null;
+
+function broadcast(next: Settings) {
+  shared = next;
+  listeners.forEach((listener) => listener(next));
+}
+
+async function fetchShared(): Promise<void> {
+  try {
+    const raw = await fetchSettings();
+    broadcast({
+      sync_interval_minutes: Number(raw?.sync_interval_minutes?.value ?? 15),
+      api_concurrency: Number(raw?.api_concurrency?.value ?? 4),
+      expiry_kick_mode:
+        raw?.expiry_kick_mode?.value === 'day_end' || raw?.expiry_kick_mode?.value === 'day_start'
+          ? 'day_end'
+          : 'delay_hours',
+      expiry_kick_delay_hours: Number(raw?.expiry_kick_delay_hours?.value ?? 0),
+      skip_overage_confirmation: raw?.skip_overage_confirmation?.value === 'true',
+    });
+    loaded = true;
+  } catch {
+    // keep defaults
+  }
+}
 
 export function useSettings() {
-  const [settings, setSettings] = useState<Settings>({
-    sync_interval_minutes: 15,
-    api_concurrency: 4,
-    expiry_kick_mode: 'delay_hours',
-    expiry_kick_delay_hours: 0,
-  });
+  const [settings, setSettings] = useState<Settings>(shared);
 
-  const load = useCallback(async () => {
-    try {
-      const raw = await fetchSettings();
-      const parsed: Settings = {
-        sync_interval_minutes: Number(raw?.sync_interval_minutes?.value ?? 15),
-        api_concurrency: Number(raw?.api_concurrency?.value ?? 4),
-        expiry_kick_mode:
-          raw?.expiry_kick_mode?.value === 'day_end' || raw?.expiry_kick_mode?.value === 'day_start'
-            ? 'day_end'
-            : 'delay_hours',
-        expiry_kick_delay_hours: Number(raw?.expiry_kick_delay_hours?.value ?? 0),
-      };
-      setSettings(parsed);
-    } catch {
-      // keep defaults
-    }
+  useEffect(() => {
+    listeners.add(setSettings);
+    setSettings(shared);
+    return () => {
+      listeners.delete(setSettings);
+    };
+  }, []);
+
+  const load = useCallback(() => {
+    inflight ??= fetchShared().finally(() => {
+      inflight = null;
+    });
+    return inflight;
   }, []);
 
   const save = useCallback(async (data: Partial<Settings>) => {
@@ -35,11 +67,11 @@ export function useSettings() {
     // 到期选择器用 useKickPolicy 缓存宽限规则，改完设置必须让它重新拉，
     // 否则「预计 X 移出」还在按旧规则算。
     invalidateKickPolicy();
-    setSettings(prev => ({ ...prev, ...data }));
+    broadcast({ ...shared, ...data });
   }, []);
 
   useEffect(() => {
-    load();
+    if (!loaded) void load();
   }, [load]);
 
   return { settings, load, save };

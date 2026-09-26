@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 
@@ -12,6 +13,7 @@ interface ConfirmDialogProps {
   loading?: boolean;
   onSecondary?: () => void;
   onConfirm: () => void;
+  children?: ReactNode;
 }
 
 export default function ConfirmDialog({
@@ -25,6 +27,7 @@ export default function ConfirmDialog({
   loading = false,
   onSecondary,
   onConfirm,
+  children,
 }: ConfirmDialogProps) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -35,6 +38,7 @@ export default function ConfirmDialog({
           <Dialog.Description className="mt-2 text-sm text-gray-600 dark:text-gray-400">
             {message}
           </Dialog.Description>
+          {children && <div className="mt-4">{children}</div>}
           <div className="mt-6 flex justify-end gap-3">
             <Dialog.Close asChild>
               <button className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-[#2a2d3a] hover:bg-gray-200 dark:hover:bg-[#3a3d4a] transition-colors">

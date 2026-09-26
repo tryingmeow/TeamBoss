@@ -29,6 +29,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
   const [concurrency, setConcurrency] = useState(settings.api_concurrency);
   const [kickMode, setKickMode] = useState(settings.expiry_kick_mode);
   const [kickDelayHours, setKickDelayHours] = useState(settings.expiry_kick_delay_hours);
+  const [skipOverageConfirmation, setSkipOverageConfirmation] = useState(settings.skip_overage_confirmation);
   const [account, setAccount] = useState<AdminAccount | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -51,6 +52,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
     setConcurrency(settings.api_concurrency);
     setKickMode(settings.expiry_kick_mode);
     setKickDelayHours(settings.expiry_kick_delay_hours);
+    setSkipOverageConfirmation(settings.skip_overage_confirmation);
   }, [settings]);
 
   useEffect(() => {
@@ -79,6 +81,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
         api_concurrency: concurrency,
         expiry_kick_mode: kickMode,
         expiry_kick_delay_hours: kickDelayHours,
+        skip_overage_confirmation: skipOverageConfirmation,
       });
       setStatusText('已保存');
     } catch (err) {
@@ -258,6 +261,21 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
                   />
                   当天 23:59
                 </label>
+              </div>
+
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={skipOverageConfirmation}
+                    onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
+                    className="accent-blue-600 dark:accent-blue-500"
+                  />
+                  超额添加不再确认
+                </label>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-500">
+                  席位不足时直接超额添加，不再弹确认框；额外席位照常计费
+                </p>
               </div>
 
               <button

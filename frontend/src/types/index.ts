@@ -99,6 +99,7 @@ export interface Settings {
   api_concurrency: number;
   expiry_kick_mode: 'delay_hours' | 'day_end';
   expiry_kick_delay_hours: number;
+  skip_overage_confirmation: boolean;
 }
 
 export type ToastType = 'success' | 'error';
