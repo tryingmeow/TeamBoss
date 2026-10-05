@@ -1891,6 +1891,16 @@ def pending_redemption_reconciliation_job():
         )
 
 
+def fx_refresh_job(only_if_stale: bool = False):
+    """Refresh exchange rates; failures are logged and the old rates are kept."""
+    from .services.fx import refresh_fx_rates_safely
+
+    try:
+        asyncio.run(refresh_fx_rates_safely(only_if_stale=only_if_stale))
+    except Exception:
+        logging.getLogger(__name__).warning("FX refresh job crashed", exc_info=True)
+
+
 def get_sync_interval() -> int:
     try:
         conn = _get_sync_db()
@@ -1922,6 +1932,23 @@ def start_scheduler():
         "interval",
         minutes=5,
         id="member_expiry_reminder_job",
+        replace_existing=True,
+    )
+    # 汇率：每天一次，并在启动后 1 分钟内补刷一次（仅当库里的汇率已超过 24h）。
+    scheduler.add_job(
+        fx_refresh_job,
+        "cron",
+        hour=3,
+        minute=17,
+        id="fx_refresh_job",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        fx_refresh_job,
+        "date",
+        run_date=datetime.now() + timedelta(seconds=60),
+        kwargs={"only_if_stale": True},
+        id="fx_refresh_startup_job",
         replace_existing=True,
     )
 

@@ -1,7 +1,18 @@
+import asyncio
 import json
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
+import requests
+
 from ..database import get_db
+
+logger = logging.getLogger(__name__)
+
+FX_API_URL = "https://open.er-api.com/v6/latest/USD"
+FX_API_TIMEOUT_SECONDS = 15
+FX_STALE_AFTER_HOURS = 24
 
 # 静态兜底汇率:1 USD 兑各币种数量(2026-07 参考值)
 DEFAULT_FX_RATES: dict[str, float] = {
@@ -105,3 +116,77 @@ async def save_fx_rates(rates: dict[str, float]) -> None:
             ("finance_fx_updated_at", now, now),
         )
         await db.commit()
+
+
+class FxRefreshError(Exception):
+    """Fetching or validating rates failed; the stored rates were left untouched."""
+
+
+async def refresh_fx_rates() -> int:
+    """Fetch current rates from the public API and store them.
+
+    Shared by the admin "refresh" button and the scheduled job. Returns the
+    number of currencies saved. Raises FxRefreshError on any failure, in which
+    case nothing is written and the previously stored rates stay in effect.
+    """
+
+    def fetch() -> dict:
+        response = requests.get(FX_API_URL, timeout=FX_API_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
+
+    try:
+        data = await asyncio.to_thread(fetch)
+    except requests.RequestException as e:
+        raise FxRefreshError(f"External API request failed: {e}") from e
+    except ValueError as e:
+        raise FxRefreshError(f"API returned invalid JSON: {e}") from e
+
+    if not isinstance(data, dict) or data.get("result") != "success":
+        result = data.get("result") if isinstance(data, dict) else None
+        raise FxRefreshError(f"API returned unsuccessful result: {result}")
+
+    api_rates = data.get("rates")
+    if not isinstance(api_rates, dict):
+        raise FxRefreshError("API response missing rates")
+
+    filtered: dict[str, float] = {}
+    for code in DEFAULT_FX_RATES:
+        value = api_rates.get(code)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            filtered[code] = float(value)
+    if not filtered:
+        raise FxRefreshError("No supported currencies in API response")
+
+    await save_fx_rates(filtered)
+    return len(filtered)
+
+
+def _fx_is_stale(fx_updated_at: str | None, now: datetime | None = None) -> bool:
+    if not fx_updated_at:
+        return True
+    try:
+        updated = datetime.fromisoformat(fx_updated_at)
+    except ValueError:
+        return True
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return (now - updated).total_seconds() > FX_STALE_AFTER_HOURS * 3600
+
+
+async def refresh_fx_rates_safely(only_if_stale: bool = False) -> bool:
+    """Scheduler entry point: never raises; on failure logs and keeps old rates."""
+    try:
+        if only_if_stale:
+            config = await get_fx_config()
+            if not _fx_is_stale(config.get("fx_updated_at")):
+                return False
+        count = await refresh_fx_rates()
+        logger.info("FX rates refreshed (%d currencies)", count)
+        return True
+    except FxRefreshError as e:
+        logger.warning("FX rate refresh failed, keeping old rates: %s", e)
+    except Exception as e:  # noqa: BLE001 - a scheduler job must not raise
+        logger.warning("FX rate refresh failed unexpectedly, keeping old rates: %s", e)
+    return False

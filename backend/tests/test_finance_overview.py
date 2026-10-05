@@ -126,8 +126,35 @@ class FinanceOverviewTest(unittest.TestCase):
 
         result = asyncio.run(get_overview())
 
+        alerts = [a for a in result["alerts"] if a["type"] == "low_balance"]
+        self.assertEqual([a["detail"] for a in alerts], ["Credit 余额为负 · -$300"])
+
+    def test_low_but_non_negative_balance_keeps_threshold_wording(self):
+        self._insert_team(
+            id="team-thin",
+            name="Thin Team",
+            owner_email="owner5@example.com",
+            billing_period="monthly",
+            billing_currency="USD",
+            billing_symbol="$",
+            price_per_seat=25.0,
+            seats_entitled=2,
+            seats_in_use=1,
+            balance="0",
+            will_renew=1,
+            active_until=_iso_in_days(30),
+        )
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('finance_low_balance_threshold', '10', 'x')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = asyncio.run(get_overview())
+
         details = [a["detail"] for a in result["alerts"] if a["type"] == "low_balance"]
-        self.assertEqual(details, ["Credit 余额 -$300 低于阈值 $0"])
+        self.assertEqual(details, ["Credit 余额 $0 低于阈值 $10"])
 
     def test_missing_currency_balance_and_renewal_are_not_fabricated(self):
         self._insert_team(

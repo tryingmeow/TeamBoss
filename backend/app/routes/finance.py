@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..database import get_db, log_operation
-from ..services.fx import DEFAULT_FX_RATES, convert, get_fx_config, save_fx_rates
+from ..services.fx import DEFAULT_FX_RATES, FxRefreshError, convert, get_fx_config, refresh_fx_rates, save_fx_rates
 from ..services.invoices import classify_latest_invoice, refresh_invoices_for_team_blocking
 from ..services.pricing import discounted_monthly_total
 from ..services.subscription_status import subscription_status_display
@@ -277,8 +277,12 @@ async def get_overview():
                 "team_id": team_id,
                 "team_name": team_name,
                 "detail": (
-                    f"Credit 余额 {_format_money(balance_float, unit)} "
-                    f"低于阈值 {_format_money(float(low_balance_threshold), unit)}"
+                    f"Credit 余额为负 · {_format_money(balance_float, unit)}"
+                    if balance_float < 0
+                    else (
+                        f"Credit 余额 {_format_money(balance_float, unit)} "
+                        f"低于阈值 {_format_money(float(low_balance_threshold), unit)}"
+                    )
                 ),
             })
 
@@ -562,53 +566,20 @@ async def update_card_note(req: FinanceCardNoteUpdate):
 
 
 @router.post("/fx/refresh")
-async def refresh_fx_rates():
+async def refresh_fx_rates_route():
     """Refresh FX rates from external API."""
     try:
-        def fetch_rates():
-            response = requests.get("https://open.er-api.com/v6/latest/USD", timeout=15)
-            response.raise_for_status()
-            return response.json()
-
-        data = await asyncio.to_thread(fetch_rates)
-
-        if data.get("result") != "success":
-            await log_operation(None, "refresh_fx_rates", None, None, "failed", f"API returned: {data.get('result')}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"API returned unsuccessful result: {data.get('result')}"
-            )
-
-        api_rates = data.get("rates")
-        if not isinstance(api_rates, dict):
-            await log_operation(None, "refresh_fx_rates", None, None, "failed", "API response missing rates")
-            raise HTTPException(status_code=502, detail="API response missing rates")
-
-        # Filter to only currencies in DEFAULT_FX_RATES
-        filtered_rates = {
-            code: api_rates[code]
-            for code in DEFAULT_FX_RATES.keys()
-            if code in api_rates
-        }
-
-        if not filtered_rates:
-            await log_operation(None, "refresh_fx_rates", None, None, "failed", "No supported currencies in API response")
-            raise HTTPException(status_code=502, detail="No supported currencies in API response")
-
-        await save_fx_rates(filtered_rates)
-
-        await log_operation(None, "refresh_fx_rates", None, f"updated_currencies={len(filtered_rates)}", "success")
-        return {
-            "status": "ok",
-            "updated_currencies": len(filtered_rates),
-            "fx_updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-    except HTTPException:
-        raise
-    except requests.RequestException as e:
-        await log_operation(None, "refresh_fx_rates", None, None, "failed", f"API request failed: {str(e)}")
-        raise HTTPException(status_code=502, detail=f"External API request failed: {str(e)}")
+        count = await refresh_fx_rates()
+    except FxRefreshError as e:
+        await log_operation(None, "refresh_fx_rates", None, None, "failed", str(e))
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         await log_operation(None, "refresh_fx_rates", None, None, "failed", str(e))
         raise HTTPException(status_code=502, detail=f"Failed to refresh FX rates: {str(e)}")
+
+    await log_operation(None, "refresh_fx_rates", None, f"updated_currencies={count}", "success")
+    return {
+        "status": "ok",
+        "updated_currencies": count,
+        "fx_updated_at": datetime.now(timezone.utc).isoformat(),
+    }
