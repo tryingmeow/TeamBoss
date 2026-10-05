@@ -62,7 +62,7 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item["id"] for item in candidates], ["available-team"])
 
-    async def test_skips_same_team_duplicate_and_tries_next_candidate(self):
+    async def test_member_of_one_team_is_not_invited_into_the_next_candidate(self):
         teams = [
             _team("team-a", created_at="2026-01-01T00:00:00+00:00"),
             _team("team-b", created_at="2026-01-02T00:00:00+00:00"),
@@ -81,25 +81,27 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "reserved_default_seats", new=AsyncMock(return_value=0)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())) as get_client,
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=AsyncMock(return_value={"invited": []})),
-            # 邀请前锁内现拉一次（此时还不在），邀请后刷新一次（出现在待接受邀请里）。
+            patch.object(gpt_invites, "run_chatgpt_call", new=AsyncMock(return_value={"invited": []})) as invite_call,
             patch.object(
                 gpt_invites,
                 "fetch_and_cache_members",
-                new=AsyncMock(side_effect=[
-                    {"members": [], "pending_invites": []},
-                    {"members": [], "pending_invites": [{"email": "user@example.com"}]},
-                ]),
+                new=AsyncMock(return_value={"members": [], "pending_invites": []}),
             ),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
             patch.object(gpt_invites, "log_operation", new=AsyncMock()),
             # 不 mock 的话会真的写进 backend/data/app.db（生产库）
-            patch.object(gpt_invites, "record_confirmed_invite", new=AsyncMock(return_value=None)),
+            patch.object(gpt_invites, "record_confirmed_invite", new=AsyncMock(return_value=None)) as record,
+            patch.object(gpt_invites, "reserve_default_seat", new=AsyncMock()) as reserve,
         ):
-            result = await gpt_invites.invite_gpt_member_any_team("user@example.com", None)
+            # 已在 team-a 的人不能再被拉进 team-b：一个人占两个 Team 的席位和到期记录。
+            with self.assertRaises(gpt_invites.GptInviteFailed) as ctx:
+                await gpt_invites.invite_gpt_member_any_team("user@example.com", None)
 
-        self.assertEqual(result["team_id"], "team-b")
-        get_client.assert_awaited_once_with("team-b")
+        self.assertEqual(ctx.exception.team_id, "team-a")
+        get_client.assert_not_awaited()
+        invite_call.assert_not_awaited()
+        record.assert_not_awaited()
+        reserve.assert_not_awaited()
 
     async def test_non_capacity_invite_error_is_not_reported_as_no_seat(self):
         teams = [_team("team-a", created_at="2026-01-01T00:00:00+00:00")]

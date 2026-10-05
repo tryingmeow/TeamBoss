@@ -1,4 +1,4 @@
-"""邀请结果分类的回归测试。
+"""邀请结果分类与批量 GPT 拉人"换 Team"边界的回归测试。
 
 1. 邀请接口回 2xx、``errored_emails`` 为空，但 ``account_invites`` 列表里没有本次
    邮箱：上游没说给这个邮箱建了邀请，却被当成 confirmed（兑换码被消耗、记下到期，
@@ -6,6 +6,12 @@
    ``account_invites`` 里读到本次邮箱才算 confirmed，否则 uncertain（邀请可能已经
    到了 OpenAI，不能当成拒绝）。完全不带这些字段的响应（空体 / 坏 JSON）保持原先
    的 confirmed。
+2. 批量 GPT 拉人：邮箱已在 Team A（缓存或现拉名单里），或 Team A 的名单拉不到，
+   原来都会接着去 Team B 再拉一次，同一个人在两个 Team 各占一个席位、各有一条到期
+   记录。现在这两种情况都在 Team A 就终止（GptInviteFailed），主循环和超额循环都
+   一样；超额循环里结果不明确的邀请也同样终止，不再换 Team 重发。缓存名单里已在
+   任何一个未过期 Team 的邮箱（哪怕那个 Team 已满、或排在候选后面）在试第一个
+   Team 之前就终止。
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -17,15 +23,20 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import requests
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import database as app_database
 from app.chatgpt_client import ChatGPTClient
 from app.routes import access_tokens
+from app.services import gpt_invites
+from app.services.team_locks import release_default_seat_reservation, reserved_default_seats
 
 
 EMAIL = "member@example.com"
+TEAM_A = "g4-team-a"
+TEAM_B = "g4-team-b"
 
 
 def _ok_response(body):
@@ -266,6 +277,227 @@ class RedemptionAccountInvitesMissingEmailTest(_TempDbAsync, unittest.IsolatedAs
         barrier = self._reconciliation_rows()
         self.assertEqual(len(barrier), 1)
         self.assertEqual((barrier[0]["team_id"], barrier[0]["kind"]), ("team-1", "barrier"))
+
+
+# ── 2. 批量 GPT 拉人：已在 Team A / 拉不到 Team A 名单 → 终止，不换 Team ──────
+
+class _RecordingClient:
+    def __init__(self, team_id, invite_result=None):
+        self.team_id = team_id
+        self.invites = []
+        self.invite_result = invite_result
+
+    def invite_member(self, email, seat_type="default"):
+        self.invites.append(email)
+        if self.invite_result is not None:
+            return dict(self.invite_result)
+        return {"account_invites": [{"email_address": email}], "errored_emails": [],
+                "_mutation_status": "confirmed"}
+
+
+class GptBatchInviteStaysInTeamTest(_TempDbAsync, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await self._start_db()
+        for team_id in (TEAM_A, TEAM_B):
+            self.addCleanup(self._release, team_id)
+
+    async def _release(self, team_id):
+        await release_default_seat_reservation(team_id, EMAIL)
+
+    def _teams(self, *, cache_a_members=()):
+        # 候选按缓存空位多少排序：Team B 占两个别人的席位，保证总是先走到 Team A。
+        self._insert_team(TEAM_A, created_at="2026-10-01T00:00:00+00:00", members=cache_a_members)
+        self._insert_team(
+            TEAM_B,
+            created_at="2026-10-02T00:00:00+00:00",
+            members=[{"email": f"other{i}@example.com", "seat_type": "default"} for i in (1, 2)],
+        )
+
+    async def _run(self, *, live, capacity=None, allow_overage=False, invite_results=None):
+        """live / capacity: team_id -> 依次返回的值（Exception 实例则抛出）。"""
+        invite_results = invite_results or {}
+        clients = {t: _RecordingClient(t, invite_results.get(t)) for t in (TEAM_A, TEAM_B)}
+        live = {t: list(v) for t, v in live.items()}
+        capacity = {t: list(v) for t, v in (capacity or {}).items()}
+        fetched = []
+
+        async def _fetch(team_id, client):
+            fetched.append(team_id)
+            value = live[team_id].pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        async def _available(client, team_id, *, email):
+            queue = capacity.get(team_id)
+            return queue.pop(0) if queue else (True, "available=1")
+
+        with (
+            patch.object(gpt_invites, "get_team_client", new=AsyncMock(side_effect=lambda t: clients[t])),
+            patch.object(gpt_invites, "fetch_and_cache_members", new=AsyncMock(side_effect=_fetch)),
+            patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(side_effect=_available)),
+            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
+            patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),
+        ):
+            try:
+                result = await gpt_invites.invite_gpt_member_any_team(
+                    EMAIL, None, allow_overage=allow_overage, action="invite_gpt_member"
+                )
+                return result, None, clients, fetched
+            except (gpt_invites.GptInviteFailed, gpt_invites.NoGptSeatAvailable) as exc:
+                return None, exc, clients, fetched
+
+    async def _assert_team_b_untouched(self, clients):
+        self.assertEqual(clients[TEAM_B].invites, [])
+        self.assertEqual(self._expiry_rows(TEAM_B), [])
+        self.assertEqual(await reserved_default_seats(TEAM_B), 0)
+        self.assertEqual([r for r in self._reconciliation_rows() if r["team_id"] == TEAM_B], [])
+
+    # 主循环
+
+    async def test_cached_member_of_team_a_is_not_invited_into_team_b(self):
+        self._teams(cache_a_members=[{"email": "Member@Example.com", "seat_type": "default"}])
+        absent = {"members": [], "pending_invites": []}
+
+        result, exc, clients, fetched = await self._run(live={TEAM_A: [], TEAM_B: [absent, absent]})
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertIn(TEAM_A.upper(), exc.reason)
+        self.assertEqual(fetched, [])
+        self.assertEqual(clients[TEAM_A].invites, [])
+        await self._assert_team_b_untouched(clients)
+        self.assertEqual(self._expiry_rows(TEAM_A), [])
+
+    async def test_cached_member_of_a_full_team_is_not_invited_into_team_b(self):
+        # Team A 五个席位全满（含本人），不是候选，主循环根本不会走到它。
+        self._teams(cache_a_members=[{"email": EMAIL, "seat_type": "default"}] + [
+            {"email": f"a{i}@example.com", "seat_type": "default"} for i in range(4)
+        ])
+        absent = {"members": [], "pending_invites": []}
+
+        result, exc, clients, fetched = await self._run(live={TEAM_A: [], TEAM_B: [absent, absent]})
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertEqual(fetched, [])
+        await self._assert_team_b_untouched(clients)
+
+    async def test_live_member_of_team_a_is_not_invited_into_team_b(self):
+        self._teams()
+        absent = {"members": [], "pending_invites": []}
+        in_a = {"members": [], "pending_invites": [{"email": EMAIL}]}
+
+        result, exc, clients, fetched = await self._run(live={TEAM_A: [in_a], TEAM_B: [absent, absent]})
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertEqual(fetched, [TEAM_A])
+        self.assertEqual(clients[TEAM_A].invites, [])
+        await self._assert_team_b_untouched(clients)
+
+    async def test_team_a_lookup_failure_does_not_fall_through_to_team_b(self):
+        self._teams()
+        absent = {"members": [], "pending_invites": []}
+        failure = HTTPException(status_code=502, detail="pagination did not terminate")
+
+        result, exc, clients, fetched = await self._run(live={TEAM_A: [failure], TEAM_B: [absent, absent]})
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertIn("pagination did not terminate", exc.reason)
+        self.assertEqual(fetched, [TEAM_A])
+        self.assertEqual(clients[TEAM_A].invites, [])
+        await self._assert_team_b_untouched(clients)
+
+    # 超额循环：两个 Team 在主循环里都没有空位，超额循环第二次走到 Team A
+
+    async def test_overage_loop_live_member_of_team_a_is_not_invited_into_team_b(self):
+        self._teams()
+        absent = {"members": [], "pending_invites": []}
+        in_a = {"members": [{"email": EMAIL, "seat_type": "default"}], "pending_invites": []}
+        full = (False, "no_gpt_seat: full")
+
+        result, exc, clients, fetched = await self._run(
+            live={TEAM_A: [absent, in_a], TEAM_B: [absent, absent, absent]},
+            capacity={TEAM_A: [full], TEAM_B: [full]},
+            allow_overage=True,
+        )
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertEqual(fetched, [TEAM_A, TEAM_B, TEAM_A])
+        self.assertEqual(clients[TEAM_A].invites, [])
+        await self._assert_team_b_untouched(clients)
+
+    async def test_overage_loop_team_a_lookup_failure_does_not_fall_through_to_team_b(self):
+        self._teams()
+        absent = {"members": [], "pending_invites": []}
+        full = (False, "no_gpt_seat: full")
+
+        result, exc, clients, fetched = await self._run(
+            live={TEAM_A: [absent, RuntimeError("members page 3 failed")], TEAM_B: [absent, absent, absent]},
+            capacity={TEAM_A: [full], TEAM_B: [full]},
+            allow_overage=True,
+        )
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertIn("members page 3 failed", exc.reason)
+        self.assertEqual(fetched, [TEAM_A, TEAM_B, TEAM_A])
+        self.assertEqual(clients[TEAM_A].invites, [])
+        await self._assert_team_b_untouched(clients)
+
+    async def test_overage_loop_uncertain_invite_stays_with_team_a(self):
+        self._teams()
+        absent = {"members": [], "pending_invites": []}
+        full = (False, "no_gpt_seat: full")
+
+        result, exc, clients, fetched = await self._run(
+            # Team A：主循环现拉、超额循环现拉、结果不明确后的复查 —— 都看不到这个人。
+            live={TEAM_A: [absent, absent, absent], TEAM_B: [absent, absent, absent]},
+            capacity={TEAM_A: [full], TEAM_B: [full]},
+            allow_overage=True,
+            invite_results={TEAM_A: {"error": "timed out", "_mutation_status": "uncertain"}},
+        )
+
+        self.assertIsNone(result)
+        self.assertIsInstance(exc, gpt_invites.GptInviteFailed)
+        self.assertEqual(exc.team_id, TEAM_A)
+        self.assertEqual(clients[TEAM_A].invites, [EMAIL])
+        await self._assert_team_b_untouched(clients)
+        pending = self._reconciliation_rows()
+        self.assertEqual([(r["team_id"], r["email"]) for r in pending], [(TEAM_A, EMAIL)])
+
+    # 对照：Team A 没有副作用的失败（没空位 / 上游明确拒绝）仍然换下一个 Team
+
+    async def test_capacity_or_rejection_in_team_a_still_moves_on_to_team_b(self):
+        for label, kwargs in (
+            ("no seat", {"capacity": {TEAM_A: [(False, "no_gpt_seat: full")]}}),
+            ("rejected", {"invite_results": {TEAM_A: {"error": "invalid email",
+                                                       "_mutation_status": "rejected"}}}),
+        ):
+            with self.subTest(label):
+                await self._start_db()
+                self._teams()
+                await release_default_seat_reservation(TEAM_B, EMAIL)
+                absent = {"members": [], "pending_invites": []}
+                result, exc, clients, _ = await self._run(
+                    live={TEAM_A: [absent], TEAM_B: [absent, absent]}, **kwargs
+                )
+
+                self.assertIsNone(exc)
+                self.assertEqual(result["team_id"], TEAM_B)
+                self.assertEqual(clients[TEAM_B].invites, [EMAIL])
+                self.assertEqual(len(self._expiry_rows(TEAM_B)), 1)
+                self.assertEqual(self._expiry_rows(TEAM_A), [])
 
 
 if __name__ == "__main__":

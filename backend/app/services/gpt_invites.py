@@ -23,6 +23,10 @@ from ..services.subscription_status import subscription_status
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 EMAIL_ALREADY_IN_TEAM = "邮箱已在该 Team 中，未重复邀请"
+# _invite_to_team 返回的错误前缀：带这两个前缀、或等于 EMAIL_ALREADY_IN_TEAM 的结果
+# 都把这个邮箱绑定在当次的 Team 上，调用方不能再换 Team 拉，见 _bound_to_team_failure。
+MEMBER_LOOKUP_FAILED = "member_lookup_failed:"
+INVITE_RESULT_UNCERTAIN = "invite_result_uncertain:"
 
 
 class NoGptSeatAvailable(Exception):
@@ -225,7 +229,7 @@ async def _invite_to_team(
         except Exception as exc:
             error = str(exc)
             await log_operation(team_id, f"{action}_lookup", email, None, "failed", error)
-            return None, error
+            return None, f"{MEMBER_LOOKUP_FAILED}{error}"
         if _snapshot_contains_email(snapshot, email):
             await log_operation(team_id, f"{action}_existing", email, EMAIL_ALREADY_IN_TEAM, "skipped")
             return None, EMAIL_ALREADY_IN_TEAM
@@ -255,7 +259,7 @@ async def _invite_to_team(
                     reason=error,
                 )
                 await log_operation(team_id, action, email, "seat_type=default", "uncertain", error)
-                return None, f"invite_result_uncertain:{error}"
+                return None, f"{INVITE_RESULT_UNCERTAIN}{error}"
         if "error" in result:
             error = result["error"]
             await log_operation(team_id, action, email, "seat_type=default", "failed", error)
@@ -297,6 +301,53 @@ def _is_capacity_error(error: str | None) -> bool:
     return bool(error and error.startswith("no_gpt_seat"))
 
 
+def _bound_to_team_failure(error: str | None, team: dict[str, Any]) -> GptInviteFailed | None:
+    """这个结果是否把邮箱绑定在这个 Team 上，从而必须就此终止、不换下一个 Team。
+
+    * 已在该 Team（成员或待接受邀请）：换 Team 再拉，同一个人就在两个 Team 各占
+      一个席位、各有一条到期记录。
+    * 该 Team 名单拉不到：无法排除他已在里面，同上，失败关闭。
+    * 邀请结果不明确：邀请可能已经到了 OpenAI，只能留在原 Team 等对账。
+
+    没空位、上游明确拒绝等没有远端副作用、也不说明人在该 Team 的失败返回 None，
+    调用方照常试下一个 Team。
+    """
+    if not error:
+        return None
+    team_id = team.get("id")
+    label = team.get("name") or team_id
+    if error == EMAIL_ALREADY_IN_TEAM:
+        return GptInviteFailed(f"邮箱已在 Team {label} 中，未重复邀请", team_id=team_id)
+    if error.startswith(MEMBER_LOOKUP_FAILED):
+        detail = error[len(MEMBER_LOOKUP_FAILED):]
+        return GptInviteFailed(
+            f"拉不到 Team {label} 的成员列表，无法确认邮箱是否已在其中，未邀请: {detail}",
+            team_id=team_id,
+        )
+    if error.startswith(INVITE_RESULT_UNCERTAIN):
+        return GptInviteFailed("邀请结果确认中，请先刷新成员列表，勿重复提交", team_id=team_id)
+    return None
+
+
+def _cached_team_holding(
+    teams: list[dict[str, Any]],
+    caches: dict[str, dict[str, Any]],
+    email: str,
+) -> dict[str, Any] | None:
+    """缓存名单里已有这个邮箱的 Team（成员或待接受邀请），跳过订阅已过期的 Team。
+
+    候选按空位多少排序、已满的 Team 主循环根本不进，所以只在循环里逐个查，会先把
+    人拉进排在前面的 Team B，而他其实已在排在后面或已满的 Team A。缓存"有"足以
+    不发邀请；缓存"没有"不能当证据，每个 Team 发邀请前仍在锁内现拉。
+    """
+    for team in teams:
+        if subscription_status(team.get("active_until"), bool(team.get("will_renew"))) == "expired":
+            continue
+        if _snapshot_contains_email(caches.get(team["id"]), email):
+            return team
+    return None
+
+
 async def invite_gpt_member_any_team(
     email: str,
     expires_at: Optional[datetime],
@@ -309,6 +360,11 @@ async def invite_gpt_member_any_team(
     hard_errors: list[tuple[str, str | None]] = []
     teams = await _load_active_team_rows()
     caches = await _load_member_caches()
+
+    holder = _cached_team_holding(teams, caches, email)
+    if holder is not None:
+        await log_operation(holder["id"], f"{action}_existing", email, EMAIL_ALREADY_IN_TEAM, "skipped")
+        raise _bound_to_team_failure(EMAIL_ALREADY_IN_TEAM, holder)
 
     candidates = await _build_gpt_invite_candidates(teams, caches, include_full=allow_overage)
 
@@ -325,13 +381,11 @@ async def invite_gpt_member_any_team(
         )
         if added:
             return added
+        bound = _bound_to_team_failure(error, team)
+        if bound is not None:
+            raise bound
         if _is_capacity_error(error):
             capacity_errors.append(error or "no_gpt_seat")
-        elif error and error.startswith("invite_result_uncertain:"):
-            raise GptInviteFailed(
-                "邀请结果确认中，请先刷新成员列表，勿重复提交",
-                team_id=team.get("id"),
-            )
         elif error:
             hard_errors.append((error, team.get("id")))
 
@@ -348,6 +402,9 @@ async def invite_gpt_member_any_team(
             )
             if added:
                 return added
+            bound = _bound_to_team_failure(error, team)
+            if bound is not None:
+                raise bound
             if _is_capacity_error(error):
                 capacity_errors.append(error or "no_gpt_seat")
             elif error:
