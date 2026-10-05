@@ -278,7 +278,7 @@ python scripts/backup.py
 
 ### 恢复
 
-恢复**必须停掉后端写入**，脚本会检查（Docker 里用 `--skip-service-check` 跳过这个检查，因为容器是单独起的）。它会先校验数据库完整性或归档路径，保留一份恢复前的副本，再原子替换。
+恢复**必须停掉后端写入**，脚本会检查 systemd 服务（默认 `auto-team.service`，服务名不同用环境变量 `AUTO_TEAM_SERVICE=<服务名>` 指定；Docker 里用 `--skip-service-check` 跳过这个检查，因为容器是单独起的）。它会先校验数据库完整性或归档路径，保留一份恢复前的副本，再原子替换。
 
 ```bash
 # Docker Compose

@@ -12,12 +12,14 @@ set -o pipefail
 #   ./restore.sh <项目目录>/backend/data/backups/sessions-20260723T063420Z.tar.gz
 #
 # 重要：恢复前必须停止所有会写入该数据目录的后端进程！
-#       脚本会检查本机 auto-team.service；容器恢复需先停止 Compose
+#       脚本会检查本机 systemd 服务（默认 auto-team.service，可用环境变量
+#       AUTO_TEAM_SERVICE 指定其他名字）；容器恢复需先停止 Compose
 #       backend，再指定 --skip-service-check。
 #       如服务配置了 AUTO_TEAM_DATA_DIR，恢复时也必须带上相同环境变量。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+SERVICE_NAME="${AUTO_TEAM_SERVICE:-auto-team.service}"
 DATA_DIR="${AUTO_TEAM_DATA_DIR:-${PROJECT_ROOT}/backend/data}"
 mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
@@ -63,15 +65,19 @@ TeamBoss 数据恢复脚本
   backup_file_path         备份文件路径（.db 或 .tar.gz）
   --skip-service-check     跳过服务运行检查（谨慎使用）
 
+环境变量：
+  AUTO_TEAM_SERVICE        要检查的 systemd 服务名（默认 auto-team.service）
+  AUTO_TEAM_DATA_DIR       数据目录（默认 backend/data）
+
 重要安全提示：
   恢复前必须停止所有会写入该数据目录的后端进程！
   在服务运行时覆盖数据库会导致数据损坏。
 
 停止服务（需要 root）：
-  sudo systemctl stop auto-team.service
+  sudo systemctl stop ${SERVICE_NAME}
 
 恢复完成后重启服务：
-  sudo systemctl start auto-team.service
+  sudo systemctl start ${SERVICE_NAME}
 
 EOF
     exit 1
@@ -87,13 +93,13 @@ print_info "恢复文件: $BACKUP_FILE"
 
 # 检查服务是否运行
 if [ "$SKIP_SERVICE_CHECK" != "--skip-service-check" ]; then
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet auto-team.service; then
-        print_error "auto-team.service 正在运行！恢复前必须停止服务。"
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$SERVICE_NAME"; then
+        print_error "${SERVICE_NAME} 正在运行！恢复前必须停止服务。"
         print_info "停止服务命令："
-        echo "  sudo systemctl stop auto-team.service"
+        echo "  sudo systemctl stop ${SERVICE_NAME}"
         exit 1
     fi
-    print_success "未发现正在运行的 auto-team.service"
+    print_success "未发现正在运行的 ${SERVICE_NAME}"
 fi
 
 # 根据文件类型进行恢复
