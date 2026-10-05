@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import database as app_database
 from app.models import ExtendExpiryRequest, InviteMemberRequest, SetExpiryRequest
 from app.routes import access_tokens, members
+from app.services import open_redemptions
 from app.utils.durations import expiry_from_duration
 
 
@@ -450,6 +451,72 @@ class AdminExpiryEditOpenRedemptionTest(_OpenRedemptionCase):
 
     def test_extend_expiry_ignores_an_uncertain_redemption_in_another_team(self):
         self._assert_other_team_does_not_block("extend_expiry")
+
+
+class OpenRedemptionDetailTest(unittest.TestCase):
+    """被拒说明不能把管理员引向手动补授予。
+
+    退码后码的 used_count 归零，客户还能用同一张码再兑换一次；管理员若按旧说明
+    "另行邀请"、设置到期或续期去补，客户再兑换又拿一份，一张码两次授予。
+    """
+
+    OPERATIONS = ("invite", "batch_invite", "set_expiry", "extend_expiry")
+    REDEEM_AGAIN = "请让客户用同一兑换码重新兑换"
+    NO_MANUAL_GRANT = "不要用手动邀请、设置到期或续期来补"
+    UNCERTAIN = {
+        "token_use_id": 41, "result": "uncertain", "action": "invite_pending",
+        "team_id": OTHER_TEAM, "team_name": "Beta", "created_at": "2026-10-01T00:00:00+00:00",
+    }
+    PENDING = {
+        "token_use_id": 42, "result": "pending", "action": "lookup_pending",
+        "team_id": None, "team_name": None, "created_at": "2026-10-01T00:00:00+00:00",
+    }
+
+    def test_refunded_redemption_is_redeemed_again_not_granted_by_hand(self):
+        for operation in self.OPERATIONS:
+            for hit in (self.UNCERTAIN, self.PENDING):
+                with self.subTest(operation=operation, result=hit["result"]):
+                    detail = open_redemptions.open_redemption_detail(hit, operation=operation)
+                    self.assertIn(f"兑换记录 #{hit['token_use_id']}", detail)
+                    self.assertIn(self.REDEEM_AGAIN, detail)
+                    self.assertIn(self.NO_MANUAL_GRANT, detail)
+                    self.assertIn("兑换码时长已记过一次", detail)
+                    self.assertNotIn("另行邀请", detail)
+                    self.assertNotIn("{", detail)
+
+    def test_uncertain_detail_names_the_redemptions_team_and_auto_confirmation(self):
+        detail = open_redemptions.open_redemption_detail(self.UNCERTAIN, operation="invite")
+        self.assertIn("Team Beta", detail)  # 点名兑换所在的 Team
+        self.assertIn("自动确认", detail)
+        self.assertIn("「兑换码 → 待确认的兑换」", detail)
+
+        unnamed = dict(self.UNCERTAIN, team_name=None)
+        detail = open_redemptions.open_redemption_detail(unnamed, operation="batch_invite")
+        self.assertIn(f"Team {OTHER_TEAM}", detail)
+
+    def test_pending_detail_quotes_the_reconciler_timings(self):
+        # 说明里的分钟数和对账任务用的是同一组常量。
+        self.assertEqual(
+            access_tokens._INTERRUPTED_INVITE_AFTER_SECONDS,
+            open_redemptions.INTERRUPTED_INVITE_AFTER_SECONDS,
+        )
+        self.assertEqual(
+            access_tokens._STALE_LOCAL_REDEMPTION_AFTER_SECONDS,
+            open_redemptions.STALE_LOCAL_REDEMPTION_AFTER_SECONDS,
+        )
+        detail = open_redemptions.open_redemption_detail(self.PENDING, operation="invite")
+        self.assertIn(f"满 {open_redemptions.INTERRUPTED_INVITE_AFTER_SECONDS // 60} 分钟", detail)
+        self.assertIn(f"满 {open_redemptions.STALE_LOCAL_REDEMPTION_AFTER_SECONDS // 60} 分钟", detail)
+
+        # 改常量说明跟着变：没有写死的数字。不整分钟的向上取整，宁可说长。
+        with (
+            patch.object(open_redemptions, "INTERRUPTED_INVITE_AFTER_SECONDS", 7 * 60),
+            patch.object(open_redemptions, "STALE_LOCAL_REDEMPTION_AFTER_SECONDS", 22 * 60 + 1),
+        ):
+            detail = open_redemptions.open_redemption_detail(self.PENDING, operation="set_expiry")
+        self.assertIn("满 7 分钟", detail)
+        self.assertIn("满 23 分钟", detail)
+        self.assertIn("「兑换码 → 待确认的兑换」", detail)
 
 if __name__ == "__main__":
     unittest.main()

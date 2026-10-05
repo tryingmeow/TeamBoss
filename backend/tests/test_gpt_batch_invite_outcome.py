@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import database as app_database
-from app.routes import gpt_members
+from app.routes import access_tokens, gpt_members
 from app.services import gpt_invites, member_expiry
 from app.services.team_locks import release_default_seat_reservation
 
@@ -228,6 +228,38 @@ class RetryFailedSkipsUnresolvedInviteTest(_BatchInviteHarness):
 
         self.assertEqual(result["added"], [])
         self.assertIn("等待对账", result["failed"][0]["error"])
+        self.assertEqual(clients[TEAM_A].invites, [])
+        self.assertEqual(clients[TEAM_B].invites, [])
+
+    async def test_open_redemption_barrier_points_to_the_redemption_not_a_manual_invite(self):
+        """屏障属于一笔未结兑换时，说明不能再让管理员"确认没送达就单独邀请"：
+        退码后手动补发，客户还能拿退回的码再兑换一次。"""
+        await self._start()
+        conn = self._conn()
+        token_id = conn.execute(
+            """INSERT INTO access_tokens
+               (token_hash, token_prefix, grant_expires_in, max_uses, used_count,
+                disabled, created_at)
+               VALUES ('hash-outcome', 'atm_x', '30d', 1, 0, 0, '2026-10-01')"""
+        ).lastrowid
+        conn.commit()
+        conn.close()
+        token_use_id = await access_tokens._reserve_token_use(token_id, EMAIL, None)
+        await access_tokens._set_token_use_phase(token_use_id, "invite_pending", team_id=TEAM_A)
+        self.assertTrue(await access_tokens._lock_uncertain_with_barrier(
+            token_use_id, team_id=TEAM_A, email=EMAIL,
+            error_message="OpenAI invite result is uncertain",
+            reason="OpenAI invite result is uncertain",
+        ))
+        clients = {TEAM_A: _Client(), TEAM_B: _Client()}
+
+        result = await self._submit([EMAIL], clients)
+
+        self.assertEqual(result["added"], [])
+        error = result["failed"][0]["error"]
+        self.assertIn(f"#{token_use_id}", error)
+        self.assertIn("请让客户用同一兑换码重新兑换", error)
+        self.assertNotIn("单独邀请", error)
         self.assertEqual(clients[TEAM_A].invites, [])
         self.assertEqual(clients[TEAM_B].invites, [])
 

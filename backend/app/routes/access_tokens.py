@@ -27,6 +27,10 @@ from ..services.member_expiry import (
     resolve_invite_barrier_in_tx,
 )
 from ..services.team_clients import get_proxy_url as _get_proxy_url
+from ..services.open_redemptions import (
+    INTERRUPTED_INVITE_AFTER_SECONDS as _INTERRUPTED_INVITE_AFTER_SECONDS,
+    STALE_LOCAL_REDEMPTION_AFTER_SECONDS as _STALE_LOCAL_REDEMPTION_AFTER_SECONDS,
+)
 from ..services.seat_capacity import (
     SeatCapacityFetchError,
     fetch_live_chatgpt_seat_capacity,
@@ -1395,10 +1399,6 @@ async def _invite_to_available_team(
 # 就等于"处理它的那个请求已经不在了"（被杀、或带着异常结束）。
 _inflight_token_uses: set[int] = set()
 
-# invite_pending 的兑换超过这个时长、且本进程里已没有请求在处理它，就判定为被中断：
-# 远端邀请可能已发出，也可能没有。必须明显长于一次邀请请求（上游超时 60 秒，外加
-# shield 等它收尾），而 created_at 是占用时刻、早于真正发请求，所以留足余量。
-_INTERRUPTED_INVITE_AFTER_SECONDS = 10 * 60
 
 _UNCERTAIN_INVITE_ERROR = "OpenAI invite result is uncertain"
 
@@ -1475,7 +1475,8 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
     Team 对账，绝不自动释放或换 Team 重试：原 Team 里看得见人就确认成功；看不见、
     且已超过 ``_INTERRUPTED_INVITE_AFTER_SECONDS`` 仍是 pending 的，转成 uncertain
     交给管理员（见 ``_lock_interrupted_invite``）。纯本地的 lookup/renew pending
-    超过 30 分钟仍未完成则可安全回滚，因为续期和收据本来就在同一事务里。
+    超过 ``_STALE_LOCAL_REDEMPTION_AFTER_SECONDS`` 仍未完成则可安全回滚，因为续期和收据
+    本来就在同一事务里。两个时长的正本在 ``services/open_redemptions.py``。
     """
     async with get_db() as db:
         cursor = await db.execute(
@@ -1491,7 +1492,7 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
         attempts = [dict(row) for row in await cursor.fetchall()]
 
     counts = {"confirmed": 0, "released": 0, "waiting": 0, "uncertain": 0}
-    stale_before = utc_now().timestamp() - 30 * 60
+    stale_before = utc_now().timestamp() - _STALE_LOCAL_REDEMPTION_AFTER_SECONDS
     for attempt in attempts:
         token_use_id = int(attempt["id"])
         action = attempt.get("action") or ""

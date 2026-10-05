@@ -1,15 +1,29 @@
-"""兑换什么时候算"未结"，以及管理员因此被拒时看到的说明。
+"""兑换什么时候算"未结"、未结的兑换多久会被对账收尾，以及管理员因此被拒时看到的说明。
 
 管理员的手动授予（单个邀请 / 重发、批量拉人、设置到期、续期）写的是同一条到期
 记录；对账任务日后确认一笔未结兑换时，会在那条记录上再累加一次兑换码时长。所以
 这些入口在写之前都要问这里：这个邮箱有没有对账日后还会记账的兑换。有就拒绝、
 什么都不写，由兑换自己走完（见 ``routes/members.py`` 的 ``_refuse_if_open_redemption``
 和 ``services/gpt_invites.py`` 的 ``_invite_to_team``）。
+
+对账任务（``routes/access_tokens.py`` 的 ``reconcile_pending_redemptions``）按本文件
+的两个时长收尾被中断的兑换；给管理员的说明也从这里取数，不另写数字。
 """
 
 from typing import Any, Optional
 
 from ..database import get_db
+
+
+# invite_pending 的兑换超过这个时长、且本进程里已没有请求在处理它，就判定为被中断：
+# 远端邀请可能已发出，也可能没有，原 Team 里仍看不到人就转成 uncertain，交给
+# 「待确认的兑换」。必须明显长于一次邀请请求（上游超时 60 秒，外加 shield 等它
+# 收尾），而 created_at 是占用时刻、早于真正发请求，所以留足余量。
+INTERRUPTED_INVITE_AFTER_SECONDS = 10 * 60
+
+# lookup / 续期阶段的兑换只碰本地（续期和收据在同一事务里），超过这个时长仍是
+# pending 就由对账任务回滚、退码。
+STALE_LOCAL_REDEMPTION_AFTER_SECONDS = 30 * 60
 
 
 # 两条腿：
@@ -71,34 +85,55 @@ async def find_open_redemption(
     return dict(row) if row else None
 
 
+# 未结兑换只有两种终态，说明要让管理员按终态走，而不是建议他另行授予：
+# * 确认成功：兑换码时长已经记过一次。
+# * 退码（确认失败、兑换失败、本地阶段回滚）：码的 used_count 归零，客户还能拿同一张
+#   码再兑换一次。管理员这时手动邀请 / 设置到期 / 续期去"补"，客户再兑换又拿一份，
+#   一张码两次授予。所以退码后让客户自己重新兑换。
+# pending 的收尾时长在调用时从上面两个常量现算，不写死数字。
+_REDEEM_AGAIN = (
+    "请让客户用同一兑换码重新兑换（码已过期或停用就换发一张同面额的新码），"
+    "不要用手动邀请、设置到期或续期来补。"
+)
 _UNCERTAIN_DETAIL = (
-    "该邮箱在 Team {team_label} 有一笔兑换的邀请结果仍在确认中（兑换记录 #{token_use_id}），{refused}。"
-    "请先在「兑换码 → 待确认的兑换」里核实收尾：确认成功会按兑换码补齐时长，确认失败会退码。"
-    "收尾后再{next_step}。"
+    "该邮箱在 Team {team_label} 有一笔兑换的邀请结果待确认（兑换记录 #{token_use_id}），{refused}。"
+    "该邮箱出现在这个 Team（含待接受邀请）后会自动确认，也可在「兑换码 → 待确认的兑换」里核实收尾。"
+    "确认成功则兑换码时长已记过一次；确认失败会退码，" + _REDEEM_AGAIN
 )
 _PENDING_DETAIL = (
     "该邮箱有一笔兑换正在处理（兑换记录 #{token_use_id}），{refused}。"
-    "请等它结束后刷新成员列表，再{next_step}；结果不明的兑换会转入「兑换码 → 待确认的兑换」。"
+    "请等它结束，处理中断的会自动收尾：进入邀请阶段的，Team 里出现该邮箱即确认，"
+    "发起满 {invite_minutes} 分钟仍未出现则转入「兑换码 → 待确认的兑换」；"
+    "未进入邀请阶段的，发起满 {stale_minutes} 分钟回滚退码。"
+    "成功则兑换码时长已记过一次；失败或回滚会退码，" + _REDEEM_AGAIN
 )
-# (拒绝说明, 收尾后的下一步)，按管理员操作区分。
+# 拒绝说明，按管理员操作区分。正文只提兑换自己落到的 Team、不提管理员正在操作的
+# Team，所以批量拉人（没有选定 Team）也适用。
 _REFUSALS = {
-    "invite": ("未发送邀请", "决定是否需要另行邀请"),
-    "batch_invite": ("未邀请", "决定是否需要另行邀请"),
-    "set_expiry": ("未修改到期时间", "调整到期时间"),
-    "extend_expiry": ("未续期", "决定是否需要续期"),
+    "invite": "未发送邀请",
+    "batch_invite": "未邀请",
+    "set_expiry": "未修改到期时间",
+    "extend_expiry": "未续期",
 }
+
+
+def _minutes(seconds: int) -> int:
+    """秒数向上取整成分钟：说明告诉管理员要等到什么时候，宁可说长、不能说短。"""
+    return max(1, -(-int(seconds) // 60))
 
 
 def open_redemption_detail(open_redemption: dict[str, Any], *, operation: str) -> str:
     """管理员因 ``open_redemption`` 被拒时看到的说明（中文，直接展示在后台）。
 
     ``operation``：``invite`` / ``batch_invite`` / ``set_expiry`` / ``extend_expiry``。
+    uncertain 点名兑换所在的 Team：邀请看所有 Team 的 uncertain，它可能不是管理员
+    正在操作的那个 Team。
     """
-    refused, next_step = _REFUSALS[operation]
     template = _UNCERTAIN_DETAIL if open_redemption["result"] == "uncertain" else _PENDING_DETAIL
     return template.format(
         token_use_id=open_redemption["token_use_id"],
         team_label=open_redemption.get("team_name") or open_redemption.get("team_id") or "",
-        refused=refused,
-        next_step=next_step,
+        refused=_REFUSALS[operation],
+        invite_minutes=_minutes(INTERRUPTED_INVITE_AFTER_SECONDS),
+        stale_minutes=_minutes(STALE_LOCAL_REDEMPTION_AFTER_SECONDS),
     )

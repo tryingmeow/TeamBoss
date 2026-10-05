@@ -442,10 +442,18 @@ async def invite_gpt_member_any_team(
     unresolved = await _team_with_unresolved_invite(email)
     if unresolved is not None:
         label = unresolved.get("name") or unresolved["id"]
-        reason = (
-            f"邮箱在 Team {label} 有一次结果未确认的邀请，等待对账，本次跳过、未换 Team 重新邀请。"
-            f"邀请若已送达，下一轮同步后会自动确认；确认没送达请在 Team {label} 内单独邀请"
+        # 这行若是一笔未结兑换的屏障 / 兜底行，"确认没送达请单独邀请"会让管理员在退码
+        # 之后手动补发，客户还能拿退回的码再兑换一次。这时改用兑换自己的说明。
+        open_redemption = await find_open_redemption(
+            unresolved["id"], email, uncertain_in_any_team=True
         )
+        if open_redemption is not None:
+            reason = open_redemption_detail(open_redemption, operation="batch_invite")
+        else:
+            reason = (
+                f"邮箱在 Team {label} 有一次结果未确认的邀请，等待对账，本次跳过、未换 Team 重新邀请。"
+                f"邀请若已送达，下一轮同步后会自动确认；确认没送达请在 Team {label} 内单独邀请"
+            )
         await log_operation(
             unresolved["id"], action, email, "pending_invite_reconciliation", "skipped", reason
         )
