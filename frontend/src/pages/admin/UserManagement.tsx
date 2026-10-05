@@ -134,6 +134,8 @@ const JOIN_SOURCE: Record<string, { label: string; tone: string }> = {
   self_service: { label: '自助加入', tone: TONE.info },
 };
 
+const UNTRACKED_SOURCE = { label: '未登记', tone: TONE.neutral };
+
 const KICK_SOURCE: Record<string, { label: string; tone: string }> = {
   auto_expire: { label: '自动过期', tone: TONE.neutral },
   admin: { label: '手动踢出', tone: TONE.info },
@@ -984,9 +986,15 @@ function OwnerList({
 
 function MemberStatusPills({ member }: { member: AdminMemberRow }) {
   const status = MEMBER_STATUS[member.status];
+  const joinSource = member.expiry?.source;
   const source =
     member.status === 'joined'
-      ? JOIN_SOURCE[member.expiry?.source || 'system'] ?? JOIN_SOURCE.system
+      ? member.is_owner
+        ? undefined
+        : joinSource == null
+          // No local record at all: not a system invite, whatever else it is.
+          ? UNTRACKED_SOURCE
+          : JOIN_SOURCE[joinSource || 'system'] ?? JOIN_SOURCE.system
       : member.status === 'kicked' && member.expiry?.kick_source
         ? KICK_SOURCE[member.expiry.kick_source]
         : undefined;
