@@ -23,6 +23,17 @@ export interface OverageCapacity {
   active_team_count?: number;
 }
 
+/** A non-2xx response. `status` lets callers tell an auth rejection from an outage. */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 /** Team 的 ChatGPT 登录已失效（后端 auth_state 已是 rejected），只能重新导入 session。 */
 export class TeamAuthRejectedError extends Error {}
 
@@ -66,7 +77,12 @@ function errorMessageFromBody(body: string, fallback: string): string {
   return body;
 }
 
-async function request<T>(url: string, options?: RequestInit): Promise<T> {
+interface RequestBehavior {
+  /** false: on 401 drop the stored key but stay on the page (the caller shows the login form). */
+  redirectOnUnauthorized?: boolean;
+}
+
+async function request<T>(url: string, options?: RequestInit, behavior: RequestBehavior = {}): Promise<T> {
   const headers = new Headers(options?.headers);
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
 
@@ -88,7 +104,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   if (!res.ok) {
     if (res.status === 401 && sentStoredAdminKey) {
       clearStoredAdminApiKey();
-      window.location.href = '/admin';
+      if (behavior.redirectOnUnauthorized !== false) window.location.href = '/admin';
     }
     const body = await res.text();
     if (res.status === 409) {
@@ -117,7 +133,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
         if (e instanceof OverageConfirmationError || e instanceof TeamAuthRejectedError) throw e;
       }
     }
-    throw new Error(errorMessageFromBody(body, `HTTP ${res.status}`));
+    throw new ApiError(errorMessageFromBody(body, `HTTP ${res.status}`), res.status);
   }
   if (res.status === 204) return undefined as T;
   return res.json();
@@ -148,6 +164,14 @@ export async function loginAdmin(password: string): Promise<AdminLoginResult> {
 
 export async function fetchAdminAccount(): Promise<AdminAccount> {
   return request<AdminAccount>('/api/admin/account');
+}
+
+/**
+ * Checks the stored admin key without leaving the page. A rejected key is removed and
+ * surfaces as an ApiError with status 401/403; any other failure leaves the key alone.
+ */
+export async function verifyStoredAdminKey(): Promise<AdminAccount> {
+  return request<AdminAccount>('/api/admin/account', undefined, { redirectOnUnauthorized: false });
 }
 
 export async function changeAdminPassword(data: {

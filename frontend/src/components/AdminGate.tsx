@@ -1,46 +1,52 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { KeyRound, Loader2, LogIn } from 'lucide-react';
+import { Loader2, LogIn } from 'lucide-react';
 import {
-  fetchAdminAccount,
+  ApiError,
+  clearStoredAdminApiKey,
   getStoredAdminApiKey,
   loginAdmin,
   setStoredAdminApiKey,
+  verifyStoredAdminKey,
 } from '../api/client';
-
+import PublicShell from './PublicShell';
+import PageLoading from './PageLoading';
+import { BUTTON, CARD, INPUT } from './ui';
 
 interface AdminGateProps {
   children: ReactNode;
 }
 
+type GateState = 'checking' | 'login' | 'ready';
 
 export default function AdminGate({ children }: AdminGateProps) {
-  const [ready, setReady] = useState(false);
+  const [state, setState] = useState<GateState>(() => (getStoredAdminApiKey() ? 'checking' : 'login'));
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (state !== 'checking') return;
     let mounted = true;
-    async function checkStoredKey() {
-      if (!getStoredAdminApiKey()) {
-        setReady(false);
-        return;
-      }
-      try {
-        await fetchAdminAccount();
-        if (mounted) setReady(true);
-      } catch {
-        if (mounted) {
-          setReady(false);
+    verifyStoredAdminKey()
+      .then(() => {
+        if (mounted) setState('ready');
+      })
+      .catch((err) => {
+        if (!mounted) return;
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          // The key was rejected (expired, rotated, or the password changed): sign in again.
+          clearStoredAdminApiKey();
+          setError('');
+        } else {
+          // Network or server trouble: keep the key, a reload will retry it.
           setError('登录验证暂时失败，请刷新页面重试。');
         }
-      }
-    }
-    checkStoredKey();
+        setState('login');
+      });
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [state]);
 
   const handleLogin = async (event: FormEvent) => {
     event.preventDefault();
@@ -49,7 +55,7 @@ export default function AdminGate({ children }: AdminGateProps) {
     try {
       const result = await loginAdmin(password);
       setStoredAdminApiKey(result.api_key);
-      setReady(true);
+      setState('ready');
     } catch (err) {
       setError(err instanceof Error ? err.message : '登录失败');
     } finally {
@@ -57,46 +63,39 @@ export default function AdminGate({ children }: AdminGateProps) {
     }
   };
 
-  if (ready) return <>{children}</>;
+  if (state === 'ready') return <>{children}</>;
+  if (state === 'checking') return <PageLoading fullScreen />;
 
   return (
-    <div className="min-h-screen bg-[#0f1117] flex items-center justify-center px-4">
-      <form
-        onSubmit={handleLogin}
-        className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] p-6 shadow-2xl"
-      >
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-xl bg-blue-600/10 flex items-center justify-center">
-            <KeyRound size={20} className="text-blue-600 dark:text-blue-400" />
-          </div>
-          <div>
-            <h1 className="text-lg font-bold text-gray-900 dark:text-gray-100">管理员登录</h1>
-            <p className="text-xs text-gray-500 dark:text-gray-400">Team Manager</p>
-          </div>
-        </div>
+    <PublicShell title="管理员登录" width="sm">
+      <form onSubmit={handleLogin} className={`${CARD} p-6 shadow-sm sm:p-7`}>
+        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">管理员登录</h1>
+        <p className="mt-1 text-sm text-gray-500 dark:text-ink-400">登录 TeamBoss 管理后台</p>
 
-        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+        <label htmlFor="admin-password" className="mt-6 mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
           密码
         </label>
         <input
+          id="admin-password"
           autoFocus
           type="password"
+          autoComplete="current-password"
           value={password}
           onChange={(event) => setPassword(event.target.value)}
-          className="w-full px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+          className={INPUT}
         />
 
-        {error && <div role="alert" className="mt-3 text-sm text-red-500">{error}</div>}
+        {error && (
+          <div role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">
+            {error}
+          </div>
+        )}
 
-        <button
-          type="submit"
-          disabled={loading || !password}
-          className="mt-5 w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
-        >
+        <button type="submit" disabled={loading || !password} className={`${BUTTON.primary} mt-5 w-full py-2.5`}>
           {loading ? <Loader2 size={16} className="animate-spin" /> : <LogIn size={16} />}
           登录
         </button>
       </form>
-    </div>
+    </PublicShell>
   );
 }
