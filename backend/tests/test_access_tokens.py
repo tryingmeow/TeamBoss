@@ -76,6 +76,15 @@ class AccessTokenRedemptionSafetyTest(unittest.IsolatedAsyncioTestCase):
         )
         self._env.start()
         await init_database()
+        # Pinning a redemption to a Team requires the Team row to exist.
+        async with get_db() as db:
+            await db.execute(
+                """INSERT INTO teams (id, name, status, access_token, device_id,
+                                      created_at, updated_at)
+                   VALUES ('team-1', 'Team 1', 'active', 'access', 'device',
+                           '2026-08-01', '2026-08-01')"""
+            )
+            await db.commit()
 
     async def asyncTearDown(self):
         self._env.stop()

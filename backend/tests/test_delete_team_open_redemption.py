@@ -259,5 +259,80 @@ class LoggedOutTeamTest(_DeleteTeamCase):
         self.assertNotIn("登录已失效", self._delete_refused())
 
 
+class PhaseWriteVersusDeleteTest(_DeleteTeamCase):
+    """The Team list is loaded, delete_team commits, then the phase write runs:
+    the redemption must not be pinned to the deleted Team and no invite goes out."""
+
+    def test_deleted_team_after_list_load_refunds_the_code_and_sends_no_invite(self):
+        token_use_id = self._reserved_use()
+        teams = [{"id": TEAM, "name": "Team T", "access_token": "a", "device_id": "d", "proxy_id": None}]
+        invite = AsyncMock(return_value={"id": "x"})
+        consumption = access_tokens._TokenConsumption()
+
+        async def delete_after_list_load(*_a, **_k):
+            # Passes the open-redemption check: the redemption is not pinned yet.
+            await teams_routes.delete_team(TEAM)
+            return True, "ok"
+
+        async def run():
+            try:
+                await access_tokens._invite_to_available_team(
+                    EMAIL,
+                    "30d",
+                    teams,
+                    token_use_id=token_use_id,
+                    on_invite_confirmed=consumption.confirm,
+                    on_invite_rejected=consumption.revert_for_rejected,
+                )
+            except Exception:
+                # What redeem_with_token does for any exception before the
+                # consumption mark: refund the code.
+                self.assertFalse(consumption.confirmed)
+                await access_tokens._fail_and_release_token_use(
+                    token_use_id, action="redeem_failed", error_message="aborted"
+                )
+                return True
+            return False
+
+        with (
+            patch.object(access_tokens, "_get_proxy_url", new=AsyncMock(return_value=None)),
+            patch.object(access_tokens, "ChatGPTClient", lambda *a, **k: object()),
+            patch.object(access_tokens, "_chatgpt_available", new=delete_after_list_load),
+            patch.object(access_tokens, "run_chatgpt_call", new=invite),
+        ):
+            raised = asyncio.run(run())
+
+        self.assertTrue(raised, "pinning to a deleted Team must fail")
+        invite.assert_not_called()
+        self.assertFalse(consumption.confirmed)
+        self.assertFalse(self._team_exists(TEAM))
+        conn = self._conn()
+        use = conn.execute(
+            "SELECT result, team_id FROM access_token_uses WHERE id = ?", (token_use_id,)
+        ).fetchone()
+        token = conn.execute("SELECT used_count FROM access_tokens").fetchone()
+        conn.close()
+        self.assertEqual(use["result"], "failed")
+        self.assertIsNone(use["team_id"])
+        self.assertEqual(token["used_count"], 0)
+
+    def _reserved_use(self):
+        conn = self._conn()
+        token_id = conn.execute(
+            """INSERT INTO access_tokens
+               (token_hash, token_prefix, grant_expires_in, max_uses, used_count,
+                disabled, created_at)
+               VALUES (?, 'atm_x', '30d', 1, 0, 0, '2026-10-01')""",
+            (f"hash-{uuid.uuid4().hex}",),
+        ).lastrowid
+        conn.commit()
+        conn.close()
+        return asyncio.run(
+            access_tokens._reserve_token_use(
+                token_id, EMAIL, expiry_from_duration("30d").isoformat()
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

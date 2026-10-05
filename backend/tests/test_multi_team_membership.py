@@ -186,6 +186,15 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self._env.start()
         await app_database.init_database()
+        # 兑换钉到某个 Team 时，该 Team 的行必须存在。
+        async with app_database.get_db() as db:
+            await db.executemany(
+                """INSERT INTO teams (id, name, status, access_token, device_id,
+                                      created_at, updated_at)
+                   VALUES (?, ?, 'active', 'token', 'dev', '2026-08-01', '2026-08-01')""",
+                [("team-a", "Team A"), ("team-b", "Team B")],
+            )
+            await db.commit()
         # 每个测试的库都是新的，码的 id 会重复；尝试预算是进程级单例，必须每个测试一份。
         budget = patch.object(
             access_tokens,

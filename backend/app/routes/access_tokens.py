@@ -369,12 +369,18 @@ async def _set_token_use_phase(
     team_id: Optional[str] = None,
     user_id: Optional[str] = None,
 ) -> None:
+    # 钉到某个 Team 时，这个 Team 必须还在：delete_team 从检查未结兑换到提交一直
+    # 握着写锁，所以要么删除先拿到锁并答 409（兑换已钉在那里），要么这条更新先
+    # 提交、删除看见它；删除先提交则这里匹配 0 行，下面照常抛错、退码，不会向
+    # 一个已删除的 Team 发邀请。
+    pin_guard = "AND EXISTS (SELECT 1 FROM teams WHERE id = ?)" if team_id is not None else ""
+    params = (action, team_id, user_id, token_use_id) + ((team_id,) if team_id is not None else ())
     async with get_db() as db:
         cursor = await db.execute(
-            """UPDATE access_token_uses
+            f"""UPDATE access_token_uses
                SET action = ?, team_id = ?, user_id = ?
-               WHERE id = ? AND result = 'pending'""",
-            (action, team_id, user_id, token_use_id),
+               WHERE id = ? AND result = 'pending' {pin_guard}""",
+            params,
         )
         await db.commit()
         if cursor.rowcount != 1:
