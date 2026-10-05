@@ -6,6 +6,7 @@ import re
 import secrets
 import sqlite3
 import time
+from datetime import datetime
 from typing import Any, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -1269,11 +1270,100 @@ async def _invite_to_available_team(
     )
 
 
+# 本进程里还在跑的兑换（token_use_id）。_redeem_valid_token 占用成功后登记、整个
+# 请求结束（含 finally 里的退码）后才移除。对账任务在调度器线程里读它：set 的
+# add/discard/in 在 GIL 下是原子的；后端规定单进程运行（README），所以"不在这里"
+# 就等于"处理它的那个请求已经不在了"（被杀、或带着异常结束）。
+_inflight_token_uses: set[int] = set()
+
+# invite_pending 的兑换超过这个时长、且本进程里已没有请求在处理它，就判定为被中断：
+# 远端邀请可能已发出，也可能没有。必须明显长于一次邀请请求（上游超时 60 秒，外加
+# shield 等它收尾），而 created_at 是占用时刻、早于真正发请求，所以留足余量。
+_INTERRUPTED_INVITE_AFTER_SECONDS = 10 * 60
+
+_UNCERTAIN_INVITE_ERROR = "OpenAI invite result is uncertain"
+
+
+async def _lock_interrupted_invite(
+    attempt: dict[str, Any], created_at: Optional[datetime]
+) -> bool:
+    """把一笔被中断的 invite_pending/pending 兑换转成 uncertain，交给管理员收尾。
+
+    进程在邀请请求途中被杀（停服超时 30 秒，短于 60 秒的上游请求）会留下 pending。
+    对账任务看不见这个人时原先只能永远等：管理员收尾列表只列 uncertain，码和邮箱
+    占用永远锁死，巡逻也没有屏障挡着可能已经发出去的那个邀请。
+
+    这里只做和在线 uncertain 分支完全相同的三件事：锁成 uncertain（WHERE
+    result='pending'，并发收尾的兑换赢）、立 kind='barrier' 的巡逻屏障、记日志。
+    不退码、不放邮箱占用、不换 Team、不给时长——这些只走既有的对账/管理员收尾。
+    返回是否真的转换了。
+    """
+    if attempt.get("result") != "pending":
+        return False
+    team_id = attempt.get("team_id")
+    if not team_id:
+        return False
+    token_use_id = int(attempt["id"])
+    if token_use_id in _inflight_token_uses:
+        return False
+    if created_at is None:
+        return False
+    if utc_now().timestamp() - created_at.timestamp() < _INTERRUPTED_INVITE_AFTER_SECONDS:
+        return False
+
+    try:
+        await _mark_token_use_uncertain(
+            token_use_id,
+            team_id=team_id,
+            error_message=_UNCERTAIN_INVITE_ERROR,
+        )
+    except RuntimeError:
+        # 行已经不是 pending：处理它的兑换刚好落了终态，以那个终态为准。屏障必须在
+        # 转换成功之后才立，否则这里会给一笔已结清的兑换留下一道永远不撤的屏障。
+        return False
+
+    reason = "invite interrupted before its result was recorded"
+    try:
+        await record_uncertain_invite(
+            team_id,
+            "",
+            attempt["email"],
+            None,
+            source="self_service",
+            reason=reason,
+            token_use_id=token_use_id,
+            kind="barrier",
+        )
+    except Exception:
+        logger.exception(
+            "failed to arm patrol barrier for interrupted invite team=%s token_use_id=%s",
+            team_id,
+            token_use_id,
+        )
+    try:
+        await log_operation(
+            team_id,
+            "self_service_invite_interrupted",
+            attempt["email"],
+            f"token_use_id={token_use_id}, reserved_at={attempt.get('created_at')}",
+            "uncertain",
+            reason,
+            "scheduler",
+        )
+    except Exception:
+        logger.exception(
+            "failed to log interrupted invite token_use_id=%s", token_use_id
+        )
+    return True
+
+
 async def reconcile_pending_redemptions() -> dict[str, int]:
     """恢复进程中断留下的兑换。
 
     ``invite_pending`` 已经越过“可能向 OpenAI 发出请求”的边界，只能读取原
-    Team 对账，绝不自动释放或换 Team 重试。纯本地的 lookup/renew pending
+    Team 对账，绝不自动释放或换 Team 重试：原 Team 里看得见人就确认成功；看不见、
+    且已超过 ``_INTERRUPTED_INVITE_AFTER_SECONDS`` 仍是 pending 的，转成 uncertain
+    交给管理员（见 ``_lock_interrupted_invite``）。纯本地的 lookup/renew pending
     超过 30 分钟仍未完成则可安全回滚，因为续期和收据本来就在同一事务里。
     """
     async with get_db() as db:
@@ -1289,7 +1379,7 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
         )
         attempts = [dict(row) for row in await cursor.fetchall()]
 
-    counts = {"confirmed": 0, "released": 0, "waiting": 0}
+    counts = {"confirmed": 0, "released": 0, "waiting": 0, "uncertain": 0}
     stale_before = utc_now().timestamp() - 30 * 60
     for attempt in attempts:
         token_use_id = int(attempt["id"])
@@ -1310,24 +1400,26 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
                 counts["waiting"] += 1
             continue
 
-        if not attempt.get("team_id") or not attempt.get("access_token") or not attempt.get("device_id"):
-            counts["waiting"] += 1
-            continue
-
-        proxy_url = await _get_proxy_url(attempt.get("proxy_id"))
-        client = ChatGPTClient(
-            attempt["access_token"],
-            attempt["team_id"],
-            attempt["device_id"],
-            proxy_url=proxy_url,
-        )
-        try:
-            snapshot = await fetch_and_cache_members(attempt["team_id"], client)
-        except Exception:
-            counts["waiting"] += 1
-            continue
+        # 先在原 Team 里找人：看得见就确认成功。原 Team 已删除/凭据缺失/名单拉不到
+        # 时同样落到下面——这些情况自动确认永远等不来，被中断的那笔得交给管理员。
+        snapshot = None
+        if attempt.get("team_id") and attempt.get("access_token") and attempt.get("device_id"):
+            proxy_url = await _get_proxy_url(attempt.get("proxy_id"))
+            client = ChatGPTClient(
+                attempt["access_token"],
+                attempt["team_id"],
+                attempt["device_id"],
+                proxy_url=proxy_url,
+            )
+            try:
+                snapshot = await fetch_and_cache_members(attempt["team_id"], client)
+            except Exception:
+                snapshot = None
         if not _snapshot_contains_email(snapshot, attempt["email"]):
-            counts["waiting"] += 1
+            if await _lock_interrupted_invite(attempt, created_at):
+                counts["uncertain"] += 1
+            else:
+                counts["waiting"] += 1
             continue
 
         await record_confirmed_invite_extension(
@@ -1818,6 +1910,9 @@ async def _redeem_valid_token(
     # 占用能成功），兑换流程中途真正失败时会在 finally 里把占用释放掉，让用户可以
     # 拿同一个 token 重试——只有真正走到下面的续期/邀请成功点才会保留这次消耗。
     token_use_id = await _reserve_token_use(token_id, email, nominal_expires_iso)
+    # 登记为"本进程正在处理"，对账任务不会把它当成被中断的兑换（见 _inflight_token_uses）。
+    # 和 try 之间不能有 await：finally 必须保证移除。
+    _inflight_token_uses.add(token_use_id)
     consumption = _TokenConsumption()
     failure_recorded = False
 
@@ -2101,6 +2196,9 @@ async def _redeem_valid_token(
                     "failed to release token use during unwind token_use_id=%s: %r",
                     token_use_id, release_exc,
                 )
+        # 放在最后：退码完成之前它仍算"正在处理"，对账任务不能抢先把它锁成 uncertain。
+        # 上面那段的异常全被接住，这一行一定会执行。
+        _inflight_token_uses.discard(token_use_id)
 
 
 @public_router.post("/query")

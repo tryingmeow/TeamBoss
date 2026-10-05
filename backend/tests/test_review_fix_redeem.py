@@ -290,5 +290,171 @@ class RedemptionInviteSkipsUnusableTeamsTest(_RedeemFlowTest):
         self.assertEqual(await self._used_count(token_id), 0)
 
 
+# ── 缺口 6：停服打断的邀请不能永远卡在 pending ───────────────────────────────
+
+class InterruptedInviteBecomesUncertainTest(_RedeemFlowTest):
+    """进程在邀请请求途中被杀，留下 action='invite_pending', result='pending'。
+
+    对账任务看不见这个人时原先永远 waiting：管理员列表只列 uncertain，码和邮箱占用
+    永远锁死，巡逻也没有屏障挡着。超过安全时限后应转成 uncertain 并立屏障。
+    """
+
+    async def _stuck_use(self, *, age_minutes, team_id="team-a"):
+        from datetime import timedelta
+
+        from app.utils.durations import utc_now
+
+        token_id = await self._exec(
+            """INSERT INTO access_tokens
+               (token_hash, token_prefix, grant_expires_in, max_uses, used_count,
+                disabled, created_at, last_used_at)
+               VALUES (?, 'atm_stuck', '30d', 1, 1, 0, ?, ?)""",
+            (access_tokens._hash_token(f"atm_stuck_{age_minutes}_{team_id}"), CREATED, CREATED),
+        )
+        created = (utc_now() - timedelta(minutes=age_minutes)).isoformat()
+        use_id = int(await self._exec(
+            """INSERT INTO access_token_uses
+               (token_id, email, action, team_id, user_id, expires_at, result,
+                error_message, created_at)
+               VALUES (?, ?, 'invite_pending', ?, NULL, NULL, 'pending', NULL, ?)""",
+            (token_id, EMAIL, team_id, created),
+        ))
+        await self._exec(
+            "INSERT INTO redemption_email_claims (email, token_use_id, created_at) VALUES (?, ?, ?)",
+            (EMAIL, use_id, created),
+        )
+        return token_id, use_id
+
+    async def _use(self, use_id):
+        return (await self._rows("SELECT * FROM access_token_uses WHERE id = ?", (use_id,)))[0]
+
+    async def _barriers(self, use_id):
+        return await self._rows(
+            "SELECT * FROM pending_invite_reconciliations WHERE token_use_id = ?", (use_id,)
+        )
+
+    async def _assert_locked_uncertain(self, token_id, use_id, team_id="team-a"):
+        use = await self._use(use_id)
+        self.assertEqual(
+            (use["action"], use["result"], use["team_id"]),
+            ("invite_pending", "uncertain", team_id),
+        )
+        barriers = await self._barriers(use_id)
+        self.assertEqual(len(barriers), 1)
+        barrier = barriers[0]
+        self.assertEqual(
+            (barrier["team_id"], barrier["email"], barrier["kind"], barrier["source"],
+             barrier["expires_at"], barrier["resolved"]),
+            (team_id, EMAIL, "barrier", "self_service", None, 0),
+        )
+        # 不退码、不放邮箱、不给时长。
+        self.assertEqual(await self._used_count(token_id), 1)
+        claims = await self._rows("SELECT token_use_id FROM redemption_email_claims")
+        self.assertEqual([c["token_use_id"] for c in claims], [use_id])
+        self.assertEqual(await self._rows("SELECT * FROM member_expiry"), [])
+        # 管理员收尾列表里看得到它。
+        listed = await access_tokens.list_pending_confirmations()
+        self.assertEqual([row["id"] for row in listed], [use_id])
+
+    async def test_stale_interrupted_invite_is_locked_as_uncertain_for_the_admin(self):
+        await self._team("team-a")
+        token_id, use_id = await self._stuck_use(age_minutes=20)
+
+        counts = await access_tokens.reconcile_pending_redemptions()
+
+        await self._assert_locked_uncertain(token_id, use_id)
+        self.assertEqual(counts["uncertain"], 1)
+        logged = [c.args[1] for c in access_tokens.log_operation.await_args_list]
+        self.assertIn("self_service_invite_interrupted", logged)
+
+    async def test_conversion_is_idempotent(self):
+        await self._team("team-a")
+        token_id, use_id = await self._stuck_use(age_minutes=20)
+
+        await access_tokens.reconcile_pending_redemptions()
+        counts = await access_tokens.reconcile_pending_redemptions()
+
+        self.assertEqual(counts["uncertain"], 0)
+        await self._assert_locked_uncertain(token_id, use_id)
+
+    async def test_original_team_unreachable_still_reaches_the_admin_list(self):
+        await self._team("team-a", status="token_expired")
+        self.broken.add("team-a")
+        token_id, use_id = await self._stuck_use(age_minutes=20)
+
+        await access_tokens.reconcile_pending_redemptions()
+
+        await self._assert_locked_uncertain(token_id, use_id)
+
+    async def test_recent_invite_is_left_alone(self):
+        await self._team("team-a")
+        _, use_id = await self._stuck_use(age_minutes=3)
+
+        counts = await access_tokens.reconcile_pending_redemptions()
+
+        self.assertEqual((counts["waiting"], counts["uncertain"]), (1, 0))
+        self.assertEqual((await self._use(use_id))["result"], "pending")
+        self.assertEqual(await self._barriers(use_id), [])
+
+    async def test_visible_member_is_confirmed_first_not_locked(self):
+        await self._team("team-a")
+        _, use_id = await self._stuck_use(age_minutes=20)
+        self.live["team-a"] = {"members": [], "pending_invites": [{"email": EMAIL}]}
+
+        counts = await access_tokens.reconcile_pending_redemptions()
+
+        self.assertEqual((counts["confirmed"], counts["uncertain"]), (1, 0))
+        self.assertEqual((await self._use(use_id))["result"], "success")
+        self.assertEqual(await self._barriers(use_id), [])
+
+    async def test_redemption_still_running_in_this_process_is_not_touched(self):
+        await self._team("team-a")
+        _, use_id = await self._stuck_use(age_minutes=20)
+        access_tokens._inflight_token_uses.add(use_id)
+        self.addCleanup(access_tokens._inflight_token_uses.discard, use_id)
+
+        counts = await access_tokens.reconcile_pending_redemptions()
+
+        self.assertEqual((counts["waiting"], counts["uncertain"]), (1, 0))
+        self.assertEqual((await self._use(use_id))["result"], "pending")
+        self.assertEqual(await self._barriers(use_id), [])
+
+    async def test_a_redemption_finishing_concurrently_wins(self):
+        # 对账读完 pending 之后、转换之前，原兑换刚好落了终态：不能被改写，也不能
+        # 留下一道永远不会撤的屏障（那会让巡逻和自动踢人永远跳过这个人）。
+        await self._team("team-a")
+        _, use_id = await self._stuck_use(age_minutes=20)
+
+        async def finish_then_absent(team_id, client):
+            await self._exec(
+                "UPDATE access_token_uses SET result = 'success' WHERE id = ?", (use_id,)
+            )
+            return {"members": [], "pending_invites": []}
+
+        with patch.object(access_tokens, "fetch_and_cache_members", new=finish_then_absent):
+            counts = await access_tokens.reconcile_pending_redemptions()
+
+        self.assertEqual(counts["uncertain"], 0)
+        self.assertEqual((await self._use(use_id))["result"], "success")
+        self.assertEqual(await self._barriers(use_id), [])
+
+    async def test_redeem_flow_registers_and_clears_its_attempt(self):
+        await self._team("team-a")
+        await self._token("atm_inflight_seen")
+        seen = []
+
+        async def fake_run(func, *args, **kwargs):
+            seen.append(set(access_tokens._inflight_token_uses))
+            return {}
+
+        with patch.object(access_tokens, "run_chatgpt_call", new=fake_run):
+            result = await self._redeem("atm_inflight_seen")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(len(seen[0]), 1)
+        self.assertEqual(access_tokens._inflight_token_uses, set())
+
+
 if __name__ == "__main__":
     unittest.main()
