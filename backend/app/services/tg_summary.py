@@ -117,7 +117,7 @@ def build_summary_sync(now: Optional[datetime] = None) -> str:
     patrol_state = "开启 ✅" if settings.get("patrol_kick_enabled") == "1" else "关闭 ⏸️"
     local_now = now.astimezone(DISPLAY_TZ)
     lines = [
-        "📊 AutoTeam 状态",
+        "📊 TeamBoss 状态",
         "╭────────────────────",
         f"│ 🏢 Team 总数　　　 {total}",
         f"│ 🟢 在线 / 正常　　 {online}",

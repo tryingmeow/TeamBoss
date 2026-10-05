@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
     stop_scheduler()
 
 
-app = FastAPI(title="ChatGPT Team Manager", version=APP_VERSION, lifespan=lifespan)
+app = FastAPI(title="TeamBoss", version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -398,7 +398,7 @@ def _render_status(data: dict, filt: str) -> str:
         )
     )
     cards = [_format_team_line(team) for team in teams]
-    return "\n\n".join(("📊 AutoTeam 状态", summary, *cards))
+    return "\n\n".join(("📊 TeamBoss 状态", summary, *cards))
 
 
 def _status_verify_worker(chat_id: str, message_id: int, filt: str, cached_text: str) -> None:
@@ -728,7 +728,7 @@ def cmd_token(user: dict, args: str) -> str:
 
 
 _HELP_ADMIN = (
-    "🤖 AutoTeam 管理助手\n\n"
+    "🤖 TeamBoss 管理助手\n\n"
     "📊 查询与监控\n"
     "├ /status [all|idle|busy] · 车队状态\n"
     "├ /watch · 风险与超员\n"
@@ -749,13 +749,13 @@ _HELP_ADMIN = (
     "💡 向导中发送 /q 或 q 可取消操作。"
 )
 _HELP_MEMBER = (
-    "👤 AutoTeam 成员助手\n\n"
+    "👤 TeamBoss 成员助手\n\n"
     "├ /info · 查询我的成员状态、服务到期与系统宽限\n"
     "├ /pair <配对码> · 继续绑定其他邮箱\n"
     "└ /help · 查看本帮助"
 )
 _HELP_PUBLIC = (
-    "👋 欢迎使用 AutoTeam\n\n"
+    "👋 欢迎使用 TeamBoss\n\n"
     "当前 Telegram 尚未绑定身份。\n\n"
     "├ /pair <配对码> · 绑定管理员或成员身份\n"
     "├ /start <配对码> · 使用配对码开始\n"
