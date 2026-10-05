@@ -12,7 +12,9 @@ from unittest.mock import Mock, patch
 
 import sys
 import jwt
-import requests
+from curl_cffi.const import CurlECode
+from curl_cffi.requests import Response
+from curl_cffi.requests.exceptions import Timeout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -730,15 +732,16 @@ class RefreshTokenClientShapeTest(unittest.TestCase):
 
     @staticmethod
     def _http_response(status_code: int, body=None):
-        response = requests.Response()
+        response = Response()
         response.status_code = status_code
+        response.ok = 200 <= status_code < 400
         response.url = "https://chatgpt.com/api/auth/session"
         response.reason = "test"
-        response._content = json.dumps(body if body is not None else {}).encode()
+        response.content = json.dumps(body if body is not None else {}).encode()
         return response
 
     def _call(self, **get_kwargs):
-        with patch.object(chatgpt_client_module.requests, "get", **get_kwargs) as get:
+        with patch.object(chatgpt_client_module.curl_requests, "get", **get_kwargs) as get:
             result = ChatGPTClient.refresh_token("session-1")
         get.assert_called_once()
         return result
@@ -765,7 +768,13 @@ class RefreshTokenClientShapeTest(unittest.TestCase):
         self.assertEqual(self._without_added(result), body)
 
     def test_timeout_has_no_status_code(self):
-        result = self._call(side_effect=requests.Timeout("Read timed out"))
+        # curl_cffi 超时时会把收了一半的响应挂在异常上；那不是上游答复。
+        partial = Response()
+        partial.status_code = 401
+        timeout = Timeout(
+            "curl: (28) Operation timed out", CurlECode.OPERATION_TIMEDOUT, partial
+        )
+        result = self._call(side_effect=timeout)
         self.assertIn("error", result)
         self.assertNotIn("status_code", result)
 
