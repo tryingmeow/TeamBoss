@@ -458,7 +458,12 @@ async def _finalize_token_use(
     user_id: str,
     expires_at: Optional[str],
 ) -> None:
-    """把兑换收据与成员到期时间放在同一个 SQLite 事务中提交。"""
+    """把兑换收据与成员到期时间放在同一个 SQLite 事务中提交。
+
+    兑换在这里拿到终态，它名下的巡逻屏障也在同一事务里撤掉（见
+    ``resolve_invite_barrier_in_tx``）：收据和屏障同生同灭，不会出现"已 success、
+    屏障却永远 resolved=0"的状态。
+    """
     if token_use_id is None:
         return
     cursor = await db.execute(
@@ -474,6 +479,7 @@ async def _finalize_token_use(
         "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
         (token_use_id,),
     )
+    await resolve_invite_barrier_in_tx(db, token_use_id)
 
 
 async def _insert_pending_invite_reconciliation(
@@ -581,21 +587,23 @@ async def record_uncertain_invite(
     )
 
 
-async def resolve_invite_barrier(token_use_id: int) -> None:
-    """结清某次兑换立下的巡逻屏障行。
+async def resolve_invite_barrier_in_tx(db, token_use_id: int) -> None:
+    """在调用方的连接 / 事务里结清某次兑换立下的巡逻屏障行，不提交。
 
-    只在这次兑换已经有终态（远端确认成功、或管理员判定失败退码）之后调用：屏障
-    在这之前是唯一挡住巡逻撤销我们自己那个邀请的东西。
+    只撤 ``kind='barrier'`` 的行；同一次兑换留下的 'extend' / 'backfill' 兜底行
+    由调度器认领凭据时处理。必须和"把这次兑换写成终态"（远端确认成功、或管理员
+    判定失败退码）放在同一个事务里：屏障在终态之前是唯一挡住巡逻撤销我们自己那个
+    邀请的东西；终态和撤屏障分两个事务提交时，第二个事务一失败（database is
+    locked、进程在两者之间退出），兑换已结清、对账再也不扫它，屏障就永远停在
+    resolved=0——auto_kick 和巡逻从此永远跳过这个人。
     """
-    async with get_db() as db:
-        await db.execute(
-            """UPDATE pending_invite_reconciliations
-               SET resolved = 1, resolved_at = ?
-               WHERE token_use_id = ? AND resolved = 0
-                 AND COALESCE(kind, 'backfill') = 'barrier'""",
-            (utc_now().isoformat(), token_use_id),
-        )
-        await db.commit()
+    await db.execute(
+        """UPDATE pending_invite_reconciliations
+           SET resolved = 1, resolved_at = ?
+           WHERE token_use_id = ? AND resolved = 0
+             AND COALESCE(kind, 'backfill') = 'barrier'""",
+        (utc_now().isoformat(), token_use_id),
+    )
 
 
 async def record_confirmed_invite(

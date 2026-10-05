@@ -24,7 +24,7 @@ from ..services.member_expiry import (
     get_active_expiry_state,
     insert_pending_invite_reconciliation_row,
     record_confirmed_invite_extension,
-    resolve_invite_barrier,
+    resolve_invite_barrier_in_tx,
 )
 from ..services.team_clients import get_proxy_url as _get_proxy_url
 from ..services.seat_capacity import (
@@ -1544,9 +1544,8 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
         )
         latest = await _get_latest_token_use_by_id(token_use_id)
         if latest and latest.get("result") == "success":
-            # 这次兑换已经有终态，屏障可以撤了：这个人现在有正式的 member_expiry
-            # 记录，巡逻不会再把他当陌生对象。
-            await resolve_invite_barrier(token_use_id)
+            # 屏障已在结清这次兑换的同一事务里撤掉（extend_member_expiry →
+            # _finalize_token_use）：这个人现在有正式的 member_expiry 记录。
             counts["confirmed"] += 1
             try:
                 await log_operation(
@@ -1827,7 +1826,8 @@ async def resolve_pending_confirmation(
     grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
 
     if req.outcome == "success":
-        # 累加语义：绝不覆盖成员已有的到期时间。
+        # 累加语义：绝不覆盖成员已有的到期时间。屏障在结清兑换的同一事务里撤掉；
+        # 本地写入全部失败时兑换仍是 uncertain、屏障也还在，两者一起等兜底行结清。
         expires_iso = await record_confirmed_invite_extension(
             team_id,
             attempt.get("user_id") or "",
@@ -1837,7 +1837,6 @@ async def resolve_pending_confirmation(
             token_use_id=token_use_id,
             token_action="invited",
         )
-        await resolve_invite_barrier(token_use_id)
         await log_operation(
             team_id,
             "self_service_invite_admin_confirmed",
@@ -1888,8 +1887,6 @@ async def resolve_pending_confirmation(
             status_code=status.HTTP_409_CONFLICT,
             detail="这笔兑换刚刚被其他流程收尾了，请刷新后再看",
         )
-    # 屏障必须最后撤：撤掉之后巡逻才可以按常规规则处理远端可能残留的对象。
-    await resolve_invite_barrier(token_use_id)
     await log_operation(
         team_id,
         "self_service_invite_admin_released",
@@ -1949,6 +1946,9 @@ async def _release_uncertain_token_use(token_use_id: int, *, error_message: str)
                WHERE id = ? AND used_count = 1""",
             (row["token_id"],),
         )
+        # 屏障和退码同一事务提交：撤掉之后巡逻才可以按常规规则处理远端可能残留的
+        # 对象，所以绝不能先于退码撤；分两个事务时第二个一失败屏障就永远留着。
+        await resolve_invite_barrier_in_tx(db, token_use_id)
         await db.commit()
         return True
 

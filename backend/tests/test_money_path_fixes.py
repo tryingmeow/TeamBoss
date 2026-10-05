@@ -250,7 +250,7 @@ class BackfillResolvesOrphanedBarrierTest(_TempDbTest):
 
         调度器结清 backfill 行时会把这次兑换置成 success，
         ``reconcile_pending_redemptions`` 只扫 pending/uncertain，从此再也够不到
-        它，``resolve_invite_barrier`` 的唯一调用点也就永远不会触发。屏障留在
+        它，撤屏障的那一步也就永远不会触发。屏障留在
         resolved=0：auto_kick_job 对这个 (team,email) 永远 defer，patrol 又因为
         source='self_service' 不碰它——一份无限期免费的会员。
         """
