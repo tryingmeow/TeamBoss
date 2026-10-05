@@ -1,7 +1,6 @@
 import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
 import { KeyRound, Loader2, LogIn } from 'lucide-react';
 import {
-  clearStoredAdminApiKey,
   fetchAdminAccount,
   getStoredAdminApiKey,
   loginAdmin,
@@ -31,8 +30,10 @@ export default function AdminGate({ children }: AdminGateProps) {
         await fetchAdminAccount();
         if (mounted) setReady(true);
       } catch {
-        clearStoredAdminApiKey();
-        if (mounted) setReady(false);
+        if (mounted) {
+          setReady(false);
+          setError('登录验证暂时失败，请刷新页面重试。');
+        }
       }
     }
     checkStoredKey();
@@ -85,7 +86,7 @@ export default function AdminGate({ children }: AdminGateProps) {
           className="w-full px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
         />
 
-        {error && <div className="mt-3 text-sm text-red-500">{error}</div>}
+        {error && <div role="alert" className="mt-3 text-sm text-red-500">{error}</div>}
 
         <button
           type="submit"

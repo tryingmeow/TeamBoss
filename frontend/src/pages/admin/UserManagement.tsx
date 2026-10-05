@@ -641,14 +641,25 @@ function OwnerList({
 }) {
   const [owners, setOwners] = useState<OwnerRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     fetchOwners()
-      .then((res) => setOwners(res.items))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+      .then((res) => {
+        if (cancelled) return;
+        setOwners(res.items);
+        setLoadError('');
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : '加载失败');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [refreshTrigger]);
 
   const handleUpdateSeat = async (
@@ -693,6 +704,12 @@ function OwnerList({
 
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-slate-800">
+      {loadError && (
+        <div role="alert" className="flex items-center gap-3 border-b border-red-200 bg-red-50 px-6 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <span>管理员数据加载失败：{loadError}{owners.length > 0 ? '。以下为上次成功加载的数据。' : ''}</span>
+          <button type="button" disabled={loading} onClick={() => setRefreshTrigger((v) => v + 1)} className="ml-auto shrink-0 rounded border border-current px-3 py-1 disabled:opacity-50">重试</button>
+        </div>
+      )}
       <table className="w-full text-left text-sm text-gray-700 dark:text-slate-300">
         <thead className="bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-400">
           <tr>
@@ -707,6 +724,8 @@ function OwnerList({
         <tbody className="divide-y divide-gray-200 dark:divide-slate-800/50 bg-gray-50 dark:bg-slate-950/50">
           {loading ? (
             <tr><td colSpan={6} className="px-6 py-8 text-center">加载中...</td></tr>
+          ) : loadError && owners.length === 0 ? (
+            <tr><td colSpan={6} className="px-6 py-8 text-center text-red-600 dark:text-red-400">管理员数据未能加载，请重试</td></tr>
           ) : filteredOwners.length === 0 ? (
             <tr><td colSpan={6} className="px-6 py-8 text-center text-gray-400 dark:text-slate-500">暂无匹配的管理员</td></tr>
           ) : (
@@ -768,6 +787,8 @@ function MemberList({
   // owner_email 命中的整队人也一起捞出来。
   const [focusEmail, setFocusEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const latestLoad = useRef(0);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [copyingBindingEmail, setCopyingBindingEmail] = useState<string | null>(null);
   const [copiedBindingEmail, setCopiedBindingEmail] = useState<string | null>(null);
@@ -775,9 +796,12 @@ function MemberList({
   const kickPolicy = useKickPolicy();
 
   const fetchMembers = (showLoading = true) => {
+    const requestId = ++latestLoad.current;
     if (showLoading) setLoading(true);
     return fetchAllMembers({ includeOwners: true })
       .then((res) => {
+        if (requestId !== latestLoad.current) return;
+        setLoadError('');
         const items = res.items as AdminMemberRow[];
         // 老后端不返回 is_owner，也就不会因为 include_owners 多给 Owner 行；
         // 这里按"没标就是成员"处理，版本错位时列表内容与改动前一致。
@@ -798,14 +822,17 @@ function MemberList({
           showToast(`${failed.length} 个车队数据载入失败（${names}）`, 'error');
         }
       })
-      .catch(console.error)
+      .catch((err) => {
+        if (requestId === latestLoad.current) setLoadError(err instanceof Error ? err.message : '加载失败');
+      })
       .finally(() => {
-        if (showLoading) setLoading(false);
+        if (requestId === latestLoad.current) setLoading(false);
       });
   };
 
   useEffect(() => {
     fetchMembers();
+    return () => { latestLoad.current += 1; };
   }, [refreshTrigger]);
 
   useEffect(() => () => {
@@ -943,6 +970,12 @@ function MemberList({
 
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-slate-800">
+      {loadError && (
+        <div role="alert" className="flex items-center gap-3 border-b border-red-200 bg-red-50 px-6 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+          <span>成员数据加载失败：{loadError}{members.length > 0 ? '。以下为上次成功加载的数据。' : ''}</span>
+          <button type="button" disabled={loading} onClick={() => setRefreshTrigger((v) => v + 1)} className="ml-auto shrink-0 rounded border border-current px-3 py-1 disabled:opacity-50">重试</button>
+        </div>
+      )}
       {focusEmail && (
         <div className="flex items-center gap-2 border-b border-gray-200 dark:border-slate-800 bg-amber-50 dark:bg-amber-950/30 px-6 py-2 text-xs text-amber-800 dark:text-amber-200">
           <span>只看邮箱</span>
@@ -973,6 +1006,8 @@ function MemberList({
         <tbody className="divide-y divide-gray-200 dark:divide-slate-800/50 bg-gray-50 dark:bg-slate-950/50">
           {loading ? (
             <tr><td colSpan={8} className="px-6 py-8 text-center">加载中...</td></tr>
+          ) : loadError && members.length === 0 ? (
+            <tr><td colSpan={8} className="px-6 py-8 text-center text-red-600 dark:text-red-400">成员数据未能加载，请重试</td></tr>
           ) : filteredMembers.length === 0 ? (
             <tr><td colSpan={8} className="px-6 py-8 text-center text-gray-400 dark:text-slate-500">暂无匹配的成员</td></tr>
           ) : (

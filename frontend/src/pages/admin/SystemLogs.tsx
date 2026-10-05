@@ -48,6 +48,8 @@ function teamDisplayName(log: OperationLog): string {
 export default function SystemLogs({ embedded = false, scope, search: externalSearch }: SystemLogsProps = {}) {
   const [logs, setLogs] = useState<OperationLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [retryTrigger, setRetryTrigger] = useState(0);
   const [page, setPage] = useState(1);
   const [localSearch, setLocalSearch] = useState('');
   const [totalPages, setTotalPages] = useState(1);
@@ -73,6 +75,8 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     let cancelled = false;
 
     setLoading(true);
+    setLogs([]);
+    setLoadError('');
     fetchLogsApi({ page, per_page: 50, q: debouncedSearch, scope })
       .then(res => {
         if (cancelled) return;
@@ -80,7 +84,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
         setTotalPages(Math.max(1, res.total_pages || 1));
       })
       .catch(error => {
-        if (!cancelled) console.error(error);
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : '加载失败');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -89,7 +93,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     return () => {
       cancelled = true;
     };
-  }, [page, scope, debouncedSearch]);
+  }, [page, scope, debouncedSearch, retryTrigger]);
 
   const [exporting, setExporting] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
@@ -190,6 +194,12 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
       )}
 
       <div className="bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-xl overflow-hidden">
+        {loadError && (
+          <div role="alert" className="flex items-center gap-3 border-b border-red-200 bg-red-50 px-6 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
+            <span>日志加载失败：{loadError}</span>
+            <button type="button" disabled={loading} onClick={() => setRetryTrigger((v) => v + 1)} className="ml-auto shrink-0 rounded border border-current px-3 py-1 disabled:opacity-50">重试</button>
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm text-gray-700 dark:text-slate-300">
             <thead className="bg-gray-50 dark:bg-slate-950/50 text-gray-500 dark:text-slate-400">
@@ -206,6 +216,8 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
             <tbody className="divide-y divide-gray-200 dark:divide-slate-800/50">
               {loading ? (
                 <tr><td colSpan={7} className="px-6 py-8 text-center text-gray-500 dark:text-slate-400">正在加载日志...</td></tr>
+              ) : loadError ? (
+                <tr><td colSpan={7} className="px-6 py-8 text-center text-red-600 dark:text-red-400">日志未能加载，请重试</td></tr>
               ) : logs.length === 0 ? (
                 <tr><td colSpan={7} className="px-6 py-8 text-center text-gray-400 dark:text-slate-500">暂无日志</td></tr>
               ) : (
@@ -266,7 +278,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
         <div className="px-6 py-4 border-t border-gray-200 dark:border-slate-800 flex items-center justify-between bg-gray-50 dark:bg-slate-950/30">
           <button 
             onClick={() => setPage(p => Math.max(1, p - 1))}
-            disabled={page === 1}
+            disabled={loading || page === 1}
             className="px-3 py-1.5 text-sm bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-slate-300 rounded disabled:opacity-50"
           >
             上一页
@@ -274,7 +286,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
           <span className="text-sm text-gray-400 dark:text-slate-500">第 {page} 页</span>
           <button 
             onClick={() => setPage(p => p + 1)}
-            disabled={page >= totalPages}
+            disabled={loading || Boolean(loadError) || page >= totalPages}
             className="px-3 py-1.5 text-sm bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-slate-300 rounded disabled:opacity-50"
           >
             下一页
