@@ -167,7 +167,7 @@ async def get_logs(
                 t.status AS team_status
             {from_clause}
             {where_clause}
-            ORDER BY l.created_at DESC
+            ORDER BY l.created_at DESC, l.id DESC
             LIMIT ? OFFSET ?
             """,
             params + [per_page, offset]

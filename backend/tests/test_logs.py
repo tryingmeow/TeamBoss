@@ -222,6 +222,20 @@ class LogRouteQueryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["total"], len(union))
         self.assertEqual(len(page["logs"]), 2)
 
+    async def test_rows_with_the_same_timestamp_page_newest_id_first(self):
+        # The old client-side merge ordered by created_at, then id, both descending.
+        async with database.get_db() as db:
+            await db.executemany(
+                "INSERT INTO operation_logs (action, created_at) VALUES (?, '2026-02-01 00:00:00')",
+                [("tie_a",), ("tie_b",), ("tie_c",)],
+            )
+            await db.commit()
+        pages = [
+            [row["action"] for row in (await self.get(q_action=["tie_a", "tie_b", "tie_c"], per_page=1, page=n))["logs"]]
+            for n in (1, 2, 3)
+        ]
+        self.assertEqual(pages, [["tie_c"], ["tie_b"], ["tie_a"]])
+
 
 if __name__ == "__main__":
     unittest.main()
