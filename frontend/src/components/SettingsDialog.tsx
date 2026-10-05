@@ -325,7 +325,7 @@ export default function SettingsDialog({
               <div role="alert" className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-500/10 dark:text-red-300">
                 <AlertTriangle size={16} className="mt-0.5 shrink-0" />
                 <span className="min-w-0 flex-1">
-                  读取当前设置失败，暂时不能修改：这里只有默认值（包括 0 小时到期宽限），保存会覆盖服务器上的真实设置。
+                  读取当前设置失败，暂时不能修改：没读到服务器上的值，这时保存只会拿默认值（包括 0 小时到期宽限）覆盖它们。
                 </span>
                 <button
                   type="button"
