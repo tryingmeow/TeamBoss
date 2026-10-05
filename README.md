@@ -1,5 +1,11 @@
 # TeamBoss
 
+[![CI](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml/badge.svg)](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml)
+
+**English:** TeamBoss is a self-hosted admin panel for ChatGPT Team / Business workspaces (FastAPI + React, SQLite, Docker Compose). It puts seats, members, expiry and billing of multiple workspaces in one dashboard, with scheduled patrols, auto-removal of expired or unexpected members, self-service redemption codes and a Telegram bot. The UI and docs are in Chinese. It is unofficial and relies on ChatGPT's undocumented web endpoints. See the [getting-started guide](docs/getting-started.md) (Chinese) for a Docker Compose quickstart.
+
+---
+
 TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。用你自己的管理员账号登录后，它把多个团队的席位、成员、到期和账单集中到一个后台，并支持定时自动化与 Telegram 通知。后台会定时巡检各团队，发现计划外加入的成员时按你设定的规则移除。
 
 > 第一次用？跳到 **[上手指南](docs/getting-started.md)** —— 从 `.env` 到「后台里有一个能用的 Team、成员能自己兑换」，包含 session JSON 到底从哪里取。
@@ -11,7 +17,7 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
 
 1. 本项目仅供学习与技术研究，请勿用于任何非法用途。
 2. 本项目与 OpenAI 无任何关联，并非其官方产品，相关商标归各自所有者所有。
-3. 本项目所依赖的接口、成员操作方式及计费策略，均可能被官方随时调整，作者不保证功能的可用性、准确性与持续性。
+3. 本项目调用的是 ChatGPT 网页端的内部接口（非官方、无公开文档），这些接口可能在没有任何通知的情况下变更或失效。本项目所依赖的接口、成员操作方式及计费策略，均可能被官方随时调整，作者不保证功能的可用性、准确性与持续性。
 4. 项目内展示的席位、账单、金额、到期时间等数据仅供参考，一切以官方后台为准。
 5. 使用者应自行遵守所在地法律法规，以及与服务提供方之间的服务条款，并对自身使用行为负责。
 6. 因使用本项目而产生的任何直接或间接后果，包括但不限于账号异常、财务损失、数据丢失，均由使用者自行承担，作者不承担任何责任。
@@ -157,7 +163,7 @@ python scripts/backup.py --keep-count 20 --backup-dir /path/to/backups
 
 ### 恢复数据
 
-使用 `scripts/restore.sh` 恢复备份。恢复时必须停止后端写入；脚本会先校验数据库完整性或归档路径，再原子替换现有数据。
+使用 `scripts/restore.sh` 恢复备份。恢复时必须停止后端写入；脚本会先校验数据库完整性或归档路径，再原子替换现有数据。脚本默认检查 `auto-team.service` 是否在运行；服务名不同就用 `AUTO_TEAM_SERVICE=<服务名>` 指定，已确认停掉后端则加 `--skip-service-check` 跳过检查。
 
 Docker Compose 部署（备份文件位于数据卷的 `/app/data/backups/`）：
 
@@ -230,6 +236,33 @@ sudo systemctl start <服务名>
   妥善保管备份文件，建议定期离线备份到安全位置。
 - `.env`、数据库、会话文件、备份已被 git 和 Docker 构建上下文忽略，不会进仓库或镜像。
 - 首次启动后请通过后台修改密码 / 轮换 API Key，不要长期使用 `.env` 里的初始值。
+
+## 本地开发
+
+```bash
+# 后端（Python 3.12）
+cd backend
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+cp ../.env.example ../.env        # 填好 AUTO_TEAM_ADMIN_PASSWORD / AUTO_TEAM_API_KEY
+python run_server.py              # 读取仓库根目录 .env，默认监听 127.0.0.1:18087
+
+# 前端（另开终端）
+cd frontend
+npm ci
+npm run dev                       # http://localhost:5173
+```
+
+`npm run dev` 起的 Vite 开发服务器会把 `/api` 请求代理到后端：目标地址优先取 `VITE_API_BASE_URL`，否则用 `http://AUTO_TEAM_BACKEND_HOST:AUTO_TEAM_BACKEND_PORT`（默认 `127.0.0.1:18087`），这些变量都从仓库根目录的 `.env` 读取。前端端口可用 `AUTO_TEAM_FRONTEND_PORT` 改。
+
+后端测试：**务必用 `AUTO_TEAM_DATA_DIR` 指向一个临时目录**，否则数据目录会回退到 `backend/data/`，在已部署的机器上那就是真实数据库。测试包自带保护（未设置该变量时会自动改用临时目录），但显式指定更稳妥：
+
+```bash
+cd backend
+AUTO_TEAM_DATA_DIR=$(mktemp -d) python -m unittest discover -s tests
+```
+
+提交 PR 前请确认后端测试通过、`cd frontend && npm run build` 通过。CI 跑的就是这两项。漏洞请按 [SECURITY.md](./SECURITY.md) 私下报告，不要开公开 issue。
 
 ## 成熟度
 
