@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import database as app_database
@@ -381,6 +383,52 @@ class OtherRowsStayOpenTest(_RowsCase):
 
         self.assertEqual(self._rows(token_use_id), [("extend", 1), ("barrier", 1)])
         self._assert_bystanders_open(other_use_id)
+
+
+class ConfirmRacesRefundTest(_RowsCase):
+    """A refund commits after 确认成功 read the redemption but before its local write."""
+
+    def _confirm_after_refund(self, token_use_id):
+        real = member_expiry.record_confirmed_invite_extension
+
+        async def refund_then_write(*args, **kwargs):
+            conn = self._conn()
+            conn.execute(
+                "UPDATE access_token_uses SET result = 'failed', action = 'redeem_admin_released' "
+                "WHERE id = ?",
+                (token_use_id,),
+            )
+            conn.execute("UPDATE access_tokens SET used_count = 0")
+            conn.commit()
+            conn.close()
+            return await real(*args, **kwargs)
+
+        with (
+            patch.object(access_tokens, "record_confirmed_invite_extension", refund_then_write),
+            patch.object(member_expiry, "_CONFIRM_WRITE_BACKOFF_SECONDS", 0),
+        ):
+            return self._admin_confirm(token_use_id)
+
+    def _logged_actions(self):
+        conn = self._conn()
+        rows = conn.execute("SELECT action, result FROM operation_logs ORDER BY id").fetchall()
+        conn.close()
+        return [(r["action"], r["result"]) for r in rows]
+
+    def test_confirm_success_after_a_refund_answers_409_and_logs_no_success(self):
+        token_use_id = self._invite_confirmed_but_local_write_failed()
+        self._lock_interrupted(token_use_id)
+
+        with self.assertRaises(HTTPException) as caught:
+            self._confirm_after_refund(token_use_id)
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertIn("已被退码", caught.exception.detail)
+        self.assertNotIn(
+            "self_service_invite_admin_confirmed", [a for a, _ in self._logged_actions()]
+        )
+        self.assertEqual(self._use(token_use_id)["result"], "failed")
+        self.assertEqual(self._expiry_rows(), [])
 
 
 if __name__ == "__main__":

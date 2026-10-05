@@ -1851,6 +1851,17 @@ async def resolve_pending_confirmation(
             token_use_id=token_use_id,
             token_action="invited",
         )
+        # 本地写入对一笔已被别的路径结清的兑换什么都不写（例如退码先提交），却仍会
+        # 返回名义到期。按兑换的真实终态答复，不报成功、不记成功日志。
+        settled = await _get_latest_token_use_by_id(token_use_id)
+        if settled is None or settled.get("result") not in ("success", "uncertain"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"这笔兑换（兑换记录 #{token_use_id}）已被退码，未记入任何时长。"
+                    "请让客户用同一兑换码重新兑换，不要手动邀请或设置到期。"
+                ),
+            )
         await log_operation(
             team_id,
             "self_service_invite_admin_confirmed",
