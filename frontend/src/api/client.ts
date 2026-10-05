@@ -645,6 +645,8 @@ export interface MembershipTeamEntry {
   team_name: string | null;
   expires_at: string | null;
   is_owner: boolean;
+  /** 到期时间为空时的真实含义；缺失（老后端）时不得当永久。 */
+  expiry_state?: 'dated' | 'permanent' | 'external' | 'unrecorded';
   cache_updated_at: string | null;
 }
 

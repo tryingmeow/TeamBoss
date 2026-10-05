@@ -192,6 +192,14 @@ interface Membership {
   is_owner: boolean;
   expiry_state: 'dated' | 'permanent' | 'unmanaged';
   user_id: string | null;
+  public_expiry_state: NonNullable<MembershipTeamEntry['expiry_state']>;
+}
+
+function publicExpiryState(row: { expires_at: string | null; source: string | null }): NonNullable<MembershipTeamEntry['expiry_state']> {
+  if (row.expires_at) return 'dated';
+  if (row.source === 'detected') return 'external';
+  if (row.source === null) return 'unrecorded';
+  return 'permanent';
 }
 
 function membershipsOf(db: DemoDb, email: string): Membership[] {
@@ -206,6 +214,7 @@ function membershipsOf(db: DemoDb, email: string): Membership[] {
         is_owner: member.is_owner,
         expiry_state: expiryState(member),
         user_id: member.id,
+        public_expiry_state: publicExpiryState(member),
       });
       return;
     }
@@ -218,6 +227,7 @@ function membershipsOf(db: DemoDb, email: string): Membership[] {
         is_owner: false,
         expiry_state: expiryState(invite),
         user_id: null,
+        public_expiry_state: publicExpiryState(invite),
       });
     }
   });
@@ -410,6 +420,7 @@ function emailQuery(db: DemoDb, email: string): MembershipStatusResult {
     team_name: m.record.team.name,
     expires_at: m.expires_at,
     is_owner: m.is_owner,
+    expiry_state: m.public_expiry_state,
     cache_updated_at: m.record.cacheUpdatedAt,
   }));
   const first = entries[0];

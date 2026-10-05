@@ -17,6 +17,7 @@ import {
   queryMembershipStatus,
   redeemAccessToken,
   type MembershipInfo,
+  type MembershipTeamEntry,
   type MembershipStatusResult,
   type RedeemAccessTokenResult,
   type RedeemTeamChoice,
@@ -98,6 +99,18 @@ function choiceBlockedText(choice: RedeemTeamChoice): string | null {
   if (choice.blocked_reason === 'owner_email') return 'Owner 邮箱不支持自助续期';
   if (choice.blocked_reason === 'permanent_membership') return '永久有效，无需续期';
   return '该 Team 暂不支持续期';
+}
+
+/**
+ * 公开查询里没有到期时间时的说法。只有后端明确说 permanent 才写"永久有效"；
+ * 字段缺失（老后端）或其他情况一律不承诺永久。
+ */
+function noExpiryText(state: MembershipTeamEntry['expiry_state']): string {
+  return state === 'permanent' ? '永久有效' : '到期时间未登记，请联系管理员确认';
+}
+
+function membershipExpiryText(expiresAt: string | null, state: MembershipTeamEntry['expiry_state']): string {
+  return expiresAt ? formatExpiresAt(expiresAt) : noExpiryText(state);
 }
 
 function formatExpiresAt(value: string | null): string {
@@ -538,7 +551,7 @@ export default function JoinPage() {
                         <span className="block font-medium">{entry.team_name}</span>
                         <span className="block text-xs text-gray-500 dark:text-ink-400">
                           {entry.status === 'pending' ? '待接受 · ' : ''}
-                          {entry.expires_at ? `到期 ${formatExpiresAt(entry.expires_at)}` : '永不过期'}
+                          {entry.expires_at ? `到期 ${formatExpiresAt(entry.expires_at)}` : noExpiryText(entry.expiry_state)}
                         </span>
                       </Detail>
                     ))
@@ -548,7 +561,12 @@ export default function JoinPage() {
                         <Detail label="Team">{statusResult.membership.team_name}</Detail>
                       )}
                       {statusResult.membership.status !== 'absent' && (
-                        <Detail label="到期">{formatExpiresAt(statusResult.membership.expires_at)}</Detail>
+                        <Detail label="到期">
+                          {membershipExpiryText(
+                            statusResult.membership.expires_at,
+                            statusResult.membership.memberships?.[0]?.expiry_state,
+                          )}
+                        </Detail>
                       )}
                     </>
                   )}

@@ -234,6 +234,8 @@ class MembershipTeamEntry(BaseModel):
     team_name: Optional[str] = None
     expires_at: Optional[str] = None
     is_owner: bool = False
+    # 到期时间为空时的真实含义，见 _public_expiry_state；缺省 None = 老数据，不得当永久。
+    expiry_state: Optional[Literal["dated", "permanent", "external", "unrecorded"]] = None
     cache_updated_at: Optional[str] = None
 
 
@@ -621,6 +623,7 @@ async def _find_all_memberships(
                     "user_id": member.get("id") or "",
                     "is_owner": bool(member.get("is_owner")),
                     "expires_at": member.get("expires_at"),
+                    "source": member.get("source"),
                     "cache_updated_at": snapshot.get("updated_at"),
                 }
                 break
@@ -634,6 +637,7 @@ async def _find_all_memberships(
                         "user_id": "",
                         "is_owner": False,
                         "expires_at": invite.get("expires_at"),
+                        "source": invite.get("source"),
                         "cache_updated_at": snapshot.get("updated_at"),
                     }
                     break
@@ -1918,6 +1922,23 @@ async def query_self_service(req: QuerySelfServiceRequest, request: Request):
     }
 
 
+def _public_expiry_state(hit: dict[str, Any]) -> str:
+    """公开查询里"到期时间"的真实含义，规则与管理端 noExpiryKind 一致。
+
+    有到期时间 = dated；没有时看本地到期记录的 source：detected = external（面板外
+    加入，巡逻可能移出），无记录 = unrecorded，其余 = permanent（明确设成永久）。
+    只有 permanent 才允许对客户说"永久"。
+    """
+    if hit.get("expires_at"):
+        return "dated"
+    source = hit.get("source")
+    if source == "detected":
+        return "external"
+    if source is None:
+        return "unrecorded"
+    return "permanent"
+
+
 async def _query_membership_status(email: str, proof_token: Optional[str] = None):
     """Membership lookup core; callers apply their public endpoint limiter once.
 
@@ -1954,6 +1975,7 @@ async def _query_membership_status(email: str, proof_token: Optional[str] = None
             "team_name": hit["team"]["name"],
             "expires_at": hit.get("expires_at"),
             "is_owner": False,
+            "expiry_state": _public_expiry_state(hit),
             "cache_updated_at": hit.get("cache_updated_at"),
         }
         for hit in hits

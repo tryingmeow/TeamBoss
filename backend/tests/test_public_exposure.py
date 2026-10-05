@@ -113,7 +113,7 @@ class PublicLookupOwnerTest(unittest.IsolatedAsyncioTestCase):
         for entry in member["memberships"]:
             self.assertFalse(entry["is_owner"])
             self.assertEqual(
-                set(entry), {"status", "team_id", "team_name", "expires_at", "is_owner", "cache_updated_at"}
+                set(entry), {"status", "team_id", "team_name", "expires_at", "is_owner", "expiry_state", "cache_updated_at"}
             )
 
     async def test_status_endpoint_hides_the_owner_too(self):
