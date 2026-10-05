@@ -5,7 +5,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, status
 
 from ..chatgpt_limiter import run_chatgpt_call
-from ..database import log_operation
+from ..database import get_db, log_operation
 from ..member_cache_service import add_member_watch, fetch_and_cache_members, get_cached_members, update_cached_member_expiry
 from ..models import ChangeSeatRequest, ExtendExpiryRequest, InviteMemberRequest, SetExpiryRequest
 from ..services.member_expiry import (
@@ -158,6 +158,91 @@ _INVITE_EXISTING_MEMBER_DETAIL = (
 )
 _INVITE_LOOKUP_FAILED_DETAIL = "无法确认该邮箱是否已在此 Team（成员列表拉取失败），未发送邀请，请稍后重试"
 _INVITE_MEMBER_BUSY_DETAIL = "该邮箱的成员状态正在变更（续期、到期处理或巡逻进行中），未发送邀请，请稍后重试"
+_INVITE_OPEN_REDEMPTION_UNCERTAIN_DETAIL = (
+    "该邮箱在此 Team 有一笔兑换的邀请结果仍在确认中（兑换记录 #{token_use_id}），未发送邀请。"
+    "请先在「兑换码 → 待确认的兑换」里核实收尾：确认成功会按兑换码补齐时长，确认失败会退码。"
+    "收尾后再决定是否需要另行邀请。"
+)
+_INVITE_OPEN_REDEMPTION_PENDING_DETAIL = (
+    "该邮箱有一笔兑换正在处理（兑换记录 #{token_use_id}），未发送邀请。"
+    "请等它结束后刷新成员列表，再决定是否需要邀请；结果不明的兑换会转入「兑换码 → 待确认的兑换」。"
+)
+
+# 对账任务日后还会给这个 (Team, 邮箱) 记账的未结兑换，见 _refuse_if_open_redemption。
+# 两条腿：
+# * 兑换本身（access_token_uses）：pending 不论在哪个 Team（还没落 Team 的 lookup、
+#   以及被上游拒绝后会换到下一个 Team 重试的邀请，都可能落到这个 Team），uncertain
+#   只看这个 Team（结果不明的邀请钉死在原 Team，不会再换）。
+# * 兜底行（pending_invite_reconciliations 里未结清、挂着兑换凭据的 barrier / extend /
+#   backfill 行）：调度器回填时按凭据认领兑换，凭据仍是 pending/uncertain 就会记账。
+#   这些行和凭据在正常流程里 Team、邮箱一致；单独查一遍，是为了不依赖这份一致性。
+_OPEN_REDEMPTION_SQL = """
+    SELECT atu.id AS token_use_id, atu.result AS result
+      FROM access_token_uses atu
+     WHERE lower(atu.email) = ?
+       AND (atu.result = 'pending' OR (atu.result = 'uncertain' AND atu.team_id = ?))
+    UNION
+    SELECT atu.id AS token_use_id, atu.result AS result
+      FROM pending_invite_reconciliations r
+      JOIN access_token_uses atu ON atu.id = r.token_use_id
+     WHERE r.team_id = ? AND r.resolved = 0 AND lower(r.email) = ?
+       AND atu.result IN ('pending', 'uncertain')
+    ORDER BY token_use_id
+    LIMIT 1
+"""
+
+
+async def _open_redemption(team_id: str, email: str) -> dict | None:
+    """这个 (Team, 邮箱) 上对账日后还会记账的未结兑换，没有则 None。只读。"""
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return None
+    async with get_db() as db:
+        cursor = await db.execute(
+            _OPEN_REDEMPTION_SQL,
+            (normalized_email, team_id, team_id, normalized_email),
+        )
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def _refuse_if_open_redemption(team_id: str, email: str) -> None:
+    """邮箱有未结兑换时 409，什么都不写、不碰上游。
+
+    兑换邀请结果不明时码锁着、人可能已在 Team 里。管理员这时邀请或重发，会把这次
+    填的有效期写进到期记录；之后对账确认那笔兑换，又在上面累加一次兑换码的时长：
+    30 天码 + 管理员按 30 天补发 = 60 天。管理员唯一安全的出口是先给那笔兑换一个
+    终态（「待确认的兑换」确认成功 / 确认失败退码），所以这里拒绝，不替他合并。
+
+    必须在 team_invite_lock 和该邮箱的成员操作占用之内、发任何上游请求之前调用：
+    * 兑换的邀请分支只在同一把 team_invite_lock 里把兑换落到这个 Team、发邀请、
+      记账或锁成 uncertain；续期分支要拿同一个成员操作占用。所以检查之后直到本次
+      写完到期，没有兑换能在这个 Team 上为这个邮箱新开一笔或记账。
+    * 对账任务（兑换对账、调度器回填、管理员收尾）只结算检查时已经是
+      pending/uncertain 的兑换，那些在这里已经看得见、已经拒绝。
+    * 检查之后才发起的兑换，最早也要等本次写完到期才能在这个 Team 上记账，按累加
+      语义加在管理员这次的记录之上，与"管理员先邀请、客户后兑换"的串行顺序结果
+      相同：两笔都是真实授予，不是同一笔被记两次。
+    """
+    open_redemption = await _open_redemption(team_id, email)
+    if open_redemption is None:
+        return
+    token_use_id = open_redemption["token_use_id"]
+    template = (
+        _INVITE_OPEN_REDEMPTION_UNCERTAIN_DETAIL
+        if open_redemption["result"] == "uncertain"
+        else _INVITE_OPEN_REDEMPTION_PENDING_DETAIL
+    )
+    detail = template.format(token_use_id=token_use_id)
+    await log_operation(
+        team_id,
+        "invite_member",
+        email,
+        f"open_redemption token_use_id={token_use_id} result={open_redemption['result']}",
+        "skipped",
+        detail,
+    )
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
 async def _pending_invite_or_refuse_member(team_id: str, client, email: str) -> dict | None:
@@ -316,6 +401,8 @@ async def invite_member(team_id: str, req: InviteMemberRequest):
 
 async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires_in: str, expires_at):
     """``invite_member`` 在 team_invite_lock 与成员操作占用之内的部分。"""
+    # 新邀请和重发都先过这一关：有对账日后还会记账的兑换就 409，见函数注释。
+    await _refuse_if_open_redemption(team_id, req.email)
     client = await get_team_client(team_id)
     # 正式成员 409、待接受邀请按重发处理、拉不到名单失败关闭，见函数注释。
     pending_invite = await _pending_invite_or_refuse_member(team_id, client, req.email)
