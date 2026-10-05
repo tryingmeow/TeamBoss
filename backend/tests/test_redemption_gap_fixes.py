@@ -330,7 +330,7 @@ class ConsumptionMarkedBeforeMutationTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(consumption.confirmed)
 
 
-# ── 缺口 6：没指定车队时，拿锁后要重新全量扫描 ───────────────────────────
+# ── 缺口 6：没指定 Team 时，拿锁后要重新全量扫描 ───────────────────────────
 
 class RescanAfterClaimTest(unittest.IsolatedAsyncioTestCase):
     async def test_second_team_appearing_during_the_window_asks_the_user(self):

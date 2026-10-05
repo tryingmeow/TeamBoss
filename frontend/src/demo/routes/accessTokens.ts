@@ -102,7 +102,7 @@ function listTokens(ctx: DemoContext): DemoResponse {
 
 function disableToken(ctx: DemoContext): DemoResponse {
   const token = ctx.db.tokens.find((t) => t.id === Number(ctx.params.tokenId));
-  if (!token) return fail(404, 'Token not found');
+  if (!token) return fail(404, '兑换码不存在');
   token.disabled = true;
   return ok();
 }
@@ -265,17 +265,17 @@ function redeem(ctx: DemoContext): DemoResponse {
   const tokenText = bodyString(ctx, 'token').trim();
   const teamId = bodyString(ctx, 'team_id').trim();
   if (!EMAIL_RE.test(email)) return fail(400, '邮箱格式无效');
-  if (!tokenText) return fail(400, 'Token 不能为空');
+  if (!tokenText) return fail(400, '兑换码不能为空');
 
   const stored = db.tokens.find((t) => t.token === tokenText);
   const lower = tokenText.toLowerCase();
   const isMulti = !stored && lower.startsWith('atm_multi');
-  if (!stored && !isMulti && !lower.startsWith('atm_demo')) return fail(401, 'Token 无效');
+  if (!stored && !isMulti && !lower.startsWith('atm_demo')) return fail(401, '兑换码无效');
   if (stored) {
     const state = tokenStatus(db, stored).status;
-    if (state === 'used' || state === 'pending_confirmation') return fail(409, 'Token 已用完');
-    if (state === 'disabled') return fail(403, 'Token 已禁用');
-    if (state === 'expired') return fail(410, 'Token 已过期');
+    if (state === 'used' || state === 'pending_confirmation') return fail(409, '兑换码已用完');
+    if (state === 'disabled') return fail(403, '兑换码已禁用');
+    if (state === 'expired') return fail(410, '兑换码已过期');
   }
   const grant = stored?.grant_expires_in ?? '30d';
   const grantMs = grant === 'never' ? null : durationMs(grant);

@@ -627,7 +627,7 @@ async def init_database():
             ("tg_summary_last_sent_at", ""), # 最近一次成功摘要推送时间
             ("patrol_kick_enabled", "0"),    # 巡逻踢人：'0'=空跑演练 '1'=真踢
             ("patrol_baseline_at", ""),      # 祖父基线时间戳；为空时巡逻强制空跑（未保护现有成员前绝不真踢）
-            ("patrol_exempt_team_ids", "[]"),# 永不自动踢的车队 id 列表（JSON 数组）
+            ("patrol_exempt_team_ids", "[]"),# 永不自动踢的 Team id 列表（JSON 数组）
             # 严格模式：忽略超员判定 + Codex 豁免，把所有非系统拉入的人一律列为候选。
             # 独立危险开关，默认关闭；即便开启，仍受基线保护/豁免名单/踢人延迟/批量护栏约束。
             ("patrol_strict_mode_enabled", "0"),

@@ -239,7 +239,7 @@ def report_team_failure_sync(
     try:
         label = _ALERT_LABELS.get(alert_key, alert_key)
         lines = [
-            f"🏢 车队：{team_name}",
+            f"🏢 Team：{team_name}",
             f"🏷️ 类型：{label}",
             f"🔗 来源：{source}",
             f"📝 错误：{error_text}",
@@ -325,7 +325,7 @@ def report_team_recovery_sync(team_id: str, alert_key: str, *, source: str) -> d
             text = detail_card(
                 "✅ Team 恢复",
                 (
-                    f"🏢 车队：{team_name}",
+                    f"🏢 Team：{team_name}",
                     f"🏷️ 类型：{label}",
                     f"🔗 来源：{source}",
                     f"📈 状态：连续失败 {int(row['failure_count'] or 1)} 次后恢复",

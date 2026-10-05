@@ -280,7 +280,7 @@ class PatrolTest(unittest.TestCase):
         self.assertEqual(len(dryrun_logs), 1)
         self.assertEqual(dryrun_logs[0]["result"], "dryrun")
 
-    # ── 额外：豁免车队即便超额也绝不自动处理 ─────────────────────────────
+    # ── 额外：豁免 Team 即便超额也绝不自动处理 ─────────────────────────────
 
     def test_run_patrol_never_touches_exempt_team(self):
         conn = self._conn()

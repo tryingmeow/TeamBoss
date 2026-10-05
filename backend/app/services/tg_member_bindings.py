@@ -327,7 +327,7 @@ def _reminder_text(
         title = "⚠️ 已进入系统宽限期"
         rows = (
             f"👤 邮箱：{email}",
-            f"🏢 车队：{team_name}",
+            f"🏢 Team：{team_name}",
             f"📅 服务到期：{_format_local(expires_at)}（北京时间）",
             f"🗑️ 预计移除：{_format_local(effective_kick_at)}（北京时间）",
         )
@@ -336,7 +336,7 @@ def _reminder_text(
         title = f"⏰ 服务将在 {stage_label}内到期"
         rows = (
             f"👤 邮箱：{email}",
-            f"🏢 车队：{team_name}",
+            f"🏢 Team：{team_name}",
             f"📅 服务到期：{_format_local(expires_at)}（北京时间）",
         )
         footer = "ℹ️ 系统宽限期不计入购买时长，请及时续期。"
@@ -422,7 +422,7 @@ def run_member_expiry_reminders_sync(
 
             text = _reminder_text(
                 email=email,
-                team_name=str(row["team_name"] or row["team_id"] or "未知车队"),
+                team_name=str(row["team_name"] or row["team_id"] or "未知 Team"),
                 expires_at=expires_at,
                 effective_kick_at=effective_kick_at,
                 reminder_key=reminder_key,

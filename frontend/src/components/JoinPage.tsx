@@ -49,7 +49,8 @@ const FIELD_LABEL = 'mb-1.5 flex items-baseline gap-1.5 text-sm font-medium text
 const FIELD_INPUT = cn(INPUT, 'py-2.5 text-base sm:text-sm');
 
 /**
- * Backend messages still say "Token" and 车队 ("Token 无效"); this page says 兑换码 and Team.
+ * Current backend messages already say 兑换码 and Team. This only normalises the older
+ * wording ("Token 无效", 车队) that can still sit in stored redemption history.
  * Only "Token" followed by Chinese is rewritten, so upstream English errors stay intact.
  */
 function friendlyError(message: string): string {

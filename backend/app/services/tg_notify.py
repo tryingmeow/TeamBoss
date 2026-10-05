@@ -165,7 +165,7 @@ def notify_admins_sync(text: str, *, parse_mode: Optional[str] = None) -> int:
 
 def _team_name_sync(team_id: Optional[str]) -> str:
     if not team_id:
-        return "未知车队"
+        return "未知 Team"
     try:
         conn = sqlite3.connect(get_db_path())
         try:
@@ -193,7 +193,7 @@ def notify_member_event_sync(
     icon = "✅" if ok else "❌"
     target = (email or "未知成员").strip()
     rows = [
-        f"🏢 车队：{_team_name_sync(team_id)}",
+        f"🏢 Team：{_team_name_sync(team_id)}",
         f"👤 成员：{target}",
         f"🔗 来源：{source}",
     ]

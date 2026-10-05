@@ -111,7 +111,7 @@ class AccessTokenListItem(BaseModel):
 class RedeemAccessTokenRequest(BaseModel):
     email: str
     token: str
-    # 一人多车队时由前端回传用户选中的车队；服务端会重新核对这个车队仍然在
+    # 一人多 Team 时由前端回传用户选中的 Team；服务端会重新核对这个 Team 仍然在
     # 该邮箱的成员列表里，不信任前端给的值。这个值会进兑换审计行、并被
     # 后续查询当成"这张码落在哪个队"的定位键，所以先卡长度：兑换接口匿名可调，
     # 不能让任意长度的字符串落库再被原样读回。
@@ -140,7 +140,7 @@ class RedeemAccessTokenResponse(BaseModel):
     email: str
     expires_at: Optional[str]
     message: str
-    # 仅 team_selection_required 时非空：让用户点一个车队再重新提交。
+    # 仅 team_selection_required 时非空：让用户点一个 Team 再重新提交。
     choices: list[RedeemTeamChoice] = Field(default_factory=list)
 
 
@@ -300,7 +300,7 @@ async def _history_proof_accepted(email: str, raw_token: Optional[str]) -> bool:
     """出示的兑换码是否确实是这个邮箱自己用过的码。
 
     ``/status`` 和 ``/query`` 是匿名接口：只给一个邮箱地址就能拿到该邮箱最近的
-    兑换记录（动作、结果、车队、码前缀、面额、到期时间、报错原文、时间戳），等于
+    兑换记录（动作、结果、Team、码前缀、面额、到期时间、报错原文、时间戳），等于
     任何人猜中邮箱就能看别人的消费流水。成员身份和到期时间照旧公开（用户要靠它
     自查），历史则要求出示凭据：这张码必须存在，且这张码的使用记录就落在这个邮箱
     名下。
@@ -356,7 +356,7 @@ class _TokenConsumption:
     """标记这次兑换有没有跨过"不可回滚"的那个点。
 
     ``confirm()`` 必须是同步的、并且在**外部副作用刚刚生效的那一行**就调用：
-    OpenAI 邀请一旦成功，人就已经在车队里了，这次兑换码的消耗就已经成立，之后
+    OpenAI 邀请一旦成功，人就已经在 Team 里了，这次兑换码的消耗就已经成立，之后
     的落库/日志/缓存/通知再怎么炸也不能把码退回去（退回 = 同一张码能再用一次）。
     """
 
@@ -404,7 +404,7 @@ async def _reserve_token_use(
         )
         if cursor.rowcount != 1:
             await db.rollback()
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Token 已用完")
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="兑换码已用完")
         cursor = await db.execute(
             """INSERT INTO access_token_uses
                (token_id, email, action, team_id, user_id, expires_at, result,
@@ -445,7 +445,7 @@ async def _fail_and_release_token_use(
     ``success`` 都拒绝释放，避免结果不确定时双花。
 
     ``result_value`` 只允许 ``failed`` 或 ``notice``。``notice`` 用于"这次调用
-    没出错、只是还需要用户补一个选择"的中断（多车队选择提示）：码同样退回，但
+    没出错、只是还需要用户补一个选择"的中断（多 Team 选择提示）：码同样退回，但
     这行不是失败，公开兑换历史里不能给用户挂一条红色失败记录。它绝不能写成
     ``pending``/``uncertain``——那两个值代表"结果未定、码仍被锁"，会让查询接口
     把一张已退回的码显示成"结果确认中"。
@@ -492,7 +492,7 @@ async def _fail_and_release_token_use(
 async def _load_token(raw_token: str) -> dict[str, Any]:
     token = (raw_token or "").strip()
     if not token:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token 不能为空")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="兑换码不能为空")
 
     async with get_db() as db:
         cursor = await db.execute(
@@ -502,18 +502,18 @@ async def _load_token(raw_token: str) -> dict[str, Any]:
         row = await cursor.fetchone()
 
     if not row:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token 无效")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="兑换码无效")
 
     token_row = dict(row)
     if token_row.get("disabled"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token 已禁用")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="兑换码已禁用")
 
     expires_at = parse_optional_datetime(token_row.get("token_expires_at"))
     if expires_at and expires_at <= utc_now():
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Token 已过期")
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="兑换码已过期")
 
     if int(token_row.get("used_count") or 0) >= 1:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Token 已用完")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="兑换码已用完")
 
     return token_row
 
@@ -627,14 +627,14 @@ async def _resolve_email_status(
 ) -> dict[str, Any]:
     """这张兑换码对应邮箱的当前状态。
 
-    ``team_id`` 是这次兑换实际落到的车队。一人多车队时必须按它限定范围，否则
-    跨车队取第一命中会把别的队的状态/到期时间贴到这张码上。
+    ``team_id`` 是这次兑换实际落到的 Team。一人多 Team 时必须按它限定范围，否则
+    跨 Team 取第一命中会把别的队的状态/到期时间贴到这张码上。
     """
     if not email:
         return {"status": "unknown", "status_label": _email_status_label("unknown")}
 
     scoped_team_id = (team_id or "").strip()
-    # 限定的车队已经不在活跃列表里（暂停/下架/删除）时，我们没有任何数据源能
+    # 限定的 Team 已经不在活跃列表里（暂停/下架/删除）时，我们没有任何数据源能
     # 判断这个人还在不在——既不能跨队去别的队取答案（那正是加 scope 要挡的），
     # 也不能因此说"未找到"：那等于告诉一个正常成员他的会员不存在。
     scoped_team_missing = False
@@ -1182,9 +1182,9 @@ async def _get_latest_token_use_by_id(token_use_id: int) -> Optional[dict[str, A
 async def _build_team_choices(
     email: str, memberships: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """多车队选择提示里每个车队一项。
+    """多 Team 选择提示里每个 Team 一项。
 
-    除了车队名和到期时间，还要带上"这个队到底能不能续"：Owner 邮箱和永久成员
+    除了 Team 名和到期时间，还要带上"这个队到底能不能续"：Owner 邮箱和永久成员
     点下去必然 409，不能只画一个看起来可点的按钮。``expiry_state`` 则用来区分
     两种同样显示"没有到期时间"的情况——本地记录为永久（续期被拒），和本地根本
     没有记录（续期会新建一条到期即踢的记录，等于给一个原本不受管的人装上倒计时）。
@@ -1226,10 +1226,10 @@ async def _renew_existing_membership(
 ) -> Optional[dict[str, Any]]:
     """续期前与踢人任务互斥，并在拿锁后重新确认远端成员仍存在。
 
-    ``rescan_teams``：只有"用户没有指定车队"的路径需要传。第一次全量扫描发生在
-    拿锁之前，这中间用户可能又进了第二个车队；续期是花钱操作，落到哪个队不能替
-    用户猜，所以拿锁后要按这份车队列表重新全量扫一遍。扫出多个身份就退回选择提示
-    （返回 ``{"needs_selection": [...]}``）。用户已经显式选过车队的路径不传，继续
+    ``rescan_teams``：只有"用户没有指定 Team"的路径需要传。第一次全量扫描发生在
+    拿锁之前，这中间用户可能又进了第二个 Team；续期是花钱操作，落到哪个队不能替
+    用户猜，所以拿锁后要按这份 Team 列表重新全量扫一遍。扫出多个身份就退回选择提示
+    （返回 ``{"needs_selection": [...]}``）。用户已经显式选过 Team 的路径不传，继续
     只复查目标队。
     """
     team = existing["team"]
@@ -1364,7 +1364,7 @@ async def disable_access_token(token_id: int):
         )
         await db.commit()
         if cursor.rowcount != 1:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="兑换码不存在")
     return {"status": "ok"}
 
 
@@ -1583,19 +1583,19 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="没有可用 Team")
 
         # 一个邮箱同时在多个 Team：续期落到哪个 Team 不能替用户猜——这是花钱的
-        # 操作，猜错等于把时长记到别的队上。让用户自己选，选完的车队在这里按刚拉到
+        # 操作，猜错等于把时长记到别的队上。让用户自己选，选完的 Team 在这里按刚拉到
         # 的实时成员列表重新核对一遍；不匹配（比如选完之前刚被踢）就退回兑换码。
         selected_team_id = (req.team_id or "").strip()
 
-        # 用户已经选定车队时，只实时拉这一个队：其余队的成员列表对这次续期没有
+        # 用户已经选定 Team 时，只实时拉这一个队：其余队的成员列表对这次续期没有
         # 任何影响，而 _find_all_memberships 是 fail-closed 的——多拉一个无关的队
         # 只会多一次上游请求，并让那个队的会话失效把这次续期一起打成 503。
-        # （只有"没指定车队"的路径才需要全量扫描：那条路径可能走到新邀请，
+        # （只有"没指定 Team"的路径才需要全量扫描：那条路径可能走到新邀请，
         #   邀请前必须确认这个邮箱不在任何一个 Team 里。）
         if selected_team_id:
             lookup_teams = [team for team in teams if team["id"] == selected_team_id]
             if not lookup_teams:
-                # 前端回传了一个不属于任何活跃车队的 id。别把这个来路不明的字符串
+                # 前端回传了一个不属于任何活跃 Team 的 id。别把这个来路不明的字符串
                 # 写进审计行——它之后会被当作"这张码落在哪个队"的定位键读回。
                 failure_recorded = await _fail_and_release_token_use(
                     token_use_id,
@@ -1604,7 +1604,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                 )
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="所选车队当前不可用，请重新查询后再兑换。兑换码未使用。",
+                    detail="所选 Team 当前不可用，请重新查询后再兑换。兑换码未使用。",
                 )
         else:
             lookup_teams = teams
@@ -1620,7 +1620,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="所选车队已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。",
+                detail="所选 Team 已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。",
             )
 
         if len(memberships) > 1:
@@ -1639,7 +1639,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                 "team_name": None,
                 "email": email,
                 "expires_at": None,
-                "message": "该邮箱同时在多个车队中，请选择要续期的车队后再提交。兑换码未使用。",
+                "message": "该邮箱同时在多个 Team 中，请选择要续期的 Team 后再提交。兑换码未使用。",
                 "choices": choices,
             }
 
@@ -1678,7 +1678,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                     detail="该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。",
                 )
             if renewed and renewed.get("needs_selection"):
-                # 拿锁后重扫才出现的第二个车队：与拿锁前发现多队走完全一样的出口。
+                # 拿锁后重扫才出现的第二个 Team：与拿锁前发现多队走完全一样的出口。
                 choices = await _build_team_choices(email, renewed["needs_selection"])
                 failure_recorded = await _fail_and_release_token_use(
                     token_use_id,
@@ -1694,7 +1694,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                     "team_name": None,
                     "email": email,
                     "expires_at": None,
-                    "message": "该邮箱同时在多个车队中，请选择要续期的车队后再提交。兑换码未使用。",
+                    "message": "该邮箱同时在多个 Team 中，请选择要续期的 Team 后再提交。兑换码未使用。",
                     "choices": choices,
                 }
 
@@ -1733,7 +1733,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
 
             if selected_team_id:
                 # 拿到 claim 后重新确认时人已经不在这个队了（拿锁期间被巡检/到期
-                # 任务踢掉）。这条路绝不能往下走到新邀请分支：用户明确指定了车队，
+                # 任务踢掉）。这条路绝不能往下走到新邀请分支：用户明确指定了 Team，
                 # 而下面的 _invite_to_available_team 会按空位多少挑一个队，等于拿
                 # 用户花钱的码把人塞进一个他没选的队。按既定规则失败退码。
                 failure_recorded = await _fail_and_release_token_use(
@@ -1744,7 +1744,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
                 )
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="所选车队中的成员身份刚刚失效，请重新查询后再兑换。兑换码未使用。",
+                    detail="所选 Team 中的成员身份刚刚失效，请重新查询后再兑换。兑换码未使用。",
                 )
 
         # 消耗标记不能等这个函数返回再打：邀请在函数内部就已经不可回滚了，
@@ -1799,7 +1799,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
         # except Exception 接不住它）——都不会把已消耗的 token 退回去。
         if not consumption.confirmed and not failure_recorded:
             # 走到这里要么是异常正在向外传播，要么是进程/连接被掐断——两种情况都
-            # 还没把占用退回去。已经显式退过的路径（含多车队选择提示这种正常返回）
+            # 还没把占用退回去。已经显式退过的路径（含多 Team 选择提示这种正常返回）
             # 由 failure_recorded 挡在外面：那行已经不是 pending，再退一次只是白拿
             # 一次写锁。所以下面吞掉的只可能是"退回动作自己"引发的新异常，不会把
             # 一次成功的返回悄悄改成失败。

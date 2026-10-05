@@ -131,7 +131,7 @@ async def health_check(is_admin: bool = Depends(_is_admin_request)):
     Comprehensive health check endpoint.
 
     公网可裸调，但只返回粗粒度状态（status/version/timestamp）——这个服务是公网可
-    访问的，逐组件的错误信息可能带出数据库路径、车队数量等内部细节。带管理员凭据
+    访问的，逐组件的错误信息可能带出数据库路径、Team 数量等内部细节。带管理员凭据
     调用才返回 components 明细。
 
     Returns a tiered status (healthy/degraded/unhealthy) with details on:

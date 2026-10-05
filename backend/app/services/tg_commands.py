@@ -34,17 +34,17 @@ MEMBER_COMMANDS = [
 ]
 
 ADMIN_COMMANDS = [
-    {"command": "status", "description": "列出车队，可加 all/idle/busy"},
+    {"command": "status", "description": "列出 Team，可加 all/idle/busy"},
     {"command": "watch", "description": "查看超员风险和观察名单"},
     {"command": "billing", "description": "查看财务概览和告警"},
     {"command": "logs", "description": "查看最近操作日志"},
     {"command": "m_logs", "description": "查看最近人员日志"},
-    {"command": "team", "description": "查看车队详情：/team 名字"},
+    {"command": "team", "description": "查看 Team 详情：/team 名字"},
     {"command": "info", "description": "查询成员信息和到期时间"},
     {"command": "members", "description": "成员列表和关键词查询"},
     {"command": "owners", "description": "车主列表和关键词查询"},
     {"command": "patrol", "description": "控制巡逻自动踢人"},
-    {"command": "invite", "description": "邀请成员到指定车队"},
+    {"command": "invite", "description": "邀请成员到指定 Team"},
     {"command": "kick", "description": "从成员列表选择并踢出"},
     {"command": "q", "description": "取消当前向导"},
     {"command": "pair", "description": "绑定成员邮箱或更新身份"},

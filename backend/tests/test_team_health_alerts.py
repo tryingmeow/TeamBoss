@@ -115,7 +115,7 @@ class TeamHealthAlertsTest(unittest.TestCase):
         self.assertEqual(repeated["reason"], "deduplicated")
         self.assertEqual(len(self.messages), 1)
         self.assertIn("🚨 Team 异常", self.messages[0])
-        self.assertIn("🏢 车队：Test Team", self.messages[0])
+        self.assertIn("🏢 Team：Test Team", self.messages[0])
         self.assertEqual(self._incident()["failure_count"], 2)
 
         recovered = team_health_alerts.report_team_recovery_sync(

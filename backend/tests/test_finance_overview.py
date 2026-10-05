@@ -108,6 +108,27 @@ class FinanceOverviewTest(unittest.TestCase):
         self.assertIsNone(team["monthly_total_native"])
         self.assertIsNone(team["monthly_total_base"])
 
+    def test_low_balance_alert_reads_like_the_ui(self):
+        self._insert_team(
+            id="team-low",
+            name="Low Team",
+            owner_email="owner4@example.com",
+            billing_period="monthly",
+            billing_currency="USD",
+            billing_symbol="$",
+            price_per_seat=25.0,
+            seats_entitled=2,
+            seats_in_use=1,
+            balance="-300.0000",
+            will_renew=1,
+            active_until=_iso_in_days(30),
+        )
+
+        result = asyncio.run(get_overview())
+
+        details = [a["detail"] for a in result["alerts"] if a["type"] == "low_balance"]
+        self.assertEqual(details, ["Credit 余额 -$300 低于阈值 $0"])
+
     def test_missing_currency_balance_and_renewal_are_not_fabricated(self):
         self._insert_team(
             id="team-missing",

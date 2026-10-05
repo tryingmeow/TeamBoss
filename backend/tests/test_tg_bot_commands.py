@@ -133,7 +133,7 @@ class TelegramBotMessageStyleTest(unittest.TestCase):
         with patch.object(tg_bot, "_api_get", return_value=payload):
             text = tg_bot.cmd_watch({}, "")
 
-        self.assertIn("⚠️ 风险车队", text)
+        self.assertIn("⚠️ 风险 Team", text)
         self.assertIn("│ 🔴 超员：1", text)
         self.assertIn("│ 🟡 观察：1", text)
         self.assertIn("🔴 workspace", text)

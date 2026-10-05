@@ -21,6 +21,7 @@ import type {
 } from '../api/client';
 import type { DemoDb, DemoInvite, DemoMember, DemoTeam } from './db';
 import { FX_RATES, TEAM_SPECS, teamIdFor } from './seed';
+import { formatMoney } from '../lib/money';
 import { DAY, HOUR, dateOnly, isoAt, shanghaiLocal } from './time';
 
 // ── Teams & members ──
@@ -516,10 +517,6 @@ function latestInvoice(record: DemoTeam, base: string): FinanceLatestInvoice | n
   };
 }
 
-function pythonFloat(value: number): string {
-  return Number.isInteger(value) ? value.toFixed(1) : String(value);
-}
-
 export function financeOverview(db: DemoDb): FinanceOverview {
   const base = db.finance.base_currency;
   const threshold = db.finance.low_balance_threshold;
@@ -563,7 +560,7 @@ export function financeOverview(db: DemoDb): FinanceOverview {
     if (balance !== null && Number.isFinite(balance) && balance < threshold) {
       alerts.push({
         type: 'low_balance', team_id: team.id, team_name: team.name,
-        detail: `Credit ${balance.toFixed(2)} 低于阈值 ${pythonFloat(threshold)}`,
+        detail: `Credit 余额 ${formatMoney(balance, team.billing_symbol || team.billing_currency)} 低于阈值 ${formatMoney(threshold, team.billing_symbol || team.billing_currency)}`,
       });
     }
     if (team.discount_expires_at) {
@@ -573,7 +570,7 @@ export function financeOverview(db: DemoDb): FinanceOverview {
       }
     }
     if (team.status === 'token_expired') {
-      alerts.push({ type: 'token_expired', team_id: team.id, team_name: team.name, detail: 'Token 已过期，需要重新认证' });
+      alerts.push({ type: 'token_expired', team_id: team.id, team_name: team.name, detail: 'Session 已失效，需要重新导入' });
     }
     if (team.subscription_status === 'expired') {
       alerts.push({ type: 'subscription_expired', team_id: team.id, team_name: team.name, detail: 'Team 订阅已到期' });

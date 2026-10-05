@@ -4,8 +4,8 @@
 
 设计要点：
 - 只在以下条件全部成立时才会把某个成员当作"候选":
-    1. 车队 is_codex_enabled == 0（codex 开的车队完全跳过踢人，只算风险）
-    2. 车队 id 不在 settings.patrol_exempt_team_ids（豁免名单）里
+    1. Team is_codex_enabled == 0（codex 开的 Team 完全跳过踢人，只算风险）
+    2. Team id 不在 settings.patrol_exempt_team_ids（豁免名单）里
     3. member_cache 有数据且非空（冷启动/缓存缺失一律跳过整队，绝不动手）
     4. active_chatgpt > seats_entitled（over_by > 0，否则最多是 watch，不踢）
     5. member.seat_type == 'default' 且 member.is_owner is False
@@ -498,7 +498,7 @@ def _already_flagged_strict_sync(conn: sqlite3.Connection, team_id: str, email: 
 
 def classify_team(*, team_id: str, name: str, codex_enabled: bool,
                    seats_entitled: int, members: Any) -> dict:
-    """纯函数：给定车队 + 成员快照，算出风险等级和"会被踢的候选"，不做任何写操作。
+    """纯函数：给定 Team + 成员快照，算出风险等级和"会被踢的候选"，不做任何写操作。
 
     risk：codex 开 = 'ok'（不管超没超）；codex 关且未超 = 'watch'；codex 关且超 = 'over'。
     detected_over 只在 risk == 'over' 时给出（即真正会被 run_patrol 选中踢除的候选）。
@@ -1137,9 +1137,9 @@ def _patrol_strict_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id
 def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
     """跑一轮巡逻。返回 {"events": [...], "kicked": int, "would_kick": int, ...}。
 
-    events 里每条要么是某个候选的踢人/预演动作记录，要么是豁免车队的
-    "exempt_skip" 摘要（豁免车队从不实际处理候选，只上报供人工核查）。
-    每个 risk == 'over' 的车队（无论 dry-run 还是真踢、无论是否豁免）都会
+    events 里每条要么是某个候选的踢人/预演动作记录，要么是豁免 Team 的
+    "exempt_skip" 摘要（豁免 Team 从不实际处理候选，只上报供人工核查）。
+    每个 risk == 'over' 的 Team（无论 dry-run 还是真踢、无论是否豁免）都会
     经 notify_admins_sync 推一条摘要给 TG 管理员。
 
     ``allow_team_ids`` 是**白名单**，必传：只有本轮刚刚成功刷新过快照的 team 才
@@ -1223,7 +1223,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                     )
                 continue
 
-            # 冷启动/缓存缺失守卫：绝不对没有新鲜成员数据的车队动手。
+            # 冷启动/缓存缺失守卫：绝不对没有新鲜成员数据的 Team 动手。
             cache_row = conn.execute(
                 "SELECT members_json, pending_json FROM member_cache WHERE team_id = ?", (team_id,)
             ).fetchone()
@@ -1255,7 +1255,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                     if is_exempt:
                         rows = [
                             "📨 陌生邀请：" + "、".join(c.get("email") or "?" for c in invite_candidates),
-                            "🛡️ 处理状态：车队已豁免，未自动处理",
+                            "🛡️ 处理状态：Team 已豁免，未自动处理",
                         ]
                         notify_admins_sync(detail_card(f"🛡️ 巡逻发现陌生邀请 · {name}", rows))
                         events.append({
@@ -1322,7 +1322,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                     emails = [c.get("email") or "?" for c in strict_candidates]
                     notify_admins_sync(detail_card(
                         f"🛡️ 严格模式发现疑似陌生成员 · {name}",
-                        [f"👤 成员：{'、'.join(emails)}", "🛡️ 处理状态：车队已豁免，未自动处理"],
+                        [f"👤 成员：{'、'.join(emails)}", "🛡️ 处理状态：Team 已豁免，未自动处理"],
                     ))
                     events.append({
                         "team_id": team_id, "team_name": name, "action": "strict_exempt_skip",
@@ -1374,7 +1374,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                                 "action": "strict_flagged",
                             })
                         rows.append("🔎 判定依据：非系统邀请、无到期记录、非 Owner")
-                        rows.append("💡 如为误判，请尽快豁免该车队或人工处理")
+                        rows.append("💡 如为误判，请尽快豁免该 Team 或人工处理")
                         notify_admins_sync(detail_card(f"🕒 严格模式检测到疑似陌生成员 · {name}", rows))
 
                     if ready_candidates:
@@ -1402,7 +1402,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                             if not refresh_ok:
                                 notify_admins_sync(detail_card(
                                     f"⚠️ 严格模式实时刷新失败 · {name}",
-                                    [f"❌ 错误：{refresh_err}", "🛑 本轮跳过该车队的严格模式处理"],
+                                    [f"❌ 错误：{refresh_err}", "🛑 本轮跳过该 Team 的严格模式处理"],
                                 ))
                                 _log_operation_sync(
                                     team_id, "patrol_strict_refresh_failed", None, None, "failed", refresh_err,
@@ -1498,7 +1498,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                 rows = [
                     f"💺 GPT 席位：{status['active_chatgpt']} / {seats_entitled}（超 {over_by}）",
                     "💻 Codex：关闭 ⏸️",
-                    "🛡️ 处理状态：车队已豁免，未自动处理",
+                    "🛡️ 处理状态：Team 已豁免，未自动处理",
                 ]
                 if insufficient_note:
                     rows.append(f"👤 人工核查：{insufficient_note}")

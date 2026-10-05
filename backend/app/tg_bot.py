@@ -126,7 +126,7 @@ def _trunc_note(total: int) -> str:
 
 
 def _member_label(m: dict) -> str:
-    """编号列表用的一行标签：邮箱 ·车队。"""
+    """编号列表用的一行标签：邮箱 ·Team。"""
     return f"👤 {_member_email(m)}  ·  🏢 {m.get('team_name') or '?'}"
 
 
@@ -207,7 +207,7 @@ def _normalize_duration(raw: str) -> Optional[str]:
 
 
 def _sorted_teams(teams: list) -> list[dict]:
-    """排序车队：有空位的(active < seats)在前，满员的在后，组内保持原顺序。"""
+    """排序 Team：有空位的(active < seats)在前，满员的在后，组内保持原顺序。"""
     indexed = [(i, t) for i, t in enumerate(teams)]
     active = teams[0].get("active_chatgpt", 0) if teams else 0
     seats = teams[0].get("seats_entitled", 0) if teams else 0
@@ -224,7 +224,7 @@ def _sorted_teams(teams: list) -> list[dict]:
 
 
 def _team_lines(teams: list[dict]) -> str:
-    """格式化向导车队列表，用图标区分可用和已满。"""
+    """格式化向导 Team 列表，用图标区分可用和已满。"""
     lines = []
     for i, t in enumerate(teams, 1):
         name = t.get("name") or t.get("team_id") or "?"
@@ -386,14 +386,14 @@ def _render_status(data: dict, filt: str) -> str:
         teams = [t for t in teams if not _is_idle(t)]
 
     if not teams:
-        return f"没有符合条件（{filt}）的车队。"
+        return f"没有符合条件（{filt}）的 Team。"
 
     filter_label = {"all": "全部", "idle": "有空位", "busy": "已满"}[filt]
     patrol_state = "开启 ✅" if data.get("kick_enabled") else "关闭 ⏸️"
     summary = overview_panel(
         (
             f"🏢 当前筛选：{filter_label}",
-            f"📋 车队数量：{len(teams)}",
+            f"📋 Team 数量：{len(teams)}",
             f"🛡️ 自动巡逻：{patrol_state}",
         )
     )
@@ -446,14 +446,14 @@ def cmd_watch(user: dict, args: str) -> str:
 
     teams = [t for t in (data.get("teams") or []) if t.get("risk") in ("watch", "over")]
     if not teams:
-        return "✅ 风险巡检\n\n当前没有观察或超员车队。"
+        return "✅ 风险巡检\n\n当前没有观察或超员 Team。"
 
     teams.sort(key=lambda team: 0 if team.get("risk") == "over" else 1)
     watch_count = sum(1 for team in teams if team.get("risk") == "watch")
     over_count = len(teams) - watch_count
     summary = overview_panel(
         (
-            f"📋 风险车队：{len(teams)}",
+            f"📋 风险 Team：{len(teams)}",
             f"🔴 超员：{over_count}",
             f"🟡 观察：{watch_count}",
         )
@@ -477,7 +477,7 @@ def cmd_watch(user: dict, args: str) -> str:
                 seat_type = cand.get("seat_type") or "?"
                 rows.append(f"👤 待处理：{email} · {seat_type}")
         cards.append(detail_card(f"{icon} {name}", rows))
-    return "\n\n".join(("⚠️ 风险车队", summary, *cards))
+    return "\n\n".join(("⚠️ 风险 Team", summary, *cards))
 
 
 def cmd_billing(user: dict, args: str) -> str:
@@ -500,7 +500,7 @@ def cmd_billing(user: dict, args: str) -> str:
     summary = overview_panel(
         (
             f"💰 月度总支出：{total_str} {base}".rstrip(),
-            f"🏢 计费车队：{len(billable)}",
+            f"🏢 计费 Team：{len(billable)}",
             f"🚨 财务告警：{len(alerts)}",
         )
     )
@@ -509,14 +509,14 @@ def cmd_billing(user: dict, args: str) -> str:
     if listed:
         spend_rows = []
         for index, team in enumerate(listed, 1):
-            name = team.get("name") or team.get("team_id") or "未知车队"
+            name = team.get("name") or team.get("team_id") or "未知 Team"
             amount = team.get("monthly_total_base") or 0
             spend_rows.append(f"{index}. {name}  ·  {amount:.2f} {base}".rstrip())
         if len(billable) > len(listed):
-            spend_rows.append(f"…另有 {len(billable) - len(listed)} 个车队，请到后台查看。")
-        sections.append("🏷️ 车队支出\n" + "\n".join(spend_rows))
+            spend_rows.append(f"…另有 {len(billable) - len(listed)} 个 Team，请到后台查看。")
+        sections.append("🏷️ Team 支出\n" + "\n".join(spend_rows))
     else:
-        sections.append("📭 暂无计费车队")
+        sections.append("📭 暂无计费 Team")
 
     if alerts:
         alert_labels = {
@@ -529,7 +529,7 @@ def cmd_billing(user: dict, args: str) -> str:
         for alert in alerts[:5]:
             alert_type = alert.get("type") or "unknown"
             label = alert_labels.get(alert_type, alert_type)
-            team_name = alert.get("team_name") or "未知车队"
+            team_name = alert.get("team_name") or "未知 Team"
             alert_cards.append(
                 detail_card(
                     f"🔸 {team_name}",
@@ -572,7 +572,7 @@ def _logs_reply(args: str, *, scope: Optional[str] = None, title: str) -> str:
             detail_card(
                 f"🕐 {ts}",
                 (
-                    f"🏢 车队：{team}",
+                    f"🏢 Team：{team}",
                     f"⚙️ 操作：{action}",
                     f"👤 对象：{target}",
                     f"{result_icon} 结果：{result}",
@@ -594,7 +594,7 @@ def cmd_member_logs(user: dict, args: str) -> str:
 def cmd_team(user: dict, args: str) -> str:
     name_q = (args or "").strip()
     if not name_q:
-        return "用法：/team <车队名关键字>"
+        return "用法：/team <Team 名关键字>"
     needle = name_q.lower()
 
     try:
@@ -604,7 +604,7 @@ def cmd_team(user: dict, args: str) -> str:
 
     teams = [t for t in (data.get("teams") or []) if needle in (t.get("name") or "").lower()]
     if not teams:
-        return f"没有找到名字包含「{name_q}」的车队。"
+        return f"没有找到名字包含「{name_q}」的 Team。"
 
     try:
         finance_data = _api_get("/api/finance/overview")
@@ -650,7 +650,7 @@ def cmd_team(user: dict, args: str) -> str:
         cards.append(detail_card(f"{risk_icon} {name}", rows))
 
     suffix = " · 仅显示前 5 个" if len(teams) > 5 else ""
-    return "\n\n".join((f"🔎 车队查询 · {len(teams)} 个{suffix}", *cards))
+    return "\n\n".join((f"🔎 Team 查询 · {len(teams)} 个{suffix}", *cards))
 
 
 def cmd_patrol(user: dict, args: str) -> str:
@@ -682,7 +682,7 @@ def cmd_patrol(user: dict, args: str) -> str:
             (
                 f"🤖 自动踢人：{kick}",
                 f"🕐 最近保护：{baseline}",
-                f"🛡️ 豁免车队：{exempt_n}",
+                f"🛡️ 豁免 Team：{exempt_n}",
             )
         ),
     ))
@@ -730,9 +730,9 @@ def cmd_token(user: dict, args: str) -> str:
 _HELP_ADMIN = (
     "🤖 TeamBoss 管理助手\n\n"
     "📊 查询与监控\n"
-    "├ /status [all|idle|busy] · 车队状态\n"
+    "├ /status [all|idle|busy] · Team 状态\n"
     "├ /watch · 风险与超员\n"
-    "├ /team <名字> · 车队详情\n"
+    "├ /team <名字> · Team 详情\n"
     "├ /billing · 预计月支出概览\n"
     "└ /logs [关键词] · 操作日志\n\n"
     "👥 成员与车主\n"
@@ -780,12 +780,12 @@ def _start_invite(user: dict, chat_id: str, args: str) -> str:
     try:
         data = _api_get("/api/patrol/status")
     except Exception as exc:
-        return f"获取车队失败:{exc}"
+        return f"获取 Team 失败:{exc}"
 
     teams = data.get("teams") or []
     teams = _sorted_teams(teams)
     if not teams:
-        return "当前没有在用车队。"
+        return "当前没有在用 Team。"
 
     _wizards[chat_id] = {"flow": "invite", "step": "pick_team", "email": email, "teams": teams}
     w = _wizards[chat_id]
@@ -793,7 +793,7 @@ def _start_invite(user: dict, chat_id: str, args: str) -> str:
     return (
         f"✉️ 邀请成员\n"
         f"└ 👤 {email}\n\n"
-        f"🏢 请选择目标车队（回复序号）\n"
+        f"🏢 请选择目标 Team（回复序号）\n"
         f"{_team_lines(teams)}\n\n"
         f"{_WIZ_CANCEL_HINT}"
     )
@@ -818,7 +818,7 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
         w["step"] = "input_time"
         _touch(w)
         return (
-            "✅ 已选择车队\n"
+            "✅ 已选择 Team\n"
             f"└ 🏢 {w['team'].get('name', '?')}\n\n"
             "⏳ 请输入有效期\n"
             "例如：30d / 12h / 7d / never\n\n"
@@ -845,13 +845,13 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
         confirm_msg = detail_card(
             "📋 请确认邀请信息",
             (
-                f"🏢 车队：{name}",
+                f"🏢 Team：{name}",
                 f"👤 邮箱：{email}",
                 f"⏳ 有效期：{dur}",
             ),
         )
         if is_full:
-            confirm_msg += "\n\n⚠️ 该车队已满，继续操作将按超员计费。"
+            confirm_msg += "\n\n⚠️ 该 Team 已满，继续操作将按超员计费。"
         confirm_msg += "\n\n回复 1 确认 · 回复 0 取消"
         return confirm_msg
 
@@ -919,7 +919,7 @@ def _invite_worker(chat_id, msg_id, team_id, email, expires_in, allow_overage, n
         )
         text = detail_card(
             "✅ 邀请已发送",
-            (f"👤 成员：{email}", f"🏢 车队：{name}", f"⏳ 有效期：{expires_in}"),
+            (f"👤 成员：{email}", f"🏢 Team：{name}", f"⏳ 有效期：{expires_in}"),
         ) + "\n\n⏳ 正在等待成员接受……"
         if msg_id is not None:
             _update_watch_tg_info(team_id, email, "invite", chat_id, msg_id)
@@ -980,7 +980,7 @@ def _step_kick(chat_id: str, w: dict, text: str) -> Optional[str]:
                     "⚠️ 请确认移除成员",
                     (
                         f"👤 成员：{_member_email(target)}",
-                        f"🏢 车队：{target.get('team_name') or '?'}",
+                        f"🏢 Team：{target.get('team_name') or '?'}",
                     ),
                 ) + "\n\n回复 1 确认 · 回复 0 取消"
             else:
@@ -1045,7 +1045,7 @@ def _kick_worker(chat_id, msg_id, path, email, team_name, team_id=None) -> None:
         _api_delete(path)
         text = detail_card(
             "✅ 移除请求已提交",
-            (f"👤 成员：{email}", f"🏢 车队：{team_name}"),
+            (f"👤 成员：{email}", f"🏢 Team：{team_name}"),
         ) + "\n\n⏳ 正在等待官方确认……"
         if msg_id is not None and team_id:
             _update_watch_tg_info(team_id, email, "kick", chat_id, msg_id)
@@ -1278,7 +1278,7 @@ def _info_blocks(items: list) -> str:
         status = m.get("status") or ""
         icon = {"joined": "🟢", "pending": "🟡"}.get(status, "⚪")
         rows = [
-            f"🏢 车队：{m.get('team_name') or '?'}",
+            f"🏢 Team：{m.get('team_name') or '?'}",
             f"👑 车主：{owner}",
             f"💺 席位：{m.get('seat_type') or 'default'}",
             *_member_expiry_lines(exp),
@@ -1447,7 +1447,7 @@ def _edit_message(chat_id: str, message_id: int, text: str) -> bool:
 # ---------------------------------------------------------------------------
 # 通用：缓存秒发 + 官方实时核对后原地编辑
 #   render_fn(items, cached) -> str  负责渲染正文（含空态文案），页脚由本模块统一贴
-#   full_scan=True 刷所有车队（贼慢，全量列表用）；False 只刷命中 items 的车队（查人用）
+#   full_scan=True 刷所有 Team（贼慢，全量列表用）；False 只刷命中 items 的 Team（查人用）
 # ---------------------------------------------------------------------------
 
 def _send_list_with_verify(chat_id, base_path, base_params, cache_items, render_fn, *, full_scan):

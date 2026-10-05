@@ -35,6 +35,18 @@ def _card_key(card_brand: Optional[str], card_last4: Optional[str]) -> Optional[
     return f"{brand}:{last4}"
 
 
+def _format_money(value: float, unit: str) -> str:
+    """与前端 formatMoney 一致：整数不带小数，其余两位；符号前置，币种代码后置。"""
+    rounded = round(abs(value), 2)
+    body = f"{int(rounded):,}" if rounded == int(rounded) else f"{rounded:,.2f}"
+    sign = "-" if value < 0 and body != "0" else ""
+    if not unit:
+        return f"{sign}{body}"
+    if len(unit) == 3 and unit.isascii() and unit.isalpha():
+        return f"{sign}{body} {unit.upper()}"
+    return f"{sign}{unit}{body}"
+
+
 @router.get("/overview")
 async def get_overview():
     """Get comprehensive finance overview across all teams."""
@@ -249,6 +261,7 @@ async def get_overview():
         team_name = team["name"]
 
         # Low balance alert
+        unit = team.get("billing_symbol") or team.get("billing_currency") or ""
         try:
             balance_float = (
                 float(team["balance"])
@@ -263,7 +276,10 @@ async def get_overview():
                 "type": "low_balance",
                 "team_id": team_id,
                 "team_name": team_name,
-                "detail": f"Credit {balance_float:.2f} 低于阈值 {low_balance_threshold}",
+                "detail": (
+                    f"Credit 余额 {_format_money(balance_float, unit)} "
+                    f"低于阈值 {_format_money(float(low_balance_threshold), unit)}"
+                ),
             })
 
         # Discount expiring alert
@@ -293,7 +309,7 @@ async def get_overview():
                 "type": "token_expired",
                 "team_id": team_id,
                 "team_name": team_name,
-                "detail": "Token 已过期，需要重新认证",
+                "detail": "Session 已失效，需要重新导入",
             })
 
         if team["subscription_status"] == "expired":
@@ -301,7 +317,7 @@ async def get_overview():
                 "type": "subscription_expired",
                 "team_id": team_id,
                 "team_name": team_name,
-                "detail": "团队订阅已到期",
+                "detail": "Team 订阅已到期",
             })
 
         # 发票对账：差额用基准币说严重程度，原币证据在明细展开区。

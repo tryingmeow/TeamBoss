@@ -175,8 +175,8 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
     """自助端的多团队裁决（2026-08-17 用户拍板）：
 
     - 查询：列出邮箱所在的全部 Team，各自的状态和到期时间；
-    - 兑换续期：多 Team 时返回车队选项让用户自己点，兑换码不消耗；用户带
-      team_id 重新提交后，服务端按实时成员列表重新核对该车队再续期。
+    - 兑换续期：多 Team 时返回 Team 选项让用户自己点，兑换码不消耗；用户带
+      team_id 重新提交后，服务端按实时成员列表重新核对该 Team 再续期。
     """
 
     async def asyncSetUp(self):
@@ -248,7 +248,7 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(other["status"], "absent")
 
     async def test_a_paused_team_makes_the_status_unknown_not_absent(self):
-        """限定的车队已经不在活跃列表里时，只能说"未知"。
+        """限定的 Team 已经不在活跃列表里时，只能说"未知"。
 
         说"未找到"等于告诉一个正常缴过费的成员：你的会员不存在。我们只是没有
         数据源可查——既不能跨队去别的队取答案，也不该把没数据说成没会员。
@@ -466,8 +466,8 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["action"], "renewed_member")
         self.assertEqual(result["team_id"], "team-b")
-        # 已经选定车队后，只实时拉这一个队：多拉的每个队都是一次多余的上游请求，
-        # 而且任何一个无关车队的会话失效都会把这次续期一起打成 503。
+        # 已经选定 Team 后，只实时拉这一个队：多拉的每个队都是一次多余的上游请求，
+        # 而且任何一个无关 Team 的会话失效都会把这次续期一起打成 503。
         self.assertEqual(
             [team["id"] for team in lookup.await_args.args[1]], ["team-b"]
         )
@@ -558,13 +558,13 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token_row["used_count"], 0)
         self.assertEqual(use_row["action"], "renew_team_choice_invalid")
         self.assertEqual(use_row["error_message"], "team_choice_unknown")
-        # 这个 id 不属于任何活跃车队，不能原样写进审计行：之后的查询会拿这一列
+        # 这个 id 不属于任何活跃 Team，不能原样写进审计行：之后的查询会拿这一列
         # 当作"这张码落在哪个队"的定位键读回去。
         self.assertIsNone(use_row["team_id"])
         self.assertEqual(claim_count, 0)
 
     async def test_a_still_active_team_the_email_left_is_rejected_as_not_found(self):
-        """车队还在、人不在了：这是"选择已失效"，与"车队不存在"要分开留痕。"""
+        """Team 还在、人不在了：这是"选择已失效"，与"Team 不存在"要分开留痕。"""
         raw_token = "atm_multiteamleft"
         token_id = await self._make_token(raw_token)
 
