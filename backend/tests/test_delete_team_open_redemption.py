@@ -226,6 +226,7 @@ class LoggedOutTeamTest(_DeleteTeamCase):
         self.assertIn("Team T 登录已失效", detail)
         self.assertIn("重新导入恢复登录", detail)
         self.assertIn("直接确认成功", detail)
+        self.assertIn("确认成功把这条记录收尾，再给客户换发一张同面额的新码", detail)
 
         # 确认失败 needs the live list of T and is refused while T is logged out.
         with self.assertRaises(HTTPException) as caught:
@@ -234,6 +235,23 @@ class LoggedOutTeamTest(_DeleteTeamCase):
 
         self.assertEqual(self._admin_confirm(token_use_id)["outcome"], "success")
         self.assertEqual(self._delete(), {"status": "ok"})
+
+    def test_delete_refusal_on_a_sync_suspended_team_offers_confirmation(self):
+        token_use_id = self._uncertain_invite()
+        conn = self._conn()
+        conn.execute(
+            "UPDATE teams SET sync_suspended_at = '2026-10-01T00:00:00+00:00' WHERE id = ?",
+            (TEAM,),
+        )
+        conn.commit()
+        conn.close()
+
+        detail = self._delete_refused()
+
+        self.assertIn(f"#{token_use_id}", detail)
+        self.assertIn("Team T 的成员名单已读不到（同步已暂停）", detail)
+        self.assertIn("确认成功把这条记录收尾，再给客户换发一张同面额的新码", detail)
+        self.assertNotIn("手动邀请", detail)
 
     def test_active_team_refusal_has_no_login_clause(self):
         self._uncertain_invite()

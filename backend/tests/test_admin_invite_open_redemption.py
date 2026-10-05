@@ -541,6 +541,29 @@ class OpenRedemptionDetailTest(unittest.TestCase):
             self.assertNotIn("登录已失效", detail)
             self.assertNotIn("{", detail)
 
+    def test_dead_team_detail_offers_confirm_success_then_new_code(self):
+        """名单读不到的 Team（登录失效 / 同步暂停）：恢复不了就确认成功收尾、换发新码。"""
+        for label, state in (
+            ("session dead", {"team_status": "token_expired"}),
+            ("refresh rejected", {"team_auth_state": "rejected"}),
+            ("sync suspended", {"team_sync_suspended_at": "2026-10-01T00:00:00+00:00"}),
+        ):
+            with self.subTest(label):
+                detail = open_redemptions.open_redemption_detail(
+                    dict(self.UNCERTAIN, **state), operation="invite"
+                )
+                self.assertIn("确认成功把这条记录收尾，再给客户换发一张同面额的新码", detail)
+                self.assertNotIn("{", detail)
+        suspended = open_redemptions.open_redemption_detail(
+            dict(self.UNCERTAIN, team_sync_suspended_at="2026-10-01T00:00:00+00:00"),
+            operation="invite",
+        )
+        self.assertIn("Team Beta 的成员名单已读不到（同步已暂停）", suspended)
+        healthy = open_redemptions.open_redemption_detail(
+            dict(self.UNCERTAIN, team_sync_suspended_at=None), operation="invite"
+        )
+        self.assertNotIn("换发一张同面额的新码", healthy.split("确认成功则")[0])
+
     def test_pending_detail_quotes_the_reconciler_timings(self):
         # 说明里的分钟数和对账任务用的是同一组常量。
         self.assertEqual(

@@ -12,7 +12,7 @@ from ..models import DefaultSeatTypeRequest, TeamProxyUpdate, TeamRemarkUpdate, 
 from ..services.open_redemptions import (
     delete_team_refusal_detail,
     find_open_redemptions_in_team,
-    team_login_lost,
+    unsettleable_team_note,
 )
 from ..services.pricing import discounted_monthly_total
 from ..services.subscription_status import subscription_status_display
@@ -323,7 +323,7 @@ async def delete_team(team_id: str):
         # 先拿写锁再查未结兑换：查完到删除之间，不会有兑换落到这个 Team 上而没被看到。
         await db.execute("BEGIN IMMEDIATE")
         cursor = await db.execute(
-            "SELECT id, name, status, auth_state FROM teams WHERE id = ?", (team_id,)
+            "SELECT id, name, status, auth_state, sync_suspended_at FROM teams WHERE id = ?", (team_id,)
         )
         row = await cursor.fetchone()
         if not row:
@@ -340,7 +340,12 @@ async def delete_team(team_id: str):
                 detail=delete_team_refusal_detail(
                     row["name"] or team_id,
                     open_redemptions,
-                    login_lost=team_login_lost(row["status"], row["auth_state"]),
+                    unsettleable_note=unsettleable_team_note(
+                        row["name"] or team_id,
+                        row["status"],
+                        row["auth_state"],
+                        row["sync_suspended_at"],
+                    ),
                 ),
             )
 
