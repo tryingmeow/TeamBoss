@@ -284,7 +284,7 @@ class ResolvePendingConfirmationRequest(BaseModel):
 
 class QueryMembershipRequest(BaseModel):
     email: str
-    # 兑换历史属于隐私数据，只有能出示这个邮箱自己用过的兑换码才给看。
+    # 兑换历史属于隐私数据：只返回出示的这张码在这个邮箱名下的使用记录。
     # 不传（或传错）时响应结构不变，只是 redemption_history 为空列表。
     token: Optional[str] = None
 
@@ -396,7 +396,15 @@ async def _mark_token_use_uncertain(
             raise RuntimeError(f"failed to lock uncertain redemption: {token_use_id}")
 
 
-async def _get_redemption_history(email: str, limit: int = 20) -> list[dict[str, Any]]:
+async def _get_redemption_history(
+    email: str, *, token_id: int, limit: int = 20
+) -> list[dict[str, Any]]:
+    """这张码（``token_id``）在这个邮箱名下的使用记录。
+
+    必须按码限定：只凭"出示过一张码"就返回邮箱名下的全部记录，等于任何持有一张
+    未用码的人都能读别人的消费流水——拿自己的码对别人的邮箱发起一次必然失败的
+    兑换，就能造出"这张码用在了这个邮箱上"的记录（见 _history_proof_accepted）。
+    """
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT
@@ -412,10 +420,10 @@ async def _get_redemption_history(email: str, limit: int = 20) -> list[dict[str,
                FROM access_token_uses atu
                LEFT JOIN access_tokens at ON at.id = atu.token_id
                LEFT JOIN teams t ON t.id = atu.team_id
-               WHERE lower(atu.email) = ?
+               WHERE lower(atu.email) = ? AND atu.token_id = ?
                ORDER BY atu.created_at DESC
                LIMIT ?""",
-            (email.lower(), limit),
+            (email.lower(), token_id, limit),
         )
         rows = await cursor.fetchall()
     # 这份历史会经匿名自助查询返回，error_message 里可能留有上游原始报错，先抹掉
@@ -430,13 +438,17 @@ async def _get_redemption_history(email: str, limit: int = 20) -> list[dict[str,
 
 
 async def _history_proof_accepted(email: str, raw_token: Optional[str]) -> bool:
-    """出示的兑换码是否确实是这个邮箱自己用过的码。
+    """出示的兑换码在这个邮箱名下是否有使用记录。
 
     ``/status`` 和 ``/query`` 是匿名接口：只给一个邮箱地址就能拿到该邮箱最近的
     兑换记录（动作、结果、Team、码前缀、面额、到期时间、报错原文、时间戳），等于
     任何人猜中邮箱就能看别人的消费流水。成员身份和到期时间照旧公开（用户要靠它
     自查），历史则要求出示凭据：这张码必须存在，且这张码的使用记录就落在这个邮箱
     名下。
+
+    这只说明"这张码碰过这个邮箱"，不说明持码人就是邮箱主人：任何人都能拿自己
+    未用的码对别人的邮箱发起一次失败的兑换。所以通过之后也只能看这张码自己的
+    记录（_get_redemption_history 按 token_id 限定）。
     """
     token = (raw_token or "").strip()
     if not token:
@@ -924,11 +936,18 @@ async def _query_token(raw_token: str) -> dict[str, Any]:
         status_value = "pending_confirmation"
     usage = None
     if latest_use:
-        email_status = await _resolve_email_status(
-            latest_use.get("email") or "",
-            latest_use.get("expires_at"),
-            team_id=latest_use.get("team_id"),
-        )
+        if latest_use.get("result") in {"success", "pending", "uncertain"}:
+            email_status = await _resolve_email_status(
+                latest_use.get("email") or "",
+                latest_use.get("expires_at"),
+                team_id=latest_use.get("team_id"),
+            )
+        else:
+            # 这次尝试没用掉这张码（失败/提示后已退回），码和那个邮箱之间没有任何
+            # 授权关系。邮箱是持码人自己填的，任何人都能拿未用的码对别人的邮箱试
+            # 一次；这里若照样解析邮箱状态，就会把对方的移出记录（Team、到期、
+            # 移出时间）交给持码人。只回这次尝试本身。
+            email_status = {"status": "unknown", "status_label": _email_status_label("unknown")}
         usage = {
             "email": latest_use.get("email"),
             "email_status": email_status.get("status"),
@@ -2249,11 +2268,14 @@ async def _query_membership_status(email: str, proof_token: Optional[str] = None
     ``proof_token``：调用方转交的兑换码。只有它确实属于这个邮箱时才附带兑换历史，
     否则 ``redemption_history`` 返回空列表——响应结构对老客户端保持不变。
     """
-    history = (
-        [_public_use_fields(item) for item in await _get_redemption_history(email)]
-        if await _history_proof_accepted(email, proof_token)
-        else []
-    )
+    history: list[dict[str, Any]] = []
+    if await _history_proof_accepted(email, proof_token):
+        token_row = await _get_token_by_raw(proof_token or "")
+        if token_row:
+            history = [
+                _public_use_fields(item)
+                for item in await _get_redemption_history(email, token_id=int(token_row["id"]))
+            ]
     teams = await load_active_teams()
     hits = (
         await _find_all_memberships(email, teams, use_cache_only=True) if teams else []
