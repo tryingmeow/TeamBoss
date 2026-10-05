@@ -6,8 +6,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from ..client_ip import RateLimiter as _RateLimiter, get_client_ip_info, rate_limit_key
-from ..database import log_operation
+from ..client_ip import RateLimiter as _RateLimiter, get_client_ip_info, normalize_ip, rate_limit_key
+from ..database import get_db, log_operation
 from ..security import (
     change_admin_password,
     get_admin_api_key,
@@ -144,6 +144,71 @@ class _SharedIdentityCooldown:
         self.cooldown_until = 0.0
 
 
+class _GlobalLoginBudget:
+    """全站登录失败预算：限住「手里有大量地址」的攻击者能试的密码总数。
+
+    按来源锁定（_FailureTracker）只挡得住单个来源，代理池/僵尸网络每换一个地址就多
+    5 次。这里把所有来源的失败汇总成一份计数，超过 max_free_failures 后进入冷却：
+    每次再失败都把「下一次允许校验密码」的时间往后推（initial_cooldown 起按超出量翻倍，
+    封顶 max_cooldown），冷却期内的请求在校验密码之前就直接 429。于是能试的密码总数
+    和攻击者有多少地址无关（每天几百次以内）。
+
+    为了不让少数来源把管理员关在门外：
+    * 每个来源在一轮里只有前 per_source_charge 次失败计入预算。单个来源（以及两个）
+      永远凑不满预算，冷却不会因它们触发；之后它们的失败仍会在冷却期里重新计时，
+      所以大量「已记满」的来源也换不来额外的尝试次数。
+    * 一轮 = 上一次「计入预算的失败」之后 window_seconds 内。超过这段时间没有新的计入，
+      计数和各来源的额度一起清零，冷却最多再持续 max_cooldown。
+    * 冷却只拦「近期没用密码登录成功过」的来源；登录成功过的来源（见
+      admin_login_trusted_sources）只受按来源锁定。调用方负责这个判断。
+
+    登录成功不清零这份计数——否则管理员每登录一次就送攻击者一批免费尝试。
+    """
+
+    def __init__(
+        self,
+        max_free_failures: int,
+        initial_cooldown: int,
+        max_cooldown: int,
+        *,
+        per_source_charge: int = 5,
+        window_seconds: int = 3600,
+        max_tracked_sources: int = 10000,
+    ):
+        self.max_free_failures = max_free_failures
+        self.initial_cooldown = initial_cooldown
+        self.max_cooldown = max_cooldown
+        self.per_source_charge = per_source_charge
+        self.window_seconds = window_seconds
+        self.max_tracked_sources = max_tracked_sources
+        self.count = 0
+        self.last_charged_at = 0.0
+        self.cooldown_until = 0.0
+        self.charged_by_source: dict[str, int] = {}
+
+    def is_active(self, now: float) -> bool:
+        return self.cooldown_until > now
+
+    def record_failure(self, source: str, now: float) -> None:
+        if self.count and now - self.last_charged_at > self.window_seconds:
+            self.count = 0
+            self.charged_by_source.clear()
+
+        charged = self.charged_by_source.get(source, 0)
+        if charged < self.per_source_charge:
+            if source not in self.charged_by_source and len(self.charged_by_source) >= self.max_tracked_sources:
+                # 内存兜底。被挤掉的来源下次还能再计入几次，只会让预算更快耗尽，不会多给尝试。
+                self.charged_by_source.pop(next(iter(self.charged_by_source)))
+            self.charged_by_source[source] = charged + 1
+            self.count += 1
+            self.last_charged_at = now
+
+        excess = self.count - self.max_free_failures
+        if excess > 0:
+            seconds = min(self.initial_cooldown * (2 ** min(excess - 1, 16)), self.max_cooldown)
+            self.cooldown_until = max(self.cooldown_until, now + seconds)
+
+
 # 登录限流器：10 req/min
 # 取值理由：正常用户手动登录频率不会超过 10/min（即 6 秒一次），
 # 但爆破会以 100+ req/s 速率尝试，故 10/min 对正常用户无感、对爆破有效。
@@ -163,18 +228,63 @@ _shared_identity_cooldown = _SharedIdentityCooldown(
     max_free_failures=4, initial_cooldown=60, max_cooldown=900
 )
 
-# 全站登录失败预算：不论来源，每一次密码错误都记进这一份计数，并且**始终生效**，
-# 叠加在上面的按来源锁定之上。按来源锁定只挡得住单个来源；手里有大量地址的攻击者
-# （代理池、僵尸网络）每换一个地址就多 5 次。这里全站累计失败 10 次后，每次再失败都把
-# 下一次允许校验密码的时间往后推（60s 起逐次翻倍，封顶 900s），冷却期内的登录请求在
-# 校验密码之前就直接 429。于是能试的密码总数和攻击者有多少地址无关（每天百次量级）。
-# 代价：攻击持续期间，管理员也没法用密码登录。浏览器里已保存的 API Key，以及带
-# X-API-Key / Bearer 的请求走 require_admin，不经过这里，照常可用。
-# 登录成功不清零这份计数——否则管理员每登录一次就送攻击者 10 次免费尝试；它在 1 小时
-# 内没有新的失败后自动归零（见 _SharedIdentityCooldown.record_failure）。
-_global_login_cooldown = _SharedIdentityCooldown(
+# 全站登录失败预算（见 _GlobalLoginBudget）：每个来源一轮最多计 5 次，全站计满 10 次后，
+# 每次再失败都触发冷却（60s 起按超出量翻倍，封顶 900s）。始终生效，叠加在按来源锁定之上，
+# 但只拦没用密码登录成功过的来源。浏览器里已保存的 API Key，以及带 X-API-Key / Bearer
+# 的请求走 require_admin，不经过这里，照常可用。
+_global_login_cooldown = _GlobalLoginBudget(
     max_free_failures=10, initial_cooldown=60, max_cooldown=900
 )
+
+# 「登录成功过的来源」名单：最近 90 天内用密码登录成功过的来源（IPv4 地址 / IPv6 /64）
+# 不受全站冷却影响。只有知道密码的人能往里加，最多保留最近的 50 个。
+TRUSTED_LOGIN_SOURCE_TTL_SECONDS = 90 * 24 * 3600
+TRUSTED_LOGIN_SOURCE_MAX = 50
+
+
+def _can_be_trusted_source(client_ip: str, is_proxy_self_identity: bool) -> bool:
+    # 共享身份下所有访客是同一个来源，信任它等于让所有人绕过全站冷却。
+    return not is_proxy_self_identity and bool(normalize_ip(client_ip))
+
+
+async def _is_trusted_login_source(source: str, now: float) -> bool:
+    try:
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM admin_login_trusted_sources WHERE source = ? AND last_success_at > ?",
+                (source, now - TRUSTED_LOGIN_SOURCE_TTL_SECONDS),
+            )
+            return await cursor.fetchone() is not None
+    except Exception:
+        # 查不到就按陌生来源处理：最多是管理员在攻击期间要多等一会儿，不会放宽限制。
+        logger.exception("failed to read trusted admin login sources")
+        return False
+
+
+async def _remember_trusted_login_source(source: str, now: float) -> None:
+    try:
+        async with get_db() as db:
+            await db.execute(
+                """INSERT INTO admin_login_trusted_sources (source, first_success_at, last_success_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(source) DO UPDATE SET last_success_at = excluded.last_success_at""",
+                (source, now, now),
+            )
+            await db.execute(
+                "DELETE FROM admin_login_trusted_sources WHERE last_success_at <= ?",
+                (now - TRUSTED_LOGIN_SOURCE_TTL_SECONDS,),
+            )
+            await db.execute(
+                """DELETE FROM admin_login_trusted_sources WHERE source NOT IN (
+                       SELECT source FROM admin_login_trusted_sources
+                       ORDER BY last_success_at DESC LIMIT ?
+                   )""",
+                (TRUSTED_LOGIN_SOURCE_MAX,),
+            )
+            await db.commit()
+    except Exception:
+        # 名单只是便利；写不进去不能让已经验证通过的登录失败。
+        logger.exception("failed to record trusted admin login source")
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -242,14 +352,19 @@ async def login(req: AdminLoginRequest, request: Request):
             detail="请求过于频繁，请稍后再试",
         )
 
+    # 用密码登录成功过的来源不受全站冷却影响（只受下面的按来源锁定），陌生人再怎么
+    # 刷失败，也关不住管理员常用的网络。名单在数据库里，所以在锁外查。
+    can_be_trusted = _can_be_trusted_source(client_ip, is_proxy_self_identity)
+    trusted_source = can_be_trusted and await _is_trusted_login_source(identity, time.time())
+
     rejection: tuple[str, str] | None = None
     password_ok = False
     is_locked = False
     remaining = 0
     async with _login_attempt_lock():
         now = time.time()
-        # 全站失败预算：冷却期内谁来都不校验密码。
-        if _global_login_cooldown.is_active(now):
+        # 全站失败预算：冷却期内，除了登录成功过的来源，谁来都不校验密码。
+        if _global_login_cooldown.is_active(now) and not trusted_source:
             rejection = ("Global login cooldown active", "登录失败次数过多，请稍后再试")
         # 失败锁定检查。is_proxy_self_identity=True 说明这个 IP 其实是可信代理自己的
         # 地址（部署把每个访客都坍缩成了同一个身份，见 client_ip.get_client_ip_info），
@@ -266,7 +381,7 @@ async def login(req: AdminLoginRequest, request: Request):
         if rejection is None:
             password_ok = await verify_admin_password(req.password)
             if not password_ok:
-                _global_login_cooldown.record_failure(time.time())
+                _global_login_cooldown.record_failure(identity, time.time())
                 if is_proxy_self_identity:
                     _shared_identity_cooldown.record_failure(time.time())
                 else:
@@ -314,6 +429,8 @@ async def login(req: AdminLoginRequest, request: Request):
         await log_operation(None, "admin_login", None, f"ip={client_ip}", "failed", "API Key not initialized")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="API Key 未初始化")
 
+    if can_be_trusted:
+        await _remember_trusted_login_source(identity, time.time())
     await log_operation(None, "admin_login", None, f"ip={client_ip}", "success")
     return {"status": "ok", "api_key": api_key}
 

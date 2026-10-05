@@ -187,6 +187,17 @@ async def init_database():
             )
         """)
 
+        # 后台密码登录成功过的来源（IPv4 地址 / IPv6 /64）。这些来源不受全站登录
+        # 冷却影响，只受按来源的失败锁定；见 routes/admin.py 的 _GlobalLoginBudget。
+        # 时间是 Unix 秒；条目数和有效期由 admin.py 维护。
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_login_trusted_sources (
+                source TEXT PRIMARY KEY,
+                first_success_at REAL NOT NULL,
+                last_success_at REAL NOT NULL
+            )
+        """)
+
         # 成员列表缓存（懒加载：首次打开成员面板时写入）
         await db.execute("""
             CREATE TABLE IF NOT EXISTS member_cache (

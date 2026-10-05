@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import database
 from app.routes import admin
 
 
@@ -41,7 +42,14 @@ class AdminLoginLockoutTest(unittest.IsolatedAsyncioTestCase):
         )
         self._password_patch.start()
         self.addCleanup(self._password_patch.stop)
-        admin._global_login_cooldown.record_success()
+        budget_patch = patch.object(
+            admin,
+            "_global_login_cooldown",
+            new=admin._GlobalLoginBudget(max_free_failures=10, initial_cooldown=60, max_cooldown=900),
+        )
+        budget_patch.start()
+        self.addCleanup(budget_patch.stop)
+        await database.init_database()
 
     async def _login(self, request):
         return await admin.login(admin.AdminLoginRequest(password="wrong"), request)
@@ -69,11 +77,10 @@ class AdminLoginLockoutTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("失败次数过多", cm.exception.detail)
 
     async def asyncTearDown(self):
-        # The shared-identity cooldown and the global login budget are site-wide
-        # singletons (by design: they have no per-IP bucket to isolate on), so they
-        # must be reset between tests regardless of test order or failure.
+        # The shared-identity cooldown is a site-wide singleton (by design: it has no
+        # per-IP bucket to isolate on), so it must be reset between tests regardless
+        # of test order or failure. The global budget is patched per test above.
         admin._shared_identity_cooldown.record_success()
-        admin._global_login_cooldown.record_success()
 
     async def test_proxy_self_identity_first_four_failures_behave_as_today(self):
         # Trusted proxy peer whose forwarded X-Real-IP equals its own address: this is
