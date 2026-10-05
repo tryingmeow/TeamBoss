@@ -1984,8 +1984,9 @@ def _public_expiry_state(hit: dict[str, Any]) -> str:
     """公开查询里"到期时间"的真实含义，规则与管理端 noExpiryKind 一致。
 
     有到期时间 = dated；没有时看本地到期记录的 source：detected = external（面板外
-    加入，巡逻可能移出），无记录 = unrecorded，其余 = permanent（明确设成永久）。
-    只有 permanent 才允许对客户说"永久"。
+    加入，巡逻可能移出），无记录 = unrecorded，其余 = permanent（记录里没设到期时间）。
+    permanent 也包括巡逻启用时系统补登的老成员，并不都是管理员有意设成的永久，所以
+    客户页面对它只说「未设置到期时间」，不承诺永久。
     """
     if hit.get("expires_at"):
         return "dated"

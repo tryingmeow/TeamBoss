@@ -68,7 +68,7 @@ const HISTORY_ERRORS: Record<string, string> = {
   team_choice_unknown: '没有选择 Team',
   team_choice_not_found: '所选 Team 不存在',
   team_choice_vanished: '所选 Team 已不可用',
-  permanent_membership: '永久有效，无需续期',
+  permanent_membership: '该邮箱不能使用兑换码续期',
   request_aborted: '请求中断，兑换码未使用',
   'local redemption interrupted before remote mutation': '兑换中断，未发出邀请',
   'OpenAI invite result is uncertain': '邀请结果待确认',
@@ -84,9 +84,10 @@ function historyErrorText(message: string): string {
 
 function choiceExpiryText(choice: RedeemTeamChoice): string {
   // expires_at 为空有两种完全不同的含义，绝不能都写成"永不过期"：
-  // permanent 是真的永久（续期会被拒），unmanaged 是本地压根没有到期记录，
-  // 续下去会给这个人新建一条到期即自动踢出的记录。
-  if (choice.expiry_state === 'permanent') return '永久有效 · 无需续期';
+  // permanent 是本地记录里没有到期时间（续期会被拒），unmanaged 是本地压根没有
+  // 到期记录，续下去会给这个人新建一条到期即自动踢出的记录。permanent 也不等于
+  // 承诺永久（系统补登的记录同样是空），所以只说没设置。
+  if (choice.expiry_state === 'permanent') return '未设置到期时间';
   if (choice.expiry_state === 'unmanaged') return '未纳入到期管理';
   return `到期 ${formatExpiresAt(choice.expires_at)}`;
 }
@@ -95,16 +96,16 @@ function choiceBlockedText(choice: RedeemTeamChoice): string | null {
   // 只在后端明确说了"不能续"时才禁用。字段缺失（前端已更新、后端还没重启的
   // 那几秒）必须按可续处理，否则会把所有车队按钮一起变灰，谁都续不了。
   if (choice.renewable !== false) return null;
-  if (choice.blocked_reason === 'permanent_membership') return '永久有效，无需续期';
+  if (choice.blocked_reason === 'permanent_membership') return '不能使用兑换码续期，请联系管理员';
   return '该 Team 暂不支持续期';
 }
 
 /**
- * 公开查询里没有到期时间时的说法。只有后端明确说 permanent 才写"永久有效"；
- * 字段缺失（老后端）或其他情况一律不承诺永久。
+ * 公开查询里没有到期时间时的说法。任何情况都不承诺永久：permanent 只说明到期记录里
+ * 没有设置时间（系统补登的老成员也是这样），其余情况（含字段缺失）是没有登记。
  */
 function noExpiryText(state: MembershipTeamEntry['expiry_state']): string {
-  return state === 'permanent' ? '永久有效' : '到期时间未登记，请联系管理员确认';
+  return state === 'permanent' ? '未设置到期时间' : '到期时间未登记，请联系管理员确认';
 }
 
 function membershipExpiryText(expiresAt: string | null, state: MembershipTeamEntry['expiry_state']): string {
@@ -144,7 +145,7 @@ function historyActionLabel(action: string): string {
     renewed_invite: '续期待接受',
     redeem_failed: '兑换失败',
     redeem_aborted: '兑换中断',
-    renew_permanent_rejected: '永久有效拒绝',
+    renew_permanent_rejected: '不可续期',
     renew_multi_team_prompt: '待选择 Team',
     renew_team_choice_invalid: 'Team 选择已失效',
     none: '无可用 Team',
@@ -459,7 +460,7 @@ export default function JoinPage() {
                           {choice.status === 'pending' ? '待接受 · ' : ''}
                           {choiceExpiryText(choice)}
                         </span>
-                        {blocked && choice.expiry_state !== 'permanent' && (
+                        {blocked && (
                           <span className="mt-0.5 block text-xs text-amber-700 dark:text-amber-300">{blocked}</span>
                         )}
                       </span>
