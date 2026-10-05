@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import secrets
@@ -123,6 +124,16 @@ class _RedeemLookupBudget:
         if hits and taken_at in hits:
             hits.remove(taken_at)
 
+    def refund_untouched(self, token_id: int, taken_at: float) -> None:
+        """单码和全站的那一次都退回。**只给一次上游请求都没发出的尝试用。**
+
+        两层预算都是给上游兜底的；这种尝试只读了本地库，计进全站额度反而让一张码
+        配一个会被拒的邮箱就能把全站额度耗光，挡住所有人的兑换。
+        """
+        self.refund_code(token_id, taken_at)
+        if taken_at in self._global_hits:
+            self._global_hits.remove(taken_at)
+
     def refund_prompt(self, token_id: int, taken_at: float, now: float, limit: int = 2) -> bool:
         """「请选择 Team」提示的退回：每张码每个滚动窗口最多退 ``limit`` 次，超出照常计数。
 
@@ -154,6 +165,17 @@ _redeem_lookup_budget = _RedeemLookupBudget(
 # 「没有到期时间的成员」（续期同样被拒）对外是同一句话、同一种 Team 选项、同一条兑换
 # 记录；内部审计（access_token_uses / 操作日志）照旧记 owner_email，管理端看得到。
 _NOT_RENEWABLE_DETAIL = "该邮箱不能使用兑换码续期。兑换码未使用，如需处理请联系管理员。"
+_UNAVAILABLE_TEAM_DETAIL = (
+    "该邮箱所在的 Team 暂时不可用，暂不能自助兑换或续期。兑换码未使用，请联系管理员处理。"
+)
+
+
+class _LocalRefusal(HTTPException):
+    """在发出任何上游请求之前就拒绝、且码不消耗的兑换。
+
+    ``redeem_access_token`` 据此把这次尝试的预算（单码 + 全站）全部退回，见
+    ``_RedeemLookupBudget.refund_untouched``。
+    """
 _PUBLIC_USE_ACTION_ALIASES = {"renew_owner_rejected": "renew_permanent_rejected"}
 _PUBLIC_USE_ERROR_ALIASES = {"owner_email": "permanent_membership"}
 
@@ -696,6 +718,62 @@ async def _find_all_memberships(
         if team_hit is not None:
             hits.append(team_hit)
     return hits
+
+
+# 本次兑换无法实时核对成员名单的 Team：teams 表里还在、但不是 active。
+# load_active_teams 只取 status='active'，这些 Team 从不进入兑换的实时扫描。
+_UNAVAILABLE_TEAM_SQL = "COALESCE(t.status, '') != 'active'"
+
+
+async def _memberships_in_unavailable_teams(email: str) -> list[str]:
+    """本地记录显示这个邮箱身在其中、但本次兑换无法实时核对的 Team id 列表。
+
+    兑换只实时扫描 active Team。邮箱若身在一个非 active Team（例如 token_expired）
+    里，实时扫描看不到他：没指定 Team 时会给他在别的队另开一个席位，旧队的到期
+    照样在走；他若同时在一个 active Team，那个队会在没问过他的情况下被续期。
+    这两种都是替用户选了 Team，所以只要本地有任何迹象就拒绝、退码、请管理员处理。
+
+    算作"在里面"的本地迹象（都只算 teams 表里仍存在的 Team）：
+    * member_expiry 中 kicked=0 的记录，任何 source——包括 ``detected``：detected
+      不是授权，但它说明这个人确实在那个 Team 里。
+    * 该 Team 最近一次成员缓存里有这个邮箱（已加入或待接受邀请）。
+
+    Team 已从 teams 表删除的记录不算：删除 Team 时 member_expiry 刻意保留作审计
+    （见 routes/teams.py delete_team），那个 Team 已不受本系统管理，也没有任何
+    可续的对象；拿它挡兑换只会让这些人永远无法再兑换。team_id 为空的老记录同理。
+    """
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return []
+    found: set[str] = set()
+    async with get_db() as db:
+        cursor = await db.execute(
+            f"""SELECT DISTINCT me.team_id
+                FROM member_expiry me
+                JOIN teams t ON t.id = me.team_id
+                WHERE me.kicked = 0 AND lower(me.email) = ? AND {_UNAVAILABLE_TEAM_SQL}""",
+            (normalized,),
+        )
+        found.update(row["team_id"] for row in await cursor.fetchall())
+        cursor = await db.execute(
+            f"""SELECT mc.team_id, mc.members_json, mc.pending_json
+                FROM member_cache mc
+                JOIN teams t ON t.id = mc.team_id
+                WHERE {_UNAVAILABLE_TEAM_SQL}"""
+        )
+        cache_rows = await cursor.fetchall()
+    for row in cache_rows:
+        try:
+            snapshot = {
+                "members": json.loads(row["members_json"] or "[]"),
+                "pending_invites": json.loads(row["pending_json"] or "[]"),
+            }
+        except (TypeError, ValueError):
+            logger.warning("unreadable member cache for team=%s", row["team_id"])
+            continue
+        if _snapshot_contains_email(snapshot, normalized):
+            found.add(row["team_id"])
+    return sorted(found)
 
 
 async def _find_existing_membership(
@@ -1693,10 +1771,14 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             ),
         )
 
-    # 多 Team 选择提示和 5xx 不占这张码的尝试次数（见 _RedeemLookupBudget）。退回只动
-    # 内存里的计数，码的占用/消耗由下面的流程自己负责。
+    # 多 Team 选择提示和 5xx 不占这张码的尝试次数（见 _RedeemLookupBudget）；没碰上游
+    # 就被拒的（_LocalRefusal）连全站那一次也退。退回只动内存里的计数，码的占用/
+    # 消耗由下面的流程自己负责。
     try:
         result = await _redeem_valid_token(req, email, token_row, token_id)
+    except _LocalRefusal:
+        _redeem_lookup_budget.refund_untouched(token_id, charged_at)
+        raise
     except HTTPException as exc:
         if exc.status_code >= 500:
             _redeem_lookup_budget.refund_code(token_id, charged_at)
@@ -1732,6 +1814,35 @@ async def _redeem_valid_token(
 
     try:
         teams = await load_active_teams()
+
+        # 先排除"人在一个本次无法实时核对的 Team 里"：下面的实时扫描只覆盖 teams，
+        # 看不到他就会替他另开席位或续另一个队（见 _memberships_in_unavailable_teams）。
+        # 放在 load_active_teams 之后读：Team 在两次读取之间变成非 active 时，它要么
+        # 还在 teams 里被实时扫描，要么在这里被看到，不会两边都漏掉。
+        # 这一步只读本地库、在任何上游请求之前，所以按 _LocalRefusal 全额退回尝试预算。
+        unavailable_team_ids = await _memberships_in_unavailable_teams(email)
+        if unavailable_team_ids:
+            failure_recorded = await _fail_and_release_token_use(
+                token_use_id,
+                action="redeem_failed",
+                error_message="unavailable_team_membership",
+            )
+            try:
+                await log_operation(
+                    None,
+                    "self_service_redeem",
+                    email,
+                    "reason=unavailable_team_membership, teams="
+                    + ",".join(unavailable_team_ids),
+                    "failed",
+                )
+            except Exception:
+                logger.exception("failed to log unavailable-team refusal email=%s", email)
+            raise _LocalRefusal(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=_UNAVAILABLE_TEAM_DETAIL,
+            )
+
         if not teams:
             failure_recorded = await _fail_and_release_token_use(
                 token_use_id,
