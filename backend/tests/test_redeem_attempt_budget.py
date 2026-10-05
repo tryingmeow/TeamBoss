@@ -17,6 +17,7 @@ from app.routes import access_tokens
 
 EMAIL = "owner@example.com"
 TEAM_A = {"id": "team-a", "name": "Team A", "access_token": "tok-a", "device_id": "dev-a", "proxy_id": None}
+TEAM_B = {"id": "team-b", "name": "Team B", "access_token": "tok-b", "device_id": "dev-b", "proxy_id": None}
 
 
 class RedeemLookupBudgetUnitTest(unittest.TestCase):
@@ -59,6 +60,25 @@ class RedeemLookupBudgetUnitTest(unittest.TestCase):
         # Code 2 never got through, so after the global window it has its full budget.
         self.assertIsNone(budget.try_take(2, now + 601))
         self.assertIsNone(budget.try_take(2, now + 1202))
+
+    def test_refund_returns_the_codes_attempt_but_not_the_global_one(self):
+        budget = access_tokens._RedeemLookupBudget(per_code=2, per_code_window=3600, global_limit=3, global_window=600)
+        for i in range(3):
+            self.assertIsNone(budget.try_take(1, 1_000.0 + i))
+            if i < 2:
+                budget.refund_code(1, 1_000.0 + i)
+        # The code itself still has room, the site-wide cap does not.
+        self.assertEqual(budget.try_take(1, 1_010.0), "global")
+        self.assertEqual(len(budget._per_code_hits[1]), 1)
+        # Refunding an unknown attempt is a no-op.
+        budget.refund_code(1, 5.0)
+        budget.refund_code(42, 5.0)
+        self.assertEqual(len(budget._per_code_hits[1]), 1)
+
+    def test_production_limits(self):
+        budget = access_tokens._redeem_lookup_budget
+        self.assertEqual((budget.per_code, budget.per_code_window), (10, 3600))
+        self.assertEqual((budget.global_limit, budget.global_window), (60, 600))
 
 
 class RedeemAttemptBudgetRouteTest(unittest.IsolatedAsyncioTestCase):
@@ -152,6 +172,68 @@ class RedeemAttemptBudgetRouteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lookup.await_count, 2)
         for token_id in ids:
             self.assertEqual(await self._used_count(token_id), 0)
+
+    async def test_upstream_failures_do_not_spend_the_codes_attempts(self):
+        # A customer retrying through an upstream outage must not lock their own code.
+        raw = "atm_budget_upstream_down"
+        token_id = await self._make_token(raw)
+        down = AsyncMock(side_effect=HTTPException(status_code=503, detail="暂时无法确认全部 Team 的成员状态，请稍后重试"))
+        with patch.object(access_tokens, "_find_all_memberships", new=down):
+            for _ in range(15):
+                with self.assertRaises(HTTPException) as cm:
+                    await self._redeem(raw)
+                self.assertEqual(cm.exception.status_code, 503)
+        self.assertEqual(down.await_count, 15)
+        self.assertEqual(await self._used_count(token_id), 0)
+        self.assertEqual(access_tokens._redeem_lookup_budget._per_code_hits[token_id], [])
+        # Every one of them still hit the upstream, so the site-wide cap counts them.
+        self.assertEqual(len(access_tokens._redeem_lookup_budget._global_hits), 15)
+
+    async def test_unexpected_server_errors_do_not_spend_the_codes_attempts(self):
+        raw = "atm_budget_server_error"
+        token_id = await self._make_token(raw)
+        broken = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch.object(access_tokens, "_find_all_memberships", new=broken):
+            for _ in range(8):
+                with self.assertRaises(RuntimeError):
+                    await self._redeem(raw)
+        self.assertEqual(access_tokens._redeem_lookup_budget._per_code_hits[token_id], [])
+        self.assertEqual(await self._used_count(token_id), 0)
+
+    async def test_team_selection_prompt_does_not_spend_the_codes_attempts(self):
+        raw = "atm_budget_pick_team"
+        token_id = await self._make_token(raw)
+        hits = [
+            {"kind": "member", "team": team, "user_id": "u-1", "is_owner": False,
+             "expires_at": "2026-12-01T00:00:00+00:00", "cache_updated_at": None}
+            for team in (TEAM_A, TEAM_B)
+        ]
+        with patch.object(access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])), \
+             patch.object(access_tokens, "_find_all_memberships", new=AsyncMock(return_value=hits)):
+            for _ in range(15):
+                result = await self._redeem(raw)
+                self.assertEqual(result["status"], "team_selection_required")
+        self.assertEqual(access_tokens._redeem_lookup_budget._per_code_hits[token_id], [])
+        self.assertEqual(await self._used_count(token_id), 0)
+
+    async def test_refused_attempts_still_count_against_the_code(self):
+        # Outcomes the customer cannot fix by retrying (here: no free seat) keep
+        # counting, so a valid code still cannot be replayed without limit.
+        raw = "atm_budget_no_seat"
+        token_id = await self._make_token(raw)
+        access_tokens._redeem_lookup_budget.per_code = 10
+        no_seat = AsyncMock(side_effect=HTTPException(status_code=409, detail="没有可用 ChatGPT 席位，请联系管理员"))
+        with patch.object(access_tokens, "_find_all_memberships", new=AsyncMock(return_value=[])), \
+             patch.object(access_tokens, "_invite_to_available_team", new=no_seat):
+            for _ in range(10):
+                with self.assertRaises(HTTPException) as cm:
+                    await self._redeem(raw)
+                self.assertEqual(cm.exception.status_code, 409)
+            with self.assertRaises(HTTPException) as cm:
+                await self._redeem(raw)
+        self.assertEqual(cm.exception.status_code, 429)
+        self.assertEqual(no_seat.await_count, 10)
+        self.assertEqual(await self._used_count(token_id), 0)
 
     async def test_invalid_codes_do_not_touch_the_budget(self):
         for _ in range(40):

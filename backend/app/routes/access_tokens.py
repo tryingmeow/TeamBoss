@@ -77,6 +77,10 @@ class _RedeemLookupBudget:
     只在码校验通过之后、占用之前计数（无效码根本不碰上游，按 IP 限流就够了）。先判断
     两层是否都有余量，都有才同时记账——否则一张已被单码上限挡住的码还能继续消耗全站
     额度，一张码就能把所有人的兑换堵死。码的消耗时机和规则完全不受影响。
+
+    以「请选择 Team」提示（正常兑换的第一步）或服务端/上游故障（5xx）结尾的尝试，事后用
+    ``refund_code`` 退回单码的那一次：客户在上游故障期间反复重试，不该把自己的码锁一小时。
+    全站那一次不退——这些尝试照样实时拉了上游，全站上限本来就是给上游兜底的。
     """
 
     def __init__(self, per_code: int, per_code_window: int, global_limit: int, global_window: int):
@@ -111,11 +115,17 @@ class _RedeemLookupBudget:
                 del self._per_code_hits[key]
         return None
 
+    def refund_code(self, token_id: int, taken_at: float) -> None:
+        """退回 ``try_take(token_id, taken_at)`` 记在这张码上的那一次（全站计数不动）。"""
+        hits = self._per_code_hits.get(token_id)
+        if hits and taken_at in hits:
+            hits.remove(taken_at)
 
-# 每张码每小时 6 次：一人多 Team 的选择提示、选错/没空位后重试都够用；
-# 全站每 10 分钟 30 次：正常售卖远低于此，被挡的人码不消耗，稍后重试即可。
+
+# 每张码每小时 10 次（选择提示和 5xx 不算）：选错 Team、没空位后重试都够用；
+# 全站每 10 分钟 60 次：正常售卖远低于此，被挡的人码不消耗，稍后重试即可。
 _redeem_lookup_budget = _RedeemLookupBudget(
-    per_code=6, per_code_window=3600, global_limit=30, global_window=600
+    per_code=10, per_code_window=3600, global_limit=60, global_window=600
 )
 
 
@@ -1618,7 +1628,8 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
 
     # 走到这里的是一张有效未用的码，接下来就要实时查上游。先过尝试预算（见
     # _RedeemLookupBudget）；被挡时什么都还没占用，码原样保留。
-    blocked = _redeem_lookup_budget.try_take(token_id, time.time())
+    charged_at = time.time()
+    blocked = _redeem_lookup_budget.try_take(token_id, charged_at)
     if blocked is not None:
         await log_operation(
             None,
@@ -1636,6 +1647,29 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
             ),
         )
 
+    # 多 Team 选择提示和 5xx 不占这张码的尝试次数（见 _RedeemLookupBudget）。退回只动
+    # 内存里的计数，码的占用/消耗由下面的流程自己负责。
+    try:
+        result = await _redeem_valid_token(req, email, token_row, token_id)
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            _redeem_lookup_budget.refund_code(token_id, charged_at)
+        raise
+    except Exception:
+        _redeem_lookup_budget.refund_code(token_id, charged_at)
+        raise
+    if result.get("status") == "team_selection_required":
+        _redeem_lookup_budget.refund_code(token_id, charged_at)
+    return result
+
+
+async def _redeem_valid_token(
+    req: RedeemAccessTokenRequest,
+    email: str,
+    token_row: dict[str, Any],
+    token_id: int,
+) -> dict[str, Any]:
+    """一张已通过校验和尝试预算的码的兑换流程：占用 → 查上游 → 续期/邀请。"""
     grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
     # 这只是这张码的"面额"（从现在起算的名义到期），仅用于失败记录/审计展示。
     # 真正落库的到期时间由 extend_member_expiry 按 max(现有到期, now) + 时长 算出来，
