@@ -77,13 +77,16 @@ function StatCard({
   );
 }
 
+/** The two lists show what needs attention soon; anything further out stays on the linked page. */
+const WINDOW_DAYS = 30;
+
 function daysUntil(value: string) {
   const date = parseISO(value);
   return isValid(date) ? differenceInCalendarDays(date, new Date()) : null;
 }
 
 /**
- * 列表不再截断在 7 天内，因此必须区分「已逾期」和「还剩几天」：
+ * 列表里有已逾期的条目，必须区分「已逾期」和「还剩几天」：
  * 否则逾期一个月的条目会和明天到期的共用同一个红角标，看上去只是今天要处理。
  * 角标分档与财务总览页保持一致。
  */
@@ -147,6 +150,18 @@ function EmptyState({ title, hint }: { title: string; hint: string }) {
       <p className="text-sm font-medium text-gray-700 dark:text-ink-200">{title}</p>
       <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">{hint}</p>
     </div>
+  );
+}
+
+function MoreLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <Link
+      to={to}
+      className="flex min-h-11 items-center justify-between gap-3 border-t border-gray-200 px-4 py-2.5 text-xs text-gray-500 transition-colors hover:bg-gray-50 hover:text-gray-900 sm:px-5 dark:border-ink-800 dark:text-ink-400 dark:hover:bg-ink-800/40 dark:hover:text-gray-100"
+    >
+      <span className="min-w-0">{children}</span>
+      <ArrowRight className="size-3.5 shrink-0" />
+    </Link>
   );
 }
 
@@ -244,6 +259,11 @@ export default function TeamManagement() {
       return a.email.localeCompare(b.email);
     }), [members]);
 
+  const upcomingRenewals = renewalItems.filter((row) => row.daysUntil <= WINDOW_DAYS);
+  const laterRenewalCount = renewalItems.length - upcomingRenewals.length;
+  const upcomingMembers = expiringMembers.filter((member) => member.daysUntil <= WINDOW_DAYS);
+  const laterMemberCount = expiringMembers.length - upcomingMembers.length;
+
   const idleCost = useMemo(() => {
     if (!data || !finance) return 0;
     const freeSeatsByTeam = new Map(data.teams.map((team) => [team.team_id, team.free_gpt_seats]));
@@ -256,7 +276,7 @@ export default function TeamManagement() {
     }, 0);
   }, [data, finance]);
 
-  // 列表是全量，但金额只取七天内：把跨度不同的账单日加在一起得到的总额没有对应的支出行为。
+  // 金额只取七天内：把跨度不同的账单日加在一起得到的总额没有对应的支出行为。
   const renewalAmountNext7 = renewalItems.reduce(
     (total, row) => (row.daysUntil >= 0 && row.daysUntil <= 7 ? total + (row.item.amount_base ?? 0) : total),
     0,
@@ -275,7 +295,7 @@ export default function TeamManagement() {
           className={BUTTON.secondary}
         >
           <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
-          {refreshing ? '刷新中…' : '刷新'}
+          刷新
         </button>
       )}
     >
@@ -337,30 +357,32 @@ export default function TeamManagement() {
               />
               <StatCard
                 title="近期续费 Team"
-                value={renewalItems.length}
+                value={upcomingRenewals.length}
                 detail={<>7 天内预计支出 <span className="whitespace-nowrap">{formatMoney(renewalAmountNext7, baseCurrency)}</span></>}
                 icon={CalendarClock}
               />
               <StatCard
                 title="近期到期成员"
-                value={expiringMembers.length}
-                detail="已设置到期时间的成员"
+                value={upcomingMembers.length}
+                detail={`${WINDOW_DAYS} 天内到期，含已过期`}
                 icon={UserRound}
               />
             </div>
 
             <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
-              <section className={cn(CARD, 'min-w-0 overflow-hidden')}>
+              <section className={cn(CARD, 'flex min-w-0 flex-col overflow-hidden')}>
                 <SectionHeader
                   title="近期续费 Team"
-                  count={renewalItems.length}
-                  description={`自动续费的 Team，7 天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
+                  count={upcomingRenewals.length}
+                  description={`${WINDOW_DAYS} 天内自动续费的 Team（含已过续费日），7 天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
                   to="/admin/finance"
                 />
-                <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
-                  {renewalItems.length === 0 ? (
-                    <EmptyState title="暂无待续费的 Team" hint="Team 同步到账单后，会按续费日排在这里。" />
-                  ) : renewalItems.map(({ item, daysUntil: remaining }) => {
+                <div className="max-h-[36rem] flex-1 divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
+                  {upcomingRenewals.length === 0 ? (
+                    renewalItems.length === 0
+                      ? <EmptyState title="暂无待续费的 Team" hint="Team 同步到账单后，会按续费日排在这里。" />
+                      : <EmptyState title={`${WINDOW_DAYS} 天内没有要续费的 Team`} hint="更晚的续费在财务页查看。" />
+                  ) : upcomingRenewals.map(({ item, daysUntil: remaining }) => {
                     const converted = !sameCurrency(item.currency, baseCurrency);
                     return (
                       <div key={`${item.team_id}:${item.date}`} className="flex items-start gap-3 px-4 py-3.5 transition-colors hover:bg-gray-50 sm:px-5 dark:hover:bg-ink-800/40">
@@ -394,19 +416,24 @@ export default function TeamManagement() {
                     );
                   })}
                 </div>
+                {laterRenewalCount > 0 && (
+                  <MoreLink to="/admin/finance">另有 {laterRenewalCount} 个 Team 在 {WINDOW_DAYS} 天后续费，到财务页查看</MoreLink>
+                )}
               </section>
 
-              <section className={cn(CARD, 'min-w-0 overflow-hidden')}>
+              <section className={cn(CARD, 'flex min-w-0 flex-col overflow-hidden')}>
                 <SectionHeader
                   title="近期到期成员"
-                  count={expiringMembers.length}
-                  description="按服务到期时间排序，最近的在前"
+                  count={upcomingMembers.length}
+                  description={`${WINDOW_DAYS} 天内到期（含已过期）的成员，最近的在前`}
                   to="/admin/users"
                 />
-                <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
-                  {expiringMembers.length === 0 ? (
-                    <EmptyState title="暂无设置了到期时间的成员" hint="给成员设置到期时间后，会按先后排在这里。" />
-                  ) : expiringMembers.map((member) => {
+                <div className="max-h-[36rem] flex-1 divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
+                  {upcomingMembers.length === 0 ? (
+                    expiringMembers.length === 0
+                      ? <EmptyState title="暂无设置了到期时间的成员" hint="给成员设置到期时间后，会按先后排在这里。" />
+                      : <EmptyState title={`${WINDOW_DAYS} 天内没有到期的成员`} hint="更晚到期的成员在用户管理页查看。" />
+                  ) : upcomingMembers.map((member) => {
                     const displayName = member.system_display_name?.trim() || member.name?.trim() || member.email;
                     const showEmail = displayName.toLowerCase() !== member.email.toLowerCase();
                     return (
@@ -432,6 +459,9 @@ export default function TeamManagement() {
                     );
                   })}
                 </div>
+                {laterMemberCount > 0 && (
+                  <MoreLink to="/admin/users">另有 {laterMemberCount} 位成员在 {WINDOW_DAYS} 天后到期，到用户管理查看</MoreLink>
+                )}
               </section>
             </div>
           </>

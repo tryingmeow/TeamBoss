@@ -21,7 +21,6 @@ import {
   Pencil,
   Plus,
   Search,
-  Trash2,
   UserX,
   Zap,
 } from 'lucide-react';
@@ -31,6 +30,7 @@ import type { SeatType } from '../../types';
 import ExpiryPicker, { type ExpirySelection } from '../../components/ExpiryPicker';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import PageShell from '../../components/PageShell';
+import SegmentedTabs from '../../components/SegmentedTabs';
 import Toast from '../../components/Toast';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { useKickPolicy } from '../../hooks/useKickPolicy';
@@ -139,13 +139,13 @@ const KICK_SOURCE: Record<string, { label: string; tone: string }> = {
   patrol: { label: '巡逻移除', tone: TONE.warning },
 };
 
-const TABS = [
+type TabValue = 'owner' | 'members' | 'logs';
+
+const TABS: { value: TabValue; label: string }[] = [
   { value: 'owner', label: 'Owner' },
   { value: 'members', label: '成员' },
   { value: 'logs', label: '日志' },
-] as const;
-
-type TabValue = (typeof TABS)[number]['value'];
+];
 
 /** Small icon button next to a value (edit name / date / seat, copy). Size comes from the variant. */
 const ICON_BUTTON =
@@ -184,6 +184,19 @@ function memberExpiryDisplay(expiry?: MemberExpiryView): { primary: string; grac
     grace: expiry.effective_kick_at_local ? `宽限到 ${expiry.effective_kick_at_local}` : `系统宽限${rule}`,
     graceTitle: `到期后按系统宽限规则${rule}移出`,
   };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Past the expiry = red, due within 3 days = amber (the colours 数据概览 uses). Kicked rows are not flagged. */
+function expiryUrgency(member: AdminMemberRow): { className: string; title: string } | null {
+  if (member.status === 'kicked') return null;
+  const expiresAt = parseTimestamp(member.expiry?.expires_at);
+  if (expiresAt == null) return null;
+  const remaining = expiresAt - Date.now();
+  if (remaining <= 0) return { className: 'font-medium text-red-600 dark:text-red-400', title: '已过期' };
+  if (remaining <= 3 * DAY_MS) return { className: 'font-medium text-amber-600 dark:text-amber-400', title: '3 天内到期' };
+  return null;
 }
 
 function formatShortDate(dateStr: string | null): string {
@@ -452,6 +465,7 @@ const TR = 'align-top transition-colors hover:bg-gray-50 dark:hover:bg-ink-800/4
 function ExpiryControl({
   variant,
   display,
+  urgency,
   grace,
   graceTitle,
   editable,
@@ -461,6 +475,7 @@ function ExpiryControl({
 }: {
   variant: Variant;
   display: string;
+  urgency: { className: string; title: string } | null;
   grace?: string;
   graceTitle?: string;
   editable: boolean;
@@ -485,7 +500,12 @@ function ExpiryControl({
   return (
     <div className={variant === 'card' ? 'flex flex-wrap items-center gap-x-3 gap-y-2' : 'flex items-start gap-1.5'}>
       <div>
-        <div className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200">{display}</div>
+        <div
+          className={cn('whitespace-nowrap tabular-nums', urgency?.className ?? 'text-gray-800 dark:text-ink-200')}
+          title={urgency?.title}
+        >
+          {display}
+        </div>
         {grace && (
           <div className="whitespace-nowrap text-[11px] text-amber-600 dark:text-amber-400" title={graceTitle}>
             {grace}
@@ -1029,24 +1049,18 @@ function KickMemberButton({
   return (
     <Dialog.Root>
       <Dialog.Trigger asChild>
-        {variant === 'card' ? (
-          <button
-            type="button"
-            className="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 dark:text-red-400 dark:hover:bg-red-500/10"
-          >
-            <UserX className="size-4" />
-            {pending ? '撤销邀请' : '踢出'}
-          </button>
-        ) : (
-          <button
-            type="button"
-            title={actionLabel}
-            aria-label={`${actionLabel}：${member.email}`}
-            className="-my-1 inline-flex size-8 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 dark:text-ink-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
-          >
-            <Trash2 className="size-4" />
-          </button>
-        )}
+        <button
+          type="button"
+          title={actionLabel}
+          aria-label={`${actionLabel}：${member.email}`}
+          className={cn(
+            'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg font-medium text-gray-500 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 dark:text-ink-400 dark:hover:bg-red-500/10 dark:hover:text-red-400',
+            variant === 'card' ? 'h-9 px-2.5 text-sm' : '-my-1 h-8 px-2 text-xs'
+          )}
+        >
+          <UserX className={variant === 'card' ? 'size-4' : 'size-3.5'} />
+          {pending ? '撤销邀请' : '踢出'}
+        </button>
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-gray-900/40 backdrop-blur-sm dark:bg-ink-950/80" />
@@ -1332,6 +1346,7 @@ function MemberList({
         <ExpiryControl
           variant={variant}
           display={expiryView.primary}
+          urgency={expiryUrgency(member)}
           grace={expiryView.grace}
           graceTitle={expiryView.graceTitle}
           editable={member.status === 'joined'}
@@ -1413,7 +1428,18 @@ function MemberList({
       ) : (
         <>
           <div className={cn(CARD, 'hidden overflow-hidden xl:block')}>
-            <table className="w-full text-left text-sm text-gray-700 dark:text-ink-300">
+            {/* Fixed column widths: the table must not reflow when filters change what is in it. */}
+            <table className="w-full table-fixed text-left text-sm text-gray-700 dark:text-ink-300">
+              <colgroup>
+                <col />
+                <col className="w-[19%]" />
+                <col className="w-[5.5rem]" />
+                <col className="w-[7rem]" />
+                <col className="w-[13.5rem]" />
+                <col className="w-[7.5rem]" />
+                <col className="w-[7.5rem]" />
+                <col className="w-[6.5rem]" />
+              </colgroup>
               <thead className={TABLE_HEAD}>
                 <tr>
                   <th className={TH}>成员</th>
@@ -1431,8 +1457,8 @@ function MemberList({
                   const parts = memberParts(member, 'row');
                   return (
                     <tr key={rowKey(member, i)} className={TR}>
-                      <td className="w-full max-w-0 py-3 pl-4 pr-3">{parts.identity}</td>
-                      <td className={cn(TD, 'max-w-[14rem]')}>{parts.team}</td>
+                      <td className="py-3 pl-4 pr-3">{parts.identity}</td>
+                      <td className={TD}>{parts.team}</td>
                       <td className={TD}>
                         <div className="flex flex-col items-start gap-1">
                           <MemberStatusPills member={member} />
@@ -1536,30 +1562,8 @@ export default function UserManagement() {
         </div>
       )}
 
-      <div role="tablist" aria-label="用户管理视图" className="flex gap-6 border-b border-gray-200 dark:border-ink-800">
-        {TABS.map((tab) => {
-          const active = activeTab === tab.value;
-          return (
-            <button
-              key={tab.value}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              onClick={() => setActiveTab(tab.value)}
-              className={cn(
-                '-mb-px whitespace-nowrap border-b-2 px-1 pb-2.5 pt-1 text-sm font-medium transition-colors',
-                active
-                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100'
-              )}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="mb-4 mt-4 flex flex-wrap items-center gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <SegmentedTabs value={activeTab} onChange={setActiveTab} options={TABS} ariaLabel="用户管理视图" className="md:mr-2" />
         <SearchInput
           value={search}
           onChange={setSearch}

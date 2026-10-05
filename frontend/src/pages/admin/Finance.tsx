@@ -14,6 +14,7 @@ import {
 import {
   AlertTriangle,
   BadgePercent,
+  Check,
   ChevronDown,
   Clock,
   CreditCard,
@@ -30,12 +31,14 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
+import * as Select from '@radix-ui/react-select';
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { formatDateSafe, formatBeijingDateTime } from '../../lib/formatDate';
 import { formatAmount, formatMoney } from '../../lib/money';
 import { cn } from '../../lib/utils';
 import CostTrendChart from '../../components/CostTrendChart';
 import PageShell from '../../components/PageShell';
+import SegmentedTabs from '../../components/SegmentedTabs';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
@@ -51,11 +54,27 @@ interface FinanceCardSummary extends FinanceCardLike {
   monthly_total_base: number;
 }
 
-interface TimelineRow {
-  item: FinanceTimelineItem;
-  groupIndex: number;
-  groupSize: number;
+interface TimelineCardGroup {
+  key: string;
+  items: FinanceTimelineItem[];
+  firstDate: number;
+  cardLast4: string;
+  cardBrand: string;
 }
+
+type BillingTab = 'timeline' | 'cards' | 'details';
+type TimelineSort = 'date' | 'card';
+
+const BILLING_TABS: { value: BillingTab; label: string }[] = [
+  { value: 'timeline', label: '续费时间线' },
+  { value: 'cards', label: '卡片' },
+  { value: 'details', label: 'Team 明细' },
+];
+
+const TIMELINE_SORTS: { value: TimelineSort; label: ReactNode }[] = [
+  { value: 'date', label: <><Clock className="size-3.5" />按到期时间</> },
+  { value: 'card', label: <><CreditCard className="size-3.5" />按卡片</> },
+];
 
 type AlertTone = 'warning' | 'danger' | 'discount';
 
@@ -101,17 +120,6 @@ const INVOICE_STATUS_LABEL: Record<string, string> = {
   uncollectible: '无法收款',
 };
 
-const SEGMENTED = 'grid rounded-lg bg-gray-100 p-0.5 sm:inline-flex dark:bg-ink-950';
-
-function segmentClass(active: boolean) {
-  return cn(
-    'inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 text-sm font-medium transition-colors',
-    active
-      ? 'bg-white text-gray-900 shadow-sm dark:bg-ink-800 dark:text-gray-50'
-      : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
-  );
-}
-
 function formatCardBrand(brand: string | null | undefined) {
   return brand?.trim() ? brand.trim().toUpperCase() : 'UNKNOWN';
 }
@@ -124,6 +132,20 @@ function cardLabel(item: Pick<FinanceCardLike, 'card_brand' | 'card_last4'>) {
 
 function sameCurrency(a: string | null | undefined, b: string | null | undefined) {
   return Boolean(a && b && a.trim().toUpperCase() === b.trim().toUpperCase());
+}
+
+/**
+ * A Team's own unit for an amount in `currency`: its symbol when the amount is in its billing
+ * currency ("$30 × 25 席", "$675"), else the code. Converted amounts use the base currency code
+ * ("≈ 233.33 USD"), like the totals and the trend chart.
+ */
+function teamUnit(
+  team: Pick<FinanceTeamItem, 'billing_currency' | 'billing_symbol'> | undefined,
+  currency: string | null | undefined,
+): string {
+  const symbol = team?.billing_symbol?.trim();
+  if (symbol && (!currency || sameCurrency(currency, team?.billing_currency))) return symbol;
+  return currency || team?.billing_currency || '';
 }
 
 function compareTimelineItems(a: FinanceTimelineItem, b: FinanceTimelineItem) {
@@ -220,18 +242,19 @@ function LatestInvoiceCell({
     );
   }
 
-  const nativeText = formatMoney(inv.display_amount, inv.currency);
+  const nativeUnit = teamUnit(team, inv.currency);
+  const nativeText = formatMoney(inv.display_amount, nativeUnit);
   const converted = inv.display_amount_base !== null && !sameCurrency(inv.currency, baseCurrency);
   const primary = converted ? `≈ ${formatMoney(inv.display_amount_base, baseCurrency)}` : nativeText;
   const deviating = inv.reconciliation === 'over' || inv.reconciliation === 'under';
 
   let diffLine: string | null = null;
   if (deviating) {
-    const word = (inv.diff_native ?? 0) > 0 ? '多' : '少';
+    const word = (inv.diff_native ?? inv.diff_base ?? 0) > 0 ? '多' : '少';
     diffLine =
-      inv.diff_base !== null
+      converted && inv.diff_base !== null
         ? `比推算${word} ≈ ${formatMoney(Math.abs(inv.diff_base), baseCurrency)}`
-        : `比推算${word} ${formatMoney(Math.abs(inv.diff_native ?? 0), inv.currency)}`;
+        : `比推算${word} ${formatMoney(Math.abs(inv.diff_native ?? inv.diff_base ?? 0), nativeUnit)}`;
   }
 
   return (
@@ -484,42 +507,110 @@ function CardBadge({
   );
 }
 
-function TimelineCardSlot({
-  row,
+/** Header of one card's group in the by-card timeline; same card + brand + note layout as the 卡片 tab. */
+function CardGroupHeader({
+  item,
   onSaveNote,
 }: {
-  row: TimelineRow;
+  item: FinanceCardLike;
   onSaveNote: (item: FinanceCardLike, note: string) => Promise<void>;
 }) {
-  const { item, groupIndex, groupSize } = row;
-
-  if (groupSize <= 1) {
-    return <CardBadge item={item} onSaveNote={onSaveNote} />;
+  if (!item.card_last4) {
+    return <span className="text-sm text-gray-500 dark:text-ink-400">未绑定卡片</span>;
   }
+  const note = item.card_note?.trim();
+  return (
+    <div className="flex min-w-0 items-center gap-2 text-sm">
+      <CreditCard className="size-4 shrink-0 text-gray-400 dark:text-ink-500" />
+      <span className="font-mono text-gray-900 dark:text-gray-100">{item.card_last4}</span>
+      {item.card_brand && <span className={cn(PILL, TONE.neutral)}>{formatCardBrand(item.card_brand)}</span>}
+      {note && (
+        <span className="min-w-0 truncate text-gray-700 dark:text-ink-200" title={note}>
+          {note}
+        </span>
+      )}
+      <CardNoteEditor item={item} onSaveNote={onSaveNote} />
+    </div>
+  );
+}
 
-  const isFirst = groupIndex === 0;
-  const isLast = groupIndex === groupSize - 1;
+/**
+ * One renewal. `card` is the card column; the by-card view leaves it out because the group header
+ * already names the card.
+ */
+function TimelineItemRow({
+  item,
+  team,
+  baseCurrency,
+  card,
+  className,
+}: {
+  item: FinanceTimelineItem;
+  team: FinanceTeamItem | undefined;
+  baseCurrency: string;
+  card?: ReactNode;
+  className?: string;
+}) {
+  const daysUntil = differenceInCalendarDays(parseISO(item.date), new Date());
+  const converted = item.amount_base !== null && !sameCurrency(item.currency, baseCurrency);
+  const withCard = card !== undefined;
+  const notRenewing = item.will_renew === 0 && <span className={cn(PILL, TONE.neutral)}>不续费</span>;
+
+  const teamInfo = (
+    <div className="min-w-0">
+      <div className="truncate font-medium text-gray-900 dark:text-gray-100" title={item.team_name}>{item.team_name}</div>
+      {item.owner_email && (
+        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-ink-400">
+          <Mail className="size-3.5 shrink-0" />
+          <span className="truncate" title={item.owner_email}>{item.owner_email}</span>
+        </div>
+      )}
+    </div>
+  );
+
+  const amount = (
+    <div className={cn('shrink-0 lg:justify-self-end lg:text-right', !withCard && 'text-right')}>
+      <div className="whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-gray-100">
+        {formatMoney(item.amount_native, teamUnit(team, item.currency))}
+      </div>
+      {converted && (
+        <div className="whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
+          ≈ {formatMoney(item.amount_base, baseCurrency)}
+        </div>
+      )}
+    </div>
+  );
 
   return (
-    <div className="relative flex h-9 w-40 items-center justify-end">
-      <span
-        className={cn(
-          'absolute left-3 w-px bg-gray-300 dark:bg-ink-600',
-          isFirst ? 'top-1/2' : 'top-0',
-          isLast ? 'bottom-1/2' : 'bottom-0',
-        )}
-      />
-      {!isFirst && (
+    <div
+      className={cn(
+        'text-sm lg:grid lg:items-center lg:gap-4',
+        withCard
+          ? 'lg:grid-cols-[3.25rem_6.5rem_minmax(0,1fr)_10rem_10rem_3.5rem]'
+          : 'lg:grid-cols-[3.25rem_6.5rem_minmax(0,1fr)_10rem_3.5rem]',
+        className,
+      )}
+    >
+      <div className="flex items-center gap-3 lg:contents">
+        <div className="tabular-nums text-gray-500 dark:text-ink-400">{formatDateSafe(item.date, 'MM-dd')}</div>
+        <span className={cn(PILL, 'w-fit', timelineDaysBadgeClass(daysUntil))}>{timelineDaysLabel(daysUntil)}</span>
+        {notRenewing && <span className="ml-auto lg:hidden">{notRenewing}</span>}
+      </div>
+      {withCard ? (
         <>
-          <span className="absolute left-3 top-1/2 h-px w-8 bg-gray-300 dark:bg-ink-600" />
-          <span className="absolute left-10 top-1/2 size-1.5 -translate-y-1/2 rounded-full bg-gray-400 dark:bg-ink-400" />
+          <div className="mt-2 lg:mt-0">{teamInfo}</div>
+          <div className="mt-3 flex items-center justify-between gap-3 border-t border-gray-200 pt-3 lg:contents dark:border-ink-700/60">
+            {amount}
+            <div className="justify-self-end">{card}</div>
+          </div>
         </>
-      )}
-      {isFirst ? (
-        <CardBadge item={item} onSaveNote={onSaveNote} />
       ) : (
-        <span className="h-6 w-32" title={cardLabel(item)} />
+        <div className="mt-2 flex items-start justify-between gap-3 lg:contents">
+          {teamInfo}
+          {amount}
+        </div>
       )}
+      <div className="hidden justify-self-end lg:block">{notRenewing}</div>
     </div>
   );
 }
@@ -530,8 +621,8 @@ export default function Finance() {
   const [overviewError, setOverviewError] = useState('');
   const [refreshingFx, setRefreshingFx] = useState(false);
   const [fxError, setFxError] = useState('');
-  const [activeBillingTab, setActiveBillingTab] = useState<'timeline' | 'cards' | 'details'>('timeline');
-  const [timelineSort, setTimelineSort] = useState<'date' | 'card'>('date');
+  const [activeBillingTab, setActiveBillingTab] = useState<BillingTab>('timeline');
+  const [timelineSort, setTimelineSort] = useState<TimelineSort>('date');
   const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null);
   const [exactTimeTeamId, setExactTimeTeamId] = useState<string | null>(null);
   const [invoicesByTeam, setInvoicesByTeam] = useState<Record<string, FinanceInvoiceRow[] | 'loading' | 'error'>>({});
@@ -666,13 +757,8 @@ export default function Finance() {
     return [...overview.timeline].sort(compareTimelineItems);
   }, [overview]);
 
-  const timelineRows = useMemo<TimelineRow[]>(() => {
-    if (!overview) return [];
-    if (timelineSort === 'date') {
-      return sortedTimeline.map(item => ({ item, groupIndex: 0, groupSize: 1 }));
-    }
-
-    const groups = new Map<string, { items: FinanceTimelineItem[]; firstDate: number; cardLast4: string; cardBrand: string }>();
+  const timelineGroups = useMemo<TimelineCardGroup[]>(() => {
+    const groups = new Map<string, TimelineCardGroup>();
     sortedTimeline.forEach(item => {
       const key = timelineCardKey(item);
       const existing = groups.get(key);
@@ -685,6 +771,7 @@ export default function Finance() {
       }
 
       groups.set(key, {
+        key,
         firstDate: itemDate,
         cardLast4: item.card_last4 || '',
         cardBrand: formatCardBrand(item.card_brand),
@@ -697,16 +784,16 @@ export default function Finance() {
       const last4Diff = a.cardLast4.localeCompare(b.cardLast4);
       if (last4Diff !== 0) return last4Diff;
       return a.cardBrand.localeCompare(b.cardBrand);
-    }).flatMap(group =>
-      group.items.map((item, index) => ({
-        item,
-        groupIndex: index,
-        groupSize: group.items.length,
-      })),
-    );
-  }, [overview, sortedTimeline, timelineSort]);
+    });
+  }, [sortedTimeline]);
+
+  const teamsById = useMemo(
+    () => new Map((overview?.teams ?? []).map(team => [team.team_id, team])),
+    [overview],
+  );
 
   const baseCurrency = overview?.base_currency || 'USD';
+  const currencyOptions = BASE_CURRENCIES.includes(baseCurrency) ? BASE_CURRENCIES : [baseCurrency, ...BASE_CURRENCIES];
   const alertCount = overview?.alerts.length || 0;
 
   return (
@@ -715,22 +802,47 @@ export default function Finance() {
       description="各 Team 的月费、续费日、扣款卡和 Stripe 账单对账。"
       actions={(
         <>
-          <label className="flex items-center gap-2 text-sm text-gray-500 dark:text-ink-400">
-            <span className="whitespace-nowrap">基准币种</span>
+          <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-ink-400">
+            <span id="finance-base-currency" className="whitespace-nowrap">基准币种</span>
             {overviewLoading ? (
               <span className="block h-9 w-20 animate-pulse rounded-lg bg-gray-200 dark:bg-ink-800" />
             ) : (
-              <select
-                value={overview?.base_currency || 'USD'}
-                onChange={(e) => handleBaseCurrencyChange(e.target.value)}
-                className={cn(INPUT, 'w-auto')}
-              >
-                {BASE_CURRENCIES.map(curr => (
-                  <option key={curr} value={curr}>{curr}</option>
-                ))}
-              </select>
+              <Select.Root value={baseCurrency} onValueChange={handleBaseCurrencyChange}>
+                <Select.Trigger
+                  aria-labelledby="finance-base-currency"
+                  className={cn(INPUT, 'inline-flex h-9 w-auto items-center gap-2 py-0 pr-2.5 text-sm')}
+                >
+                  <Select.Value />
+                  <Select.Icon>
+                    <ChevronDown className="size-3.5 text-gray-400 dark:text-ink-500" />
+                  </Select.Icon>
+                </Select.Trigger>
+                <Select.Portal>
+                  <Select.Content
+                    position="popper"
+                    sideOffset={6}
+                    collisionPadding={16}
+                    className="z-50 max-h-[var(--radix-select-content-available-height)] min-w-[var(--radix-select-trigger-width)] overflow-y-auto rounded-xl border border-gray-200 bg-white p-1 shadow-xl dark:border-ink-800 dark:bg-ink-900"
+                  >
+                    <Select.Viewport>
+                      {currencyOptions.map(curr => (
+                        <Select.Item
+                          key={curr}
+                          value={curr}
+                          className="relative flex h-9 cursor-default select-none items-center rounded-md pl-2.5 pr-8 text-sm text-gray-700 outline-none data-[highlighted]:bg-gray-100 data-[highlighted]:text-gray-900 dark:text-ink-300 dark:data-[highlighted]:bg-ink-800 dark:data-[highlighted]:text-gray-100"
+                        >
+                          <Select.ItemText>{curr}</Select.ItemText>
+                          <Select.ItemIndicator className="absolute right-2 inline-flex">
+                            <Check className="size-4 text-blue-600 dark:text-blue-400" />
+                          </Select.ItemIndicator>
+                        </Select.Item>
+                      ))}
+                    </Select.Viewport>
+                  </Select.Content>
+                </Select.Portal>
+              </Select.Root>
             )}
-          </label>
+          </div>
           <span className="whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
             {overviewLoading
               ? '汇率加载中…'
@@ -820,49 +932,14 @@ export default function Finance() {
           </section>
         )}
 
-        <CostTrendChart />
+        {/* Keyed on the base currency so the chart refetches its totals after the currency changes. */}
+        <CostTrendChart key={baseCurrency} />
 
         <section className={cn(CARD, 'min-w-0 p-4 sm:p-6')}>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
-            <div className={cn(SEGMENTED, 'grid-cols-3')} role="tablist" aria-label="账单视图">
-              {([
-                ['timeline', '续费时间线'],
-                ['cards', '卡片'],
-                ['details', 'Team 明细'],
-              ] as const).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={activeBillingTab === key}
-                  onClick={() => setActiveBillingTab(key)}
-                  className={segmentClass(activeBillingTab === key)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
+            <SegmentedTabs value={activeBillingTab} onChange={setActiveBillingTab} options={BILLING_TABS} ariaLabel="账单视图" />
             {activeBillingTab === 'timeline' && (
-              <div className={cn(SEGMENTED, 'grid-cols-2')} aria-label="排序方式">
-                <button
-                  type="button"
-                  aria-pressed={timelineSort === 'date'}
-                  onClick={() => setTimelineSort('date')}
-                  className={segmentClass(timelineSort === 'date')}
-                >
-                  <Clock className="size-3.5" />
-                  按到期时间
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={timelineSort === 'card'}
-                  onClick={() => setTimelineSort('card')}
-                  className={segmentClass(timelineSort === 'card')}
-                >
-                  <CreditCard className="size-3.5" />
-                  按卡片
-                </button>
-              </div>
+              <SegmentedTabs value={timelineSort} onChange={setTimelineSort} options={TIMELINE_SORTS} ariaLabel="时间线分组" />
             )}
             {activeBillingTab === 'details' && (
               <p className="text-xs text-gray-500 dark:text-ink-400">
@@ -881,61 +958,39 @@ export default function Finance() {
                 </div>
               ) : !overview || overview.timeline.length === 0 ? (
                 <EmptyState title="暂无续费计划" hint="Team 同步到订阅信息后，续费日会按时间排在这里。" />
-              ) : (
+              ) : timelineSort === 'date' ? (
                 <div className="space-y-2">
-                  {timelineRows
-                    .map((row) => {
-                      const { item } = row;
-                      const daysUntil = differenceInCalendarDays(parseISO(item.date), new Date());
-                      const badgeBg = timelineDaysBadgeClass(daysUntil);
-                      const rowKey = `${item.team_id}:${item.date}:${timelineCardKey(item)}`;
-                      const converted = item.amount_base !== null && !sameCurrency(item.currency, overview.base_currency);
-                      const notRenewing = item.will_renew === 0 && (
-                        <span className={cn(PILL, TONE.neutral)}>不续费</span>
-                      );
-
-                      return (
-                        <div
-                          key={rowKey}
-                          className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm lg:grid lg:grid-cols-[3.25rem_6.5rem_minmax(0,1fr)_10rem_10rem_3.5rem] lg:items-center lg:gap-4 lg:px-4 lg:py-2.5 dark:border-ink-800 dark:bg-ink-800/40"
-                        >
-                          <div className="flex items-center gap-3 lg:contents">
-                            <div className="tabular-nums text-gray-500 dark:text-ink-400">
-                              {formatDateSafe(item.date, 'MM-dd')}
-                            </div>
-                            <span className={cn(PILL, 'w-fit', badgeBg)}>
-                              {timelineDaysLabel(daysUntil)}
-                            </span>
-                            {notRenewing && <span className="ml-auto lg:hidden">{notRenewing}</span>}
-                          </div>
-                          <div className="mt-2 min-w-0 lg:mt-0">
-                            <div className="truncate font-medium text-gray-900 dark:text-gray-100" title={item.team_name}>{item.team_name}</div>
-                            {item.owner_email && (
-                              <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-ink-400">
-                                <Mail className="size-3.5 shrink-0" />
-                                <span className="truncate" title={item.owner_email}>{item.owner_email}</span>
-                              </div>
-                            )}
-                          </div>
-                          <div className="mt-3 flex items-center justify-between gap-3 border-t border-gray-200 pt-3 lg:contents dark:border-ink-700/60">
-                            <div className="min-w-0 lg:justify-self-end lg:text-right">
-                              <div className="whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-gray-100">
-                                {formatMoney(item.amount_native, item.currency)}
-                              </div>
-                              {converted && (
-                                <div className="whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
-                                  ≈ {formatMoney(item.amount_base, overview.base_currency)}
-                                </div>
-                              )}
-                            </div>
-                            <div className="justify-self-end">
-                              <TimelineCardSlot row={row} onSaveNote={handleCardNoteSave} />
-                            </div>
-                            <div className="hidden justify-self-end lg:block">{notRenewing}</div>
-                          </div>
-                        </div>
-                      );
-                    })}
+                  {sortedTimeline.map(item => (
+                    <TimelineItemRow
+                      key={`${item.team_id}:${item.date}:${timelineCardKey(item)}`}
+                      item={item}
+                      team={teamsById.get(item.team_id)}
+                      baseCurrency={overview.base_currency}
+                      card={<CardBadge item={item} onSaveNote={handleCardNoteSave} />}
+                      className="rounded-lg border border-gray-200 bg-gray-50 p-3 lg:px-4 lg:py-2.5 dark:border-ink-800 dark:bg-ink-800/40"
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {timelineGroups.map(group => (
+                    <div key={group.key} className="rounded-lg border border-gray-200 dark:border-ink-800">
+                      <div className="flex min-h-11 items-center rounded-t-lg border-b border-gray-200 bg-gray-50 px-3 py-1.5 lg:px-4 dark:border-ink-800 dark:bg-ink-800/40">
+                        <CardGroupHeader item={group.items[0]} onSaveNote={handleCardNoteSave} />
+                      </div>
+                      <div className="divide-y divide-gray-100 dark:divide-ink-800">
+                        {group.items.map(item => (
+                          <TimelineItemRow
+                            key={`${item.team_id}:${item.date}`}
+                            item={item}
+                            team={teamsById.get(item.team_id)}
+                            baseCurrency={overview.base_currency}
+                            className="px-3 py-3 lg:px-4 lg:py-2.5"
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </>
@@ -1012,7 +1067,7 @@ export default function Finance() {
                     <tr><td colSpan={7}><EmptyState title="暂无 Team" hint="在「Team 列表」添加 Team 后，这里会列出它的计费明细。" /></td></tr>
                   ) : (
                     overview.teams.map((team) => {
-                      const sym = team.billing_symbol || team.billing_currency;
+                      const sym = teamUnit(team, null);
                       const subscription = SUBSCRIPTION_STATUS[team.subscription_status] ?? SUBSCRIPTION_STATUS.renewing;
                       const monthlyConverted = team.monthly_total_base !== null && !sameCurrency(team.billing_currency, overview.base_currency);
                       let daysBadge: string = TONE.neutral;
@@ -1087,7 +1142,7 @@ export default function Finance() {
                               {team.monthly_total_base !== null
                                 ? monthlyConverted
                                   ? `≈ ${formatMoney(team.monthly_total_base, overview.base_currency)}`
-                                  : formatMoney(team.monthly_total_base, overview.base_currency)
+                                  : formatMoney(team.monthly_total_base, sym)
                                 : formatMoney(team.monthly_total_native, sym)}
                             </div>
                             {team.billing_period === null ? (

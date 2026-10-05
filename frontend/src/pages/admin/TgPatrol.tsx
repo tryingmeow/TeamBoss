@@ -18,6 +18,7 @@ import { AlertTriangle, Copy, Plus, Send, ShieldCheck, Trash2 } from 'lucide-rea
 import * as Dialog from '@radix-ui/react-dialog';
 import PageShell from '../../components/PageShell';
 import PageLoading from '../../components/PageLoading';
+import SegmentedTabs from '../../components/SegmentedTabs';
 import Toast from '../../components/Toast';
 import Switch from '../../components/Switch';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
@@ -281,7 +282,7 @@ function PatrolSection() {
             title={
               <>
                 自动踢人
-                <span className={cn(PILL, status.kick_enabled ? TONE.danger : TONE.neutral)}>
+                <span className={cn(PILL, status.kick_enabled ? TONE.warning : TONE.neutral)}>
                   {status.kick_enabled ? '已开启' : '已关闭'}
                 </span>
               </>
@@ -432,7 +433,7 @@ function PatrolSection() {
 
 function pairingCodeState(code: TgCode): { label: string; tone: string; when: string } {
   if (code.used_by_chat_id) {
-    return { label: '已使用', tone: TONE.success, when: `${formatDateSafe(code.used_at, 'MM-dd HH:mm')} 使用` };
+    return { label: '已使用', tone: TONE.info, when: `${formatDateSafe(code.used_at, 'MM-dd HH:mm')} 使用` };
   }
   if (code.disabled) {
     return { label: '已吊销', tone: TONE.neutral, when: '' };
@@ -441,7 +442,7 @@ function pairingCodeState(code: TgCode): { label: string; tone: string; when: st
   const expired = !Number.isNaN(expiresAt.getTime()) && expiresAt <= new Date();
   return {
     label: expired ? '已过期' : '未使用',
-    tone: expired ? TONE.neutral : TONE.info,
+    tone: expired ? TONE.neutral : TONE.success,
     when: `${formatDateSafe(code.expires_at, 'MM-dd HH:mm')} ${expired ? '已过期' : '过期'}`,
   };
 }
@@ -932,40 +933,23 @@ function TgBotSection() {
   );
 }
 
-const TABS = [
-  { id: 'patrol', label: '巡逻' },
-  { id: 'bot', label: 'TG 机器人' },
-] as const;
+type TabValue = 'patrol' | 'bot';
+
+const TABS: { value: TabValue; label: string }[] = [
+  { value: 'patrol', label: '巡逻' },
+  { value: 'bot', label: 'TG 机器人' },
+];
 
 export default function TgPatrol() {
-  const [activeTab, setActiveTab] = useState<'patrol' | 'bot'>('patrol');
+  const [activeTab, setActiveTab] = useState<TabValue>('patrol');
 
   return (
     <PageShell
       title="TG 与巡逻"
       description="巡逻自动清理超出席位的成员；Telegram 机器人用于远程管理和推送摘要。"
     >
-      <div
-        role="tablist"
-        aria-label="TG 与巡逻"
-        className="mb-6 inline-flex rounded-lg border border-gray-200 bg-gray-100 p-1 dark:border-ink-800 dark:bg-ink-900"
-      >
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={cn(
-              'h-9 whitespace-nowrap rounded-md px-4 text-sm font-medium transition-colors sm:h-8',
-              activeTab === tab.id
-                ? 'bg-white text-blue-600 shadow-sm dark:bg-ink-800 dark:text-blue-400'
-                : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
-            )}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="mb-6">
+        <SegmentedTabs value={activeTab} onChange={setActiveTab} options={TABS} ariaLabel="TG 与巡逻视图" />
       </div>
 
       {activeTab === 'patrol' ? <PatrolSection /> : <TgBotSection />}

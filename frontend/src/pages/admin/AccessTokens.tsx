@@ -1,4 +1,4 @@
-import { type ReactNode, useState, useEffect, useRef } from 'react';
+import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import {
   listAccessTokens,
   createAccessToken,
@@ -11,7 +11,7 @@ import type {
   AccessTokenResponse,
   PendingConfirmationItem,
 } from '../../api/client';
-import { AlertTriangle, Ban, Check, Copy, Plus, RotateCw, Ticket, X } from 'lucide-react';
+import { AlertTriangle, Ban, Check, Copy, Loader2, Plus, RefreshCw, Ticket, X } from 'lucide-react';
 import PageShell from '../../components/PageShell';
 import PageLoading from '../../components/PageLoading';
 import Toast from '../../components/Toast';
@@ -47,7 +47,7 @@ const STATUS_TONE: Record<TokenStatus, string> = {
   未使用: TONE.success,
   已使用: TONE.info,
   已过期: TONE.neutral,
-  已停用: TONE.danger,
+  已停用: TONE.neutral,
 };
 
 function tokenStatus(token: AccessTokenListItem): TokenStatus {
@@ -71,6 +71,17 @@ function durationLabel(value: string): string {
   return value;
 }
 
+const NEVER_WORDS = new Set(['never', 'none', 'null', 'infinite', 'infinity', 'forever', '永久', '∞']);
+
+/** Reads a typed duration the way the backend accepts it ("45d", "12 h", "never"); null if it would be rejected. */
+function readDuration(text: string): string | null {
+  const value = text.trim().toLowerCase();
+  if (NEVER_WORDS.has(value)) return durationLabel('never');
+  const match = /^(\d+)\s*([mhd])$/.exec(value);
+  if (!match || Number(match[1]) <= 0) return null;
+  return durationLabel(`${Number(match[1])}${match[2]}`);
+}
+
 function redeemDeadline(dateStr: string | null): string {
   return dateStr ? formatDate(dateStr) : '永不过期';
 }
@@ -87,19 +98,31 @@ interface DurationFieldProps {
   placeholder: string;
 }
 
+/**
+ * Preset buttons plus a separate custom field. The field only holds what the admin typed, so a
+ * preset never shows up there as a raw value like "30d".
+ */
 function DurationField({ label, hint, presets, value, onChange, placeholder }: DurationFieldProps) {
+  const [custom, setCustom] = useState(() => (presets.includes(value) ? '' : value));
+  const customId = useId();
+  const typed = custom.trim();
+  const reading = typed ? readDuration(typed) : null;
+
   return (
     <div>
       <div className={LABEL}>
         {label} <span className={LABEL_HINT}>· {hint}</span>
       </div>
-      <div className="mb-2 flex flex-wrap gap-1.5">
+      <div className="flex flex-wrap gap-1.5">
         {presets.map((preset) => (
           <button
             key={preset}
             type="button"
             aria-pressed={value === preset}
-            onClick={() => onChange(preset)}
+            onClick={() => {
+              setCustom('');
+              onChange(preset);
+            }}
             className={cn(
               'h-9 whitespace-nowrap rounded-md px-3 text-xs font-medium transition-colors sm:h-7 sm:px-2.5',
               value === preset
@@ -111,13 +134,26 @@ function DurationField({ label, hint, presets, value, onChange, placeholder }: D
           </button>
         ))}
       </div>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        aria-label={`${label}（自定义）`}
-        className={INPUT}
-      />
+      <div className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1">
+        <label htmlFor={customId} className="shrink-0 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
+          自定义
+        </label>
+        <input
+          id={customId}
+          value={custom}
+          onChange={(e) => {
+            setCustom(e.target.value);
+            onChange(e.target.value);
+          }}
+          placeholder={placeholder}
+          className={INPUT}
+        />
+        {typed && (
+          <p className={cn('col-start-2 text-xs', reading ? 'text-gray-500 dark:text-ink-400' : 'text-amber-700 dark:text-amber-400')}>
+            {reading ? `= ${reading}` : '格式：数字加 d（天）、h（小时）或 m（分钟），或 never（永不）'}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -220,7 +256,7 @@ export default function AccessTokens() {
   const handleResolve = async (item: PendingConfirmationItem, outcome: 'success' | 'released') => {
     const question =
       outcome === 'success'
-        ? `确认 ${item.email} 已经在「${item.team_name || item.team_id}」里？兑换码保持已使用，并补上 ${item.grant_expires_in} 时长。`
+        ? `确认 ${item.email} 已经在「${item.team_name || item.team_id}」里？兑换码保持已使用，并补上授予时长（${durationLabel(item.grant_expires_in)}）。`
         : `确认 ${item.email} 在「${item.team_name || item.team_id}」里既没有成员也没有邀请？兑换码将退回未使用。`;
     if (!confirm(question)) return;
     setResolving(item.id);
@@ -418,14 +454,9 @@ export default function AccessTokens() {
             <Plus className="size-4" />
             生成兑换码
           </button>
-          <button
-            onClick={loadTokens}
-            disabled={loading}
-            title="刷新"
-            aria-label="刷新"
-            className={cn(BUTTON.secondary, 'px-2.5')}
-          >
-            <RotateCw className={cn('size-4', loading && 'animate-spin')} />
+          <button type="button" onClick={loadTokens} disabled={loading} className={BUTTON.secondary}>
+            <RefreshCw className={cn('size-4', loading && 'animate-spin')} />
+            刷新
           </button>
         </>
       }
@@ -459,7 +490,7 @@ export default function AccessTokens() {
                 presets={GRANT_PRESETS}
                 value={grant}
                 onChange={setGrant}
-                placeholder="自定义，如 45d / 12h / never"
+                placeholder="如 45d、12h"
               />
               <DurationField
                 label="兑换有效期"
@@ -467,7 +498,7 @@ export default function AccessTokens() {
                 presets={TTL_PRESETS}
                 value={ttl}
                 onChange={setTtl}
-                placeholder="自定义，留空为 7d"
+                placeholder="如 3d，留空按 7 天"
               />
             </div>
 
@@ -484,7 +515,7 @@ export default function AccessTokens() {
             </label>
 
             <button onClick={handleCreate} disabled={creating} className={cn(BUTTON.primary, 'mt-4')}>
-              {creating ? <RotateCw className="size-4 animate-spin" /> : <Plus className="size-4" />}
+              {creating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
               {creating ? '生成中…' : '生成'}
             </button>
 
