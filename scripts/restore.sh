@@ -153,17 +153,27 @@ elif [[ "$BACKUP_FILE" == *.tar.gz ]]; then
     SESSIONS_BACKUP="${DATA_DIR}/sessions.restore-backup-$(date +%Y%m%dT%H%M%SZ)"
     EXTRACT_DIR=$(mktemp -d "${DATA_DIR}/.sessions.restore.XXXXXX")
 
-    if ! tar -tzf "$BACKUP_FILE" | python3 -c '
+    # 只接受普通文件和目录。符号链接 / 硬链接条目会让恢复出来的会话文件指向数据目录
+    # 以外的任意文件，后端之后读写会话时就会读到或改写那些文件；设备、FIFO 同理拒绝。
+    if ! python3 - "$BACKUP_FILE" <<'PY'
 import pathlib
 import sys
-for raw in sys.stdin:
-    name = raw.strip()
-    path = pathlib.PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts:
-        raise SystemExit(1)
-'; then
+import tarfile
+
+try:
+    with tarfile.open(sys.argv[1], "r:gz") as archive:
+        for member in archive:
+            path = pathlib.PurePosixPath(member.name)
+            if path.is_absolute() or ".." in path.parts:
+                raise SystemExit(1)
+            if not (member.isfile() or member.isdir()):
+                raise SystemExit(1)
+except (tarfile.TarError, OSError, EOFError):
+    raise SystemExit(1)
+PY
+    then
         rm -rf "$EXTRACT_DIR"
-        print_error "会话备份包含不安全路径，已拒绝恢复。"
+        print_error "会话备份包含不安全的条目（绝对路径、..、符号链接、硬链接或特殊文件），已拒绝恢复。"
         exit 1
     fi
 
