@@ -268,6 +268,41 @@ class RestoreScriptTest(unittest.TestCase):
                 self.assertEqual(names, sorted(backup.name + ext for ext in ("", *sidecars)))
                 self.assertEqual(Path(f"{backup}-wal").read_bytes(), before_wal)
 
+    def test_db_restore_drops_hot_rollback_journal_of_live_db(self):
+        live = self.data_dir / "app.db"
+        writer = self.tmp / "hot-writer.db"
+        conn = sqlite3.connect(writer, isolation_level=None)
+        try:
+            conn.execute("PRAGMA journal_mode=DELETE")
+            conn.execute("CREATE TABLE t (v TEXT)")
+            conn.executemany("INSERT INTO t VALUES (?)", [("old-%04d" % i,) for i in range(2000)])
+            # 小缓存 + 大事务：脏页溢出写进主文件，-journal 里存着事务前的原页，是一份"热"日志。
+            conn.execute("PRAGMA cache_size=1")
+            conn.execute("BEGIN")
+            conn.execute("UPDATE t SET v = 'half-' || v || hex(randomblob(200))")
+            self.assertGreater(Path(f"{writer}-journal").stat().st_size, 0)
+            # 事务未提交时原样复制，等价于写进程在事务中途被杀。
+            shutil.copyfile(writer, live)
+            shutil.copyfile(f"{writer}-journal", f"{live}-journal")
+        finally:
+            conn.close()
+        before_journal = Path(f"{live}-journal").read_bytes()
+
+        backup = self.tmp / "app-backup.db"
+        self._make_db(backup, ["restored"]).close()
+        result = self._restore(backup)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        # 旧热日志不能留在恢复后的库旁边，否则最终完整性检查一打开就把旧页写回去。
+        self.assertFalse(Path(f"{live}-journal").exists())
+        self.assertEqual(self._rows(live), ["restored"])
+        # 退化路径的安全副本把 -journal 一并保存。
+        copies = [p for p in self.data_dir.iterdir() if p.name.startswith("app.db.restore-backup-") and not p.name.endswith(("-wal", "-shm", "-journal"))]
+        self.assertEqual(len(copies), 1)
+        copy_journal = Path(f"{copies[0]}-journal")
+        self.assertEqual(copy_journal.read_bytes(), before_journal)
+        self.assertEqual(copy_journal.stat().st_mode & 0o777, 0o600)
+
     def test_db_restore_rejects_corrupt_backup_and_leaves_live_db(self):
         live = self.data_dir / "app.db"
         self._make_db(live, ["keep"]).close()

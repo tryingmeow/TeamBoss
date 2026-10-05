@@ -186,11 +186,11 @@ PY
         then
             rm -f "${BACKUP_COPY}-wal" "${BACKUP_COPY}-shm" "${BACKUP_COPY}-journal"
         else
-            print_warning "现有数据库无法完整读取或完整性检查未通过，改为原样复制 app.db 及其 -wal/-shm"
+            print_warning "现有数据库无法完整读取或完整性检查未通过，改为原样复制 app.db 及其 -wal/-shm/-journal"
             # 失败的快照可能在副本旁留下日志文件；不清掉的话会被重放到原样副本上。
             rm -f "$BACKUP_COPY" "${BACKUP_COPY}-wal" "${BACKUP_COPY}-shm" "${BACKUP_COPY}-journal"
             cp "$DB_PATH" "$BACKUP_COPY"
-            for ext in -wal -shm; do
+            for ext in -wal -shm -journal; do
                 if [ -f "${DB_PATH}${ext}" ]; then
                     cp "${DB_PATH}${ext}" "${BACKUP_COPY}${ext}"
                     chmod 600 "${BACKUP_COPY}${ext}"
@@ -201,9 +201,9 @@ PY
         print_success "原数据库已备份: $BACKUP_COPY"
     fi
 
-    # 旧库遗留的 -wal/-shm 绝不能留在恢复后的库旁边：SQLite 会把旧 WAL 重放到新库上，
-    # 造成数据库损坏。安全副本已完成，在替换前一刻清掉，再同一文件系统内原子替换。
-    rm -f "${DB_PATH}-wal" "${DB_PATH}-shm"
+    # 旧库遗留的 -wal/-shm/-journal 绝不能留在恢复后的库旁边：SQLite 会把旧 WAL 重放到新库上，
+    # 造成数据库损坏（热回滚日志 -journal 同理：打开时会把旧页写回新库）。安全副本已完成，在替换前一刻清掉，再同一文件系统内原子替换。
+    rm -f "${DB_PATH}-wal" "${DB_PATH}-shm" "${DB_PATH}-journal"
     mv "$RESTORE_TEMP" "$DB_PATH"
     chmod 600 "$DB_PATH"
 
