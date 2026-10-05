@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Copy, Globe, Loader2, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Globe, Loader2, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
 import type { Settings, Team } from '../types';
 import {
   changeAdminPassword,
@@ -13,6 +13,7 @@ import {
   type AdminAccount,
   type Proxy,
 } from '../api/client';
+import { changedSettings } from '../hooks/useSettings';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { BUTTON, INPUT } from './ui';
@@ -60,12 +61,27 @@ interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   settings: Settings;
+  /** False until the server's settings have been read once; `settings` are client defaults until then. */
+  loaded: boolean;
+  /** Re-reads the server's settings; resolves false when the request failed. */
+  onLoad: () => Promise<boolean>;
+  /** Receives only the fields the admin changed. */
   onSave: (data: Partial<Settings>) => Promise<void>;
   /** Used to tell which Teams a proxy deletion affects. */
   teams?: Pick<Team, 'name' | 'proxy_id'>[];
 }
 
-export default function SettingsDialog({ open, onOpenChange, settings, onSave, teams = [] }: SettingsDialogProps) {
+const STATUS_CLEAR_MS = 4000;
+
+export default function SettingsDialog({
+  open,
+  onOpenChange,
+  settings,
+  loaded,
+  onLoad,
+  onSave,
+  teams = [],
+}: SettingsDialogProps) {
   const [interval, setInterval_] = useState(settings.sync_interval_minutes);
   const [concurrency, setConcurrency] = useState(settings.api_concurrency);
   const [kickMode, setKickMode] = useState(settings.expiry_kick_mode);
@@ -82,6 +98,9 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
   const [deletingProxy, setDeletingProxy] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [errorText, setErrorText] = useState('');
+  const [reloading, setReloading] = useState(false);
+  const [reloadFailed, setReloadFailed] = useState(false);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Proxy state
   const [proxies, setProxies] = useState<Proxy[]>([]);
@@ -97,12 +116,42 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
     setKickMode(settings.expiry_kick_mode);
     setKickDelayHours(settings.expiry_kick_delay_hours);
     setSkipOverageConfirmation(settings.skip_overage_confirmation);
-  }, [settings]);
+  }, [settings, open]);
+
+  // Success notes ("已保存", "API Key 已更新") confirm one action; they clear on the next
+  // action or after a few seconds instead of lingering under unrelated changes.
+  const clearStatus = () => {
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = null;
+    setStatusText('');
+    setErrorText('');
+  };
+  const showStatus = (text: string) => {
+    clearStatus();
+    setStatusText(text);
+    statusTimerRef.current = setTimeout(() => {
+      statusTimerRef.current = null;
+      setStatusText('');
+    }, STATUS_CLEAR_MS);
+  };
+  useEffect(() => () => {
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+  }, []);
+
+  // Another tab or an earlier partial save may have changed the server's values since this
+  // tab last read them, so every opening re-reads them before anything can be saved.
+  const reloadSettings = async () => {
+    setReloading(true);
+    setReloadFailed(false);
+    const ok = await onLoad();
+    setReloadFailed(!ok);
+    setReloading(false);
+  };
 
   useEffect(() => {
     if (!open) return;
-    setStatusText('');
-    setErrorText('');
+    clearStatus();
+    void reloadSettings();
     fetchAdminAccount()
       .then(setAccount)
       .catch((err) => setErrorText(err instanceof Error ? err.message : '加载失败'));
@@ -112,22 +161,27 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
   const copyApiKey = async (apiKey = account?.api_key) => {
     if (!apiKey) return;
     await navigator.clipboard.writeText(apiKey);
-    setStatusText('已复制');
+    showStatus('已复制');
   };
 
+  const changes = changedSettings(settings, {
+    sync_interval_minutes: interval,
+    api_concurrency: concurrency,
+    expiry_kick_mode: kickMode,
+    expiry_kick_delay_hours: kickDelayHours,
+    skip_overage_confirmation: skipOverageConfirmation,
+  });
+  const dirty = Object.keys(changes).length > 0;
+  // Never write while the form may be showing client defaults (e.g. a 0-hour grace period).
+  const canSaveSettings = loaded && !reloading && dirty && !saving;
+
   const handleSaveSettings = async () => {
+    if (!loaded || reloading || !dirty) return;
     setSaving(true);
-    setStatusText('');
-    setErrorText('');
+    clearStatus();
     try {
-      await onSave({
-        sync_interval_minutes: interval,
-        api_concurrency: concurrency,
-        expiry_kick_mode: kickMode,
-        expiry_kick_delay_hours: kickDelayHours,
-        skip_overage_confirmation: skipOverageConfirmation,
-      });
-      setStatusText('已保存');
+      await onSave(changes);
+      showStatus('已保存');
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '保存失败');
     } finally {
@@ -136,8 +190,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
   };
 
   const handleChangePassword = async () => {
-    setStatusText('');
-    setErrorText('');
+    clearStatus();
     if (newPassword !== confirmPassword) {
       setErrorText('两次密码不一致');
       return;
@@ -150,7 +203,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      setStatusText('密码已更新');
+      showStatus('密码已更新');
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '更新失败');
     }
@@ -159,14 +212,13 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
   const handleRotateApiKey = async () => {
     setRotateConfirmOpen(false);
     setRotating(true);
-    setStatusText('');
-    setErrorText('');
+    clearStatus();
     try {
       const result = await rotateAdminApiKey();
       setStoredAdminApiKey(result.api_key);
       setAccount({ api_key: result.api_key, api_key_prefix: result.api_key_prefix });
-      await copyApiKey(result.api_key);
-      setStatusText('API Key 已更新');
+      await navigator.clipboard.writeText(result.api_key).catch(() => {});
+      showStatus('API Key 已更新');
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '更新失败');
     } finally {
@@ -176,6 +228,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
 
   const handleAddProxy = async () => {
     if (!newProxyName.trim() || !newProxyUrl.trim()) return;
+    clearStatus();
     setAddingProxy(true);
     try {
       const created = await createProxy({ name: newProxyName.trim(), url: newProxyUrl.trim() });
@@ -191,6 +244,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
   };
 
   const handleDeleteProxy = async (id: number) => {
+    clearStatus();
     setDeletingProxy(true);
     try {
       await deleteProxy(id);
@@ -207,6 +261,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
   const boundTeams = proxyToDelete ? teams.filter((t) => t.proxy_id === proxyToDelete.id) : [];
 
   const handleCheckProxy = async (id: number) => {
+    clearStatus();
     setCheckingId(id);
     try {
       const result = await checkProxy(id);
@@ -256,95 +311,127 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave, t
         <section className="space-y-4">
           <h3 className={SECTION_TITLE}>常规</h3>
 
-          <div>
-            <label htmlFor="syncInterval" className={cn(LABEL, 'flex items-center justify-between')}>
-              <span>同步间隔</span>
-              <span className="font-semibold tabular-nums text-blue-600 dark:text-blue-400">{interval} 分钟</span>
-            </label>
-            <input
-              id="syncInterval"
-              type="range"
-              min={5}
-              max={60}
-              step={5}
-              value={interval}
-              onChange={(event) => setInterval_(Number(event.target.value))}
-              className={cn(NATIVE_CONTROL, 'w-full rounded-full')}
-            />
-          </div>
+          {!loaded ? (
+            reloading ? (
+              <p className="flex items-center gap-2 text-sm text-gray-500 dark:text-ink-400">
+                <Loader2 size={14} className="animate-spin" />
+                正在读取当前设置…
+              </p>
+            ) : (
+              <div role="alert" className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-500/10 dark:text-red-300">
+                <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                <span className="min-w-0 flex-1">
+                  读取当前设置失败，暂时不能修改：这里只有默认值（包括 0 小时到期宽限），保存会覆盖服务器上的真实设置。
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void reloadSettings()}
+                  className="shrink-0 rounded-md border border-current px-2.5 py-0.5 text-sm"
+                >
+                  重试
+                </button>
+              </div>
+            )
+          ) : (
+            <>
+              {reloadFailed && (
+                <p role="status" className="flex items-start gap-2 text-sm text-amber-700 dark:text-amber-400">
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                  刷新设置失败，下面是之前读到的值；保存只会提交你改动的项。
+                </p>
+              )}
 
-          <div>
-            <label htmlFor="apiConcurrency" className={LABEL}>API 并发</label>
-            <input
-              id="apiConcurrency"
-              type="number"
-              min={1}
-              max={10}
-              value={concurrency}
-              onChange={(event) => setConcurrency(Number(event.target.value))}
-              className={cn(INPUT, 'w-28')}
-            />
-          </div>
-
-          <fieldset>
-            <legend className={LABEL}>到期移出时间</legend>
-            <div className="space-y-2 text-sm text-gray-700 dark:text-ink-200">
-              <label className="flex flex-wrap items-center gap-2">
+              <div>
+                <label htmlFor="syncInterval" className={cn(LABEL, 'flex items-center justify-between')}>
+                  <span>同步间隔</span>
+                  <span className="font-semibold tabular-nums text-blue-600 dark:text-blue-400">{interval} 分钟</span>
+                </label>
                 <input
-                  type="radio"
-                  name="kickMode"
-                  checked={kickMode === 'delay_hours'}
-                  onChange={() => setKickMode('delay_hours')}
-                  className={cn(NATIVE_CONTROL, 'size-4')}
+                  id="syncInterval"
+                  type="range"
+                  min={5}
+                  max={60}
+                  step={5}
+                  value={interval}
+                  onChange={(event) => setInterval_(Number(event.target.value))}
+                  className={cn(NATIVE_CONTROL, 'w-full rounded-full')}
                 />
-                到期后
+              </div>
+
+              <div>
+                <label htmlFor="apiConcurrency" className={LABEL}>API 并发</label>
                 <input
-                  id="kickDelay"
+                  id="apiConcurrency"
                   type="number"
-                  min={0}
-                  max={720}
-                  disabled={kickMode !== 'delay_hours'}
-                  value={kickDelayHours}
-                  onChange={(event) => setKickDelayHours(Number(event.target.value || 0))}
-                  aria-label="到期后延迟小时数"
-                  className={cn(INPUT, 'w-20 py-1.5 disabled:cursor-not-allowed disabled:opacity-50')}
+                  min={1}
+                  max={10}
+                  value={concurrency}
+                  onChange={(event) => setConcurrency(Number(event.target.value))}
+                  className={cn(INPUT, 'w-28')}
                 />
-                小时移出
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="kickMode"
-                  checked={kickMode === 'day_end'}
-                  onChange={() => setKickMode('day_end')}
-                  className={cn(NATIVE_CONTROL, 'size-4')}
-                />
-                到期当天 23:59 移出
-              </label>
-            </div>
-          </fieldset>
+              </div>
 
-          <div>
-            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-ink-200">
-              <input
-                type="checkbox"
-                checked={skipOverageConfirmation}
-                onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
-                className={cn(NATIVE_CONTROL, 'size-4')}
-              />
-              超额添加不再确认
-            </label>
-            <p className="mt-1 pl-6 text-xs text-gray-500 dark:text-ink-400">
-              席位不足时直接超额添加，不再弹确认框；额外席位照常计费。
-            </p>
-          </div>
+              <fieldset>
+                <legend className={LABEL}>到期移出时间</legend>
+                <div className="space-y-2 text-sm text-gray-700 dark:text-ink-200">
+                  <label className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="radio"
+                      name="kickMode"
+                      checked={kickMode === 'delay_hours'}
+                      onChange={() => setKickMode('delay_hours')}
+                      className={cn(NATIVE_CONTROL, 'size-4')}
+                    />
+                    到期后
+                    <input
+                      id="kickDelay"
+                      type="number"
+                      min={0}
+                      max={720}
+                      disabled={kickMode !== 'delay_hours'}
+                      value={kickDelayHours}
+                      onChange={(event) => setKickDelayHours(Number(event.target.value || 0))}
+                      aria-label="到期后延迟小时数"
+                      className={cn(INPUT, 'w-20 py-1.5 disabled:cursor-not-allowed disabled:opacity-50')}
+                    />
+                    小时移出
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="kickMode"
+                      checked={kickMode === 'day_end'}
+                      onChange={() => setKickMode('day_end')}
+                      className={cn(NATIVE_CONTROL, 'size-4')}
+                    />
+                    到期当天 23:59 移出
+                  </label>
+                </div>
+              </fieldset>
 
-          <div className="flex justify-end">
-            <button type="button" onClick={handleSaveSettings} disabled={saving} className={BUTTON.primary}>
-              {saving && <Loader2 size={14} className="animate-spin" />}
-              {saving ? '保存中…' : '保存'}
-            </button>
-          </div>
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-ink-200">
+                  <input
+                    type="checkbox"
+                    checked={skipOverageConfirmation}
+                    onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
+                    className={cn(NATIVE_CONTROL, 'size-4')}
+                  />
+                  超额添加不再确认
+                </label>
+                <p className="mt-1 pl-6 text-xs text-gray-500 dark:text-ink-400">
+                  席位不足时直接超额添加，不再弹确认框；额外席位照常计费。
+                </p>
+              </div>
+
+              <div className="flex justify-end">
+                <button type="button" onClick={handleSaveSettings} disabled={!canSaveSettings} className={BUTTON.primary}>
+                  {(saving || reloading) && <Loader2 size={14} className="animate-spin" />}
+                  {saving ? '保存中…' : reloading ? '读取中…' : '保存'}
+                </button>
+              </div>
+            </>
+          )}
         </section>
 
         <section className="space-y-3 border-t border-gray-200 pt-5 dark:border-ink-800">

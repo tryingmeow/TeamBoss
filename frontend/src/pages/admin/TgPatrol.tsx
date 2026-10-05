@@ -236,12 +236,19 @@ function PatrolSection() {
 
   const confirmToggleExempt = async () => {
     if (!pendingExempt) return;
-    const next = new Set(selectedTeams);
-    if (pendingExempt.willExempt) next.add(pendingExempt.team.team_id);
-    else next.delete(pendingExempt.team.team_id);
     try {
       setSavingExempt(true);
-      await updatePatrolSettings({ exempt_team_ids: Array.from(next) });
+      // The PATCH replaces the whole list. Apply this one toggle to the server's current
+      // list, not to the one this page loaded, so a tab left open cannot silently drop an
+      // exemption added elsewhere (which would expose that Team to auto-kick) or revive one.
+      const fresh = await fetchPatrolStatus();
+      const next = new Set(fresh.exempt_team_ids);
+      if (pendingExempt.willExempt) next.add(pendingExempt.team.team_id);
+      else next.delete(pendingExempt.team.team_id);
+      const unchanged =
+        next.size === fresh.exempt_team_ids.length && fresh.exempt_team_ids.every((id) => next.has(id));
+      if (!unchanged) await updatePatrolSettings({ exempt_team_ids: Array.from(next) });
+      setStatus({ ...fresh, exempt_team_ids: Array.from(next) });
       setSelectedTeams(next);
       showToast(pendingExempt.willExempt ? '已加入豁免' : '已移出豁免');
       setPendingExempt(null);

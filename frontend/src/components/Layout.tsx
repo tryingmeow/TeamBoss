@@ -88,7 +88,7 @@ function needsAttention(team: Team, syncFailures: Record<string, string>): boole
 
 export default function Layout() {
   const location = useLocation();
-  const { settings, save: saveSettings } = useSettings();
+  const { settings, loaded: settingsLoaded, load: loadSettings, save: saveSettings } = useSettings();
   const [autoRefresh, setAutoRefresh] = useState(() => {
     return window.localStorage.getItem(AUTO_REFRESH_STORAGE_KEY) !== 'false';
   });
@@ -479,6 +479,8 @@ export default function Layout() {
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
           settings={settings}
+          loaded={settingsLoaded}
+          onLoad={loadSettings}
           onSave={handleSaveSettings}
           teams={teams}
         />
