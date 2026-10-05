@@ -81,7 +81,7 @@ type AlertTone = 'warning' | 'danger' | 'discount';
 const ALERT_META: Record<FinanceAlert['type'], { label: string; icon: LucideIcon; tone: AlertTone }> = {
   low_balance: { label: '余额偏低', icon: Wallet, tone: 'warning' },
   discount_expiring: { label: '折扣将到期', icon: BadgePercent, tone: 'discount' },
-  token_expired: { label: 'Token 已过期', icon: KeyRound, tone: 'danger' },
+  token_expired: { label: 'Session 已失效', icon: KeyRound, tone: 'danger' },
   subscription_expired: { label: '订阅已到期', icon: Clock, tone: 'danger' },
   invoice_mismatch: { label: '账单金额不符', icon: Receipt, tone: 'warning' },
   invoice_unpaid: { label: '账单未支付', icon: Receipt, tone: 'warning' },
@@ -103,7 +103,7 @@ const ALERT_ICON_TONE: Record<AlertTone, string> = {
 
 const TEAM_STATUS_LABEL: Record<string, string> = {
   active: '正常',
-  token_expired: 'Token 已过期',
+  token_expired: 'Session 已失效',
 };
 
 const SUBSCRIPTION_STATUS: Record<FinanceTeamItem['subscription_status'], { label: string; tone: string }> = {

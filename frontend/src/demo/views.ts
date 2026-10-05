@@ -668,15 +668,16 @@ export function financeOverview(db: DemoDb): FinanceOverview {
 /**
  * Daily billing snapshots. History is reconstructed from the current state by
  * undoing a few dated events (teams joining, seat growth, a promo starting, a
- * team switching to non-renewing), plus a small THB/USD drift. Two days around
- * seven weeks ago are missing on purpose, so the chart shows a gap.
+ * team switching to non-renewing), plus a small THB/USD drift. Two days about
+ * five months ago are missing on purpose, so the 180/365-day views show a gap
+ * (the default 90-day view stays continuous).
  */
 export function financeTrends(db: DemoDb, daysParam: number): FinanceTrends {
   const base = db.finance.base_currency;
   const days = Math.min(Math.max(Math.round(daysParam) || 90, 1), 365);
   const today = utcDay(Date.now());
   const FIRST_SNAPSHOT_DAYS_AGO = 200;
-  const MISSING = new Set([46, 47]);
+  const MISSING = new Set([150, 151]);
 
   const rows: FinanceTrendsRow[] = [];
   const daily: FinanceDailyTotal[] = [];
