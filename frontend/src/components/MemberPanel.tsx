@@ -4,6 +4,7 @@ import type { MembersData, ShowToast } from '../types';
 import MemberRow, { ExpiryLabel } from './MemberRow';
 import MemberRemarkEditor from './MemberRemarkEditor';
 import LoadingSpinner from './LoadingSpinner';
+import ConfirmDialog from './ConfirmDialog';
 import { revokeInvite } from '../api/client';
 import { formatSeatTypeLabel, isCodexSeat } from '../lib/seatType';
 import { formatAppLocalFull } from '../lib/expiry';
@@ -23,14 +24,17 @@ interface MemberPanelProps {
 
 export default function MemberPanel({ teamId, data, loading, settling, isCodexEnabled, onRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
   const [revoking, setRevoking] = useState<string | null>(null);
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
 
   const handleRevoke = async (email: string) => {
     setRevoking(email);
     try {
       await revokeInvite(teamId, email);
       onRefresh();
+      setConfirmRevoke(null);
       showToast('邀请已撤销');
     } catch (err) {
+      // 不关确认框：失败原因留在眼前，可以直接重试。
       showToast(err instanceof Error ? err.message : '撤销邀请失败', 'error');
     } finally {
       setRevoking(null);
@@ -120,7 +124,7 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
 
                 <button
                   type="button"
-                  onClick={() => handleRevoke(inv.email)}
+                  onClick={() => setConfirmRevoke(inv.email)}
                   disabled={revoking === inv.email}
                   className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 disabled:cursor-wait dark:text-ink-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
                   title="撤销邀请"
@@ -133,6 +137,23 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
           })}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={confirmRevoke !== null}
+        onOpenChange={(next) => {
+          if (!next && !revoking) setConfirmRevoke(null);
+        }}
+        title="撤销邀请"
+        message={
+          <>
+            确定撤销发给 <span className="break-all font-medium text-gray-900 dark:text-gray-100">{confirmRevoke}</span> 的邀请吗？对方将无法再用这封邀请加入，需要时得重新邀请。
+          </>
+        }
+        confirmLabel="撤销"
+        destructive
+        loading={revoking !== null && revoking === confirmRevoke}
+        onConfirm={() => confirmRevoke && void handleRevoke(confirmRevoke)}
+      />
     </div>
   );
 }
