@@ -1785,7 +1785,10 @@ def _poll_loop(stop_event: threading.Event) -> None:
                 update_id = update.get("update_id")
                 if update_id is not None:
                     offset = update_id + 1
-                message = update.get("message") or update.get("edited_message")
+                # 编辑过的消息不能当新消息处理：把向导里的“3”改成“1”会被当成一次新的
+                # 确认回复（踢人确认、重放 /invite /token）。只处理原始 message；
+                # edited_message / channel_post 等其它更新类型只推进 offset 后丢弃。
+                message = update.get("message")
                 if not message:
                     continue
                 try:

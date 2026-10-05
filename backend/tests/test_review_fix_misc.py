@@ -1,0 +1,133 @@
+"""评审杂项修复的回归测试：编辑消息不得重放、改密码错误码不得触发登出。"""
+
+import _isolation  # noqa: F401  must precede any app import
+import copy
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import tg_bot
+
+
+class _OneShotStop:
+    """让 _poll_loop 只跑一轮 getUpdates。"""
+
+    def __init__(self):
+        self.polls = 0
+
+    def is_set(self):
+        return self.polls >= 1
+
+    def wait(self, seconds):
+        return None
+
+
+def _edited(text, update_id=7):
+    return {
+        "update_id": update_id,
+        "edited_message": {
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "username": "admin"},
+            "text": text,
+        },
+    }
+
+
+class EditedMessageIgnoredTest(unittest.TestCase):
+    def setUp(self):
+        tg_bot._wizards.clear()
+        self.addCleanup(tg_bot._wizards.clear)
+
+    def _poll(self, updates):
+        stop = _OneShotStop()
+        offsets = []
+
+        def fake_updates(token, offset):
+            offsets.append(offset)
+            stop.polls += 1
+            return updates
+
+        with (
+            patch.object(tg_bot, "_get_setting", side_effect=lambda k: "1" if k == "tg_bot_enabled" else "tok"),
+            patch.object(tg_bot, "_get_updates", side_effect=fake_updates),
+            patch.object(tg_bot, "sync_all_commands_sync"),
+            patch.object(tg_bot, "_send") as send,
+            patch.object(tg_bot, "_api_get") as api_get,
+            patch.object(tg_bot, "_api_post") as api_post,
+            patch.object(tg_bot.requests, "post") as http_post,
+            patch.object(tg_bot, "_handle_message") as handle,
+        ):
+            tg_bot._poll_loop(stop)
+        return send, api_get, api_post, http_post, handle
+
+    def test_edited_message_does_not_reach_handler(self):
+        for text in ("1", "/invite a@b.c 5", "/token"):
+            with self.subTest(text=text):
+                send, api_get, api_post, http_post, handle = self._poll([_edited(text)])
+                handle.assert_not_called()
+                send.assert_not_called()
+                api_get.assert_not_called()
+                api_post.assert_not_called()
+                http_post.assert_not_called()
+
+    def test_edited_message_during_kick_confirm_keeps_wizard_and_calls_nothing(self):
+        target = {"email": "x@example.com", "team_name": "T", "team_id": 1, "actions": {"kick": "/api/x/kick"}}
+        tg_bot._wizards["42"] = {"flow": "kick", "step": "confirm", "target": target}
+        before = copy.deepcopy(tg_bot._wizards)
+
+        # 不 mock _handle_message：走完整路径，证明编辑消息进不了向导。
+        stop = _OneShotStop()
+
+        def fake_updates(token, offset):
+            stop.polls += 1
+            return [_edited("1")]
+
+        with (
+            patch.object(tg_bot, "_get_setting", side_effect=lambda k: "1" if k == "tg_bot_enabled" else "tok"),
+            patch.object(tg_bot, "_get_updates", side_effect=fake_updates),
+            patch.object(tg_bot, "sync_all_commands_sync"),
+            patch.object(tg_bot, "_find_user", return_value={"id": 1}),
+            patch.object(tg_bot, "_find_member_emails", return_value=[]),
+            patch.object(tg_bot, "_send") as send,
+            patch.object(tg_bot, "_send_returning_id") as send_id,
+            patch.object(tg_bot, "_api_get") as api_get,
+            patch.object(tg_bot, "_api_post") as api_post,
+            patch.object(tg_bot.requests, "post") as http_post,
+        ):
+            tg_bot._poll_loop(stop)
+
+        for m in (send, send_id, api_get, api_post, http_post):
+            m.assert_not_called()
+        self.assertEqual(tg_bot._wizards, before)
+
+    def test_edited_update_still_advances_offset(self):
+        stop = _OneShotStop()
+        seen = []
+
+        def fake_updates(token, offset):
+            seen.append(offset)
+            if len(seen) >= 2:
+                stop.polls = 1
+            return [_edited("1", update_id=7)] if len(seen) == 1 else []
+
+        class Stop2:
+            def is_set(self_):
+                return len(seen) >= 2
+
+            def wait(self_, s):
+                return None
+
+        with (
+            patch.object(tg_bot, "_get_setting", side_effect=lambda k: "1" if k == "tg_bot_enabled" else "tok"),
+            patch.object(tg_bot, "_get_updates", side_effect=fake_updates),
+            patch.object(tg_bot, "sync_all_commands_sync"),
+        ):
+            tg_bot._poll_loop(Stop2())
+        self.assertEqual(seen, [None, 8])
+
+
+if __name__ == "__main__":
+    unittest.main()
