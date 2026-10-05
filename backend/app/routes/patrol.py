@@ -237,13 +237,10 @@ async def trigger_patrol_run(req: PatrolRunRequest):
 
 @router.post("/activate")
 async def activate_patrol():
-    """建立巡逻基线并开启自动踢人；这是唯一允许打开真踢的 API。
+    """豁免当前成员并开启自动踢人；这是唯一允许打开真踢的 API。
 
-    先要求所有 active team 实时刷新成功，再原子地建立基线并打开开关。
+    先要求所有 active team 实时刷新成功，再原子地保护当前快照并打开开关。
     任何一个 team 刷新失败都会拒绝开启，避免部分成员未被保护。
-    只有第一次纳入巡逻的 Team 会把当前成员全部保护起来；已经保护过的 Team
-    （重复开启、关了再开、token_expired 恢复）里之前检测到的外部成员仍是候选，
-    人数见返回值 detected_kept。
     """
     try:
         async with get_db() as db:

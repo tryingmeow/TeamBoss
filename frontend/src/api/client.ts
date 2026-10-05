@@ -932,8 +932,6 @@ export interface PatrolActivationResult {
   kick_enabled: boolean;
   grandfathered: number;
   backfilled: number;
-  /** Detected outsiders in already-baselined Teams that stay patrol targets. */
-  detected_kept?: number;
   baseline_at: string;
 }
 

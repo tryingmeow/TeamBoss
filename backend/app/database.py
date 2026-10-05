@@ -584,17 +584,18 @@ async def init_database():
             "ALTER TABLE teams ADD COLUMN sync_failing_since TEXT",
             "ALTER TABLE teams ADD COLUMN sync_suspended_at TEXT",
             "ALTER TABLE teams ADD COLUMN sync_probe_at TEXT",
-            # 巡逻"现有成员保护"（把 detected 成员一次性转成 system）只允许在一个 Team
-            # 第一次建立巡逻基线时发生；非空 = 已经做过。patrol_team_baselines 会在
-            # token_expired / 重新导入时被删掉重建，这个标记不会——它只随 teams 行一起
-            # 消失（删除 Team），重新添加的 Team 才重新算"第一次"。见
-            # services/patrol._protect_team_snapshot_sync。
+            # 一个 Team 第一次被巡逻 grandfather（detected 成员转成 system）的时间；非空 =
+            # 已经做过。巡逻自动建基线时只有标记为空才 grandfather（管理员显式开启不看它，
+            # 每次都保护）。patrol_team_baselines 会在 token_expired / 重新导入时被删掉重建，
+            # 这个标记不会——它只随 teams 行一起消失（删除 Team），重新添加的 Team 才重新算
+            # "第一次"。见 services/patrol._protect_team_snapshot_sync。
             "ALTER TABLE teams ADD COLUMN patrol_grandfathered_at TEXT",
         ):
             await _migrate(db, statement)
 
         # 标记列上线前，凡是当前有巡逻基线的 Team 都已经被 grandfather 过，补上标记，
-        # 否则下一次 /patrol on 会把它们武装期间检测到的外部成员再洗白一次。只填 NULL，
+        # 否则它们下一次 token_expired 恢复、巡逻自动重建基线时会把武装期间检测到的
+        # 外部成员再洗白一次。只填 NULL，
         # 重复启动是空操作；当前没有基线的 Team（例如正处于 token_expired）无从判断，
         # 保持 NULL，下一次建立基线时按"第一次"处理。
         await _migrate(

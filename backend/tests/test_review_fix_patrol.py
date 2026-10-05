@@ -1,4 +1,5 @@
-"""巡逻基线 grandfather 只做一次 + seats_entitled 异常时不做超员踢人 的回归测试。
+"""巡逻基线 grandfather（管理员开启每次都保护，自动重建只在第一次保护）+ seats_entitled
+异常时不做超员踢人 的回归测试。
 
 全部跑在 init_database() 建出的临时库上；ChatGPT 客户端一律替换成假对象，不发任何网络请求。
 """
@@ -216,7 +217,7 @@ class _Base(unittest.TestCase):
 
 
 class PatrolGrandfatherOnceTest(_Base):
-    """grandfather（detected→system）只在一个 Team 第一次建立巡逻基线时发生。"""
+    """grandfather（detected→system）：管理员显式开启每次都做；巡逻自动建基线只在该 Team 第一次做。"""
 
     def _seed_team(self, team_id=TEAM_ID):
         """一个刚接入的 Team：original 是同步检测到的老成员，untracked 还没有任何记录。"""
@@ -253,7 +254,6 @@ class PatrolGrandfatherOnceTest(_Base):
 
         self.assertEqual(result["grandfathered"], 1)
         self.assertEqual(result["backfilled"], 1)
-        self.assertEqual(result["detected_kept"], 0)
         self.assertEqual(
             self._sources(TEAM_ID),
             {"original@x.com": "system", "untracked@x.com": "system"},
@@ -261,7 +261,29 @@ class PatrolGrandfatherOnceTest(_Base):
         self.assertTrue(self._marker(TEAM_ID))
         self.assertTrue(self._baseline(TEAM_ID))
 
-    def test_second_activation_keeps_detected_strangers_detected(self):
+    def test_automatic_first_baseline_grandfathers_existing_members(self):
+        # 巡逻已由别的 Team 武装；这个 Team 从没建过基线，run_patrol 自动纳入它。
+        self._seed_team()
+        conn = self._conn()
+        _set_setting(conn, "patrol_kick_enabled", "1")
+        _set_setting(conn, "patrol_baseline_at", NOW)
+        conn.close()
+        self.assertIsNone(self._marker(TEAM_ID))
+
+        result = patrol.run_patrol(dry_run=False, allow_team_ids=[TEAM_ID])
+
+        self.assertEqual(result["kicked"], 0)
+        self.assertEqual(
+            self._sources(TEAM_ID),
+            {"original@x.com": "system", "untracked@x.com": "system"},
+        )
+        self.assertTrue(self._marker(TEAM_ID))
+        self.assertTrue(self._baseline(TEAM_ID))
+        detail = self._logs("patrol_team_initialize")[-1]["detail"]
+        self.assertIn("grandfathered=1", detail)
+        self.assertIn("backfilled=1", detail)
+
+    def test_explicit_rearm_protects_current_detected_members(self):
         self._seed_team()
         patrol.activate_patrol_sync([TEAM_ID])
         first_marker = self._marker(TEAM_ID)
@@ -269,23 +291,23 @@ class PatrolGrandfatherOnceTest(_Base):
 
         result = patrol.activate_patrol_sync([TEAM_ID])
 
-        self.assertEqual(result["grandfathered"], 0)
+        # 管理员再次开启 = 再次确认当前成员：之前检测到的 stranger 也被保护。
+        self.assertEqual(result["grandfathered"], 1)
         self.assertEqual(result["backfilled"], 1)
-        self.assertEqual(result["detected_kept"], 1)
         self.assertEqual(
             self._sources(TEAM_ID),
             {
                 "original@x.com": "system",
                 "untracked@x.com": "system",
-                "stranger@x.com": "detected",
+                "stranger@x.com": "system",
                 "rowless@x.com": "system",
             },
         )
-        # 标记记的是第一次 grandfather 的时间，重建基线不改它。
+        # 标记记的是第一次 grandfather 的时间，再次开启不改它。
         self.assertEqual(self._marker(TEAM_ID), first_marker)
-        self.assertEqual(self._dry_run_candidates(), ["stranger@x.com"])
+        self.assertEqual(self._dry_run_candidates(), [])
 
-    def test_patrol_off_then_on_keeps_detected_strangers_as_candidates(self):
+    def test_patrol_off_then_on_protects_current_members(self):
         self._seed_team()
         patrol.activate_patrol_sync([TEAM_ID])
         asyncio.run(patrol_routes.update_patrol_settings(
@@ -295,11 +317,13 @@ class PatrolGrandfatherOnceTest(_Base):
 
         result = patrol.activate_patrol_sync([TEAM_ID])
 
-        self.assertEqual(result["grandfathered"], 0)
-        self.assertEqual(self._sources(TEAM_ID)["stranger@x.com"], "detected")
-        self.assertEqual(self._dry_run_candidates(), ["stranger@x.com"])
+        self.assertEqual(result["grandfathered"], 1)
+        self.assertEqual(self._sources(TEAM_ID)["stranger@x.com"], "system")
+        self.assertEqual(self._dry_run_candidates(), [])
 
-    def test_token_expired_recovery_keeps_detected_and_backfills_only_rowless(self):
+    def _recover_from_token_expired(self):
+        """已武装的 Team 掉成 token_expired（基线被删），期间有人混进来，管理员重新导入，
+        随后第一轮巡逻自动重建基线（这一轮不处理任何候选，RaisingClient 站岗）。"""
         self._seed_team()
         patrol.activate_patrol_sync([TEAM_ID])
 
@@ -315,8 +339,10 @@ class PatrolGrandfatherOnceTest(_Base):
         _import_team_session(log_action="reimport_team", expected_team_id=TEAM_ID)
         self.assertTrue(self._marker(TEAM_ID))
 
-        # 恢复后第一轮巡逻重建基线（这一轮不处理任何候选，RaisingClient 站岗）。
-        result = patrol.run_patrol(dry_run=False, allow_team_ids=[TEAM_ID])
+        return patrol.run_patrol(dry_run=False, allow_team_ids=[TEAM_ID])
+
+    def test_token_expired_recovery_keeps_detected_and_backfills_only_rowless(self):
+        result = self._recover_from_token_expired()
 
         self.assertEqual(result["kicked"], 0)
         self.assertTrue(self._baseline(TEAM_ID))
@@ -324,6 +350,7 @@ class PatrolGrandfatherOnceTest(_Base):
         self.assertEqual(len(init_logs), 1)
         self.assertIn("grandfathered=0", init_logs[0]["detail"])
         self.assertIn("backfilled=1", init_logs[0]["detail"])
+        self.assertIn("detected_kept=1", init_logs[0]["detail"])
         self.assertEqual(
             self._sources(TEAM_ID),
             {
@@ -334,6 +361,25 @@ class PatrolGrandfatherOnceTest(_Base):
             },
         )
         self.assertEqual(self._dry_run_candidates(), ["stranger@x.com"])
+
+    def test_explicit_activation_after_recovery_protects_kept_strangers(self):
+        self._recover_from_token_expired()
+        self.assertEqual(self._sources(TEAM_ID)["stranger@x.com"], "detected")
+
+        result = patrol.activate_patrol_sync([TEAM_ID])
+
+        self.assertEqual(result["grandfathered"], 1)
+        self.assertEqual(self._sources(TEAM_ID)["stranger@x.com"], "system")
+        self.assertEqual(self._dry_run_candidates(), [])
+
+    def test_callers_must_choose_protection_mode(self):
+        self._seed_team()
+        conn = self._conn()
+        try:
+            with self.assertRaises(TypeError):
+                patrol._protect_team_snapshot_sync(conn, TEAM_ID, NOW)
+        finally:
+            conn.close()
 
     def test_deleted_and_readded_team_is_grandfathered_again(self):
         self._seed_team()
@@ -387,9 +433,15 @@ class PatrolGrandfatherOnceTest(_Base):
         for team_id in ("team-baselined", "team-never-baselined"):
             _set_cache(conn, team_id, [_owner(), _member(f"x@{team_id}", f"u-{team_id}")])
             _insert_expiry(conn, team_id, f"u-{team_id}", f"x@{team_id}", "detected")
+
+        # 自动重建基线（例如 token_expired 恢复后）才看标记；管理员显式开启不看。
+        _set_setting(conn, "patrol_kick_enabled", "1")
+        _set_setting(conn, "patrol_baseline_at", NOW)
+        conn.execute("DELETE FROM patrol_team_baselines")
+        conn.commit()
         conn.close()
 
-        patrol.activate_patrol_sync(["team-baselined", "team-never-baselined"])
+        patrol.run_patrol(dry_run=True, allow_team_ids=["team-baselined", "team-never-baselined"])
 
         self.assertEqual(self._sources("team-baselined"), {"x@team-baselined": "detected"})
         self.assertEqual(
@@ -536,22 +588,19 @@ class PatrolInvalidEntitlementTest(_Base):
 
 
 class TelegramPatrolOnCopyTest(unittest.TestCase):
-    """/patrol on 的回复不能再说"已豁免当前成员"：重新开启时之前检测到的外部成员仍是巡逻对象。"""
+    """/patrol on 走管理员显式开启，会保护当前全部成员，回复要如实说"已豁免当前成员"。"""
 
     def _reply(self, payload):
         from app import tg_bot
 
-        with patch.object(tg_bot, "_api_post", return_value=payload):
-            return tg_bot.cmd_patrol({}, "on")
+        with patch.object(tg_bot, "_api_post", return_value=payload) as api_post:
+            text = tg_bot.cmd_patrol({}, "on")
+        return text, api_post
 
-    def test_reports_detected_kept(self):
-        text = self._reply({"status": "ok", "grandfathered": 0, "backfilled": 1, "detected_kept": 2})
-        self.assertNotIn("已豁免当前成员", text)
-        self.assertIn("2 个未被保护", text)
-
-    def test_no_warning_when_nothing_kept(self):
-        text = self._reply({"status": "ok", "grandfathered": 5, "backfilled": 0, "detected_kept": 0})
-        self.assertIn("已开启巡逻自动踢人", text)
+    def test_patrol_on_uses_explicit_activation_and_says_members_are_protected(self):
+        text, api_post = self._reply({"status": "ok", "grandfathered": 2, "backfilled": 1})
+        self.assertEqual(api_post.call_args.args[0], "/api/patrol/activate")
+        self.assertEqual(text, "✅ 已豁免当前成员并开启巡逻自动踢人。")
         self.assertNotIn("未被保护", text)
 
 
