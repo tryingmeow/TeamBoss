@@ -474,6 +474,21 @@ def _purchased_duration(row):
     return delta
 
 
+def _credit_purchased_duration(current_expires_at, purchased, now):
+    """把一段买到的时长记到成员身上：max(现有到期, 现在) + 时长。
+
+    与 member_expiry.extend_member_expiry 是同一条续期规则：现有到期还在未来就从它
+    往后加；已经过去、无法解析、或者根本没有（没有记录 / detected 未授权）就从现在
+    起算。兜底行从落盘到被同步看到可能拖了好几天，这段时间不能算进买家的时长里。
+    永久授权（已授权来源 + NULL）由调用方先挡掉，绝不走到这里。
+    """
+    base = _parse_datetime(now) or datetime.now(timezone.utc)
+    current = _parse_datetime(current_expires_at)
+    if current is not None and current > base:
+        base = current
+    return (base + purchased).isoformat()
+
+
 def _resolve_token_use_reconciliations(conn, token_use_id, now):
     """撤掉某次兑换名下的全部兜底行（barrier / extend / backfill）。
 
@@ -608,10 +623,12 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                LIMIT 1""",
             (team_id, live_user_id, live_user_id, live_email, live_email),
         ).fetchone()
+        # kind='extend'：这行代表一次"买到的时长"，不是一个到期时刻。行内的
+        # expires_at 是落盘那一刻的 now + 时长；照抄它，兜底拖了几天买家就少几天。
+        purchased = _purchased_duration(row)
         if existing:
             pending_expires = _parse_datetime(row["expires_at"])
             current_expires = _parse_datetime(existing["expires_at"])
-            purchased = _purchased_duration(row)
             if row["expires_at"] is None:
                 # 这次确认的邀请本身就是永久。
                 resolved_expires = None
@@ -619,18 +636,16 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                 # 已授权的永久记录不能被有限时长兜底降级。detected + NULL
                 # 只是“外部发现、尚未授权”，不代表真正的永久购买。
                 resolved_expires = None
+            elif purchased is not None:
+                # 按 extend_member_expiry 的语义追加：max(现有到期, 现在) + 时长
+                # （detected + NULL 没有已购时长，从现在起算）。只取 max(行内到期,
+                # 现有到期) 会让一个到期时间更远的成员把这次购买的时长整个吃掉，
+                # 而兑换还被置成 success——用户和管理员都看不到任何异常。
+                resolved_expires = _credit_purchased_duration(
+                    existing["expires_at"], purchased, now
+                )
             elif existing["expires_at"] is None:
                 resolved_expires = row["expires_at"]
-            elif purchased is not None:
-                # kind='extend'：这行代表一次"买到的时长"，必须按
-                # extend_member_expiry 的语义追加：max(现有到期, 现在) + 时长。
-                # 只取 max(行内到期, 现有到期) 会让一个到期时间更远的成员把这次
-                # 购买的时长整个吃掉，而兑换还被置成 success——用户和管理员都看
-                # 不到任何异常。
-                base = _parse_datetime(now) or datetime.now(timezone.utc)
-                if current_expires and current_expires > base:
-                    base = current_expires
-                resolved_expires = (base + purchased).isoformat()
             elif pending_expires and current_expires:
                 resolved_expires = max(pending_expires, current_expires).isoformat()
             else:
@@ -652,8 +667,13 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                 ),
             )
         else:
-            resolved_expires = row["expires_at"]
-            auto_kick = 1 if row["expires_at"] else 0
+            if purchased is not None:
+                # 没有现行记录（上一段已 kicked=1 归档也算）：没有已购时长要保护，
+                # 和 extend_member_expiry 一样从现在起算。
+                resolved_expires = _credit_purchased_duration(None, purchased, now)
+            else:
+                resolved_expires = row["expires_at"]
+            auto_kick = 1 if resolved_expires else 0
             conn.execute(
                 """INSERT INTO member_expiry
                    (team_id, user_id, email, expires_at, auto_kick, kicked,
@@ -663,7 +683,7 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                     team_id,
                     live_user_id,
                     live_email,
-                    row["expires_at"],
+                    resolved_expires,
                     auto_kick,
                     now,
                     source,
