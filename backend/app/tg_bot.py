@@ -193,6 +193,14 @@ def _extract_api_error(exc: Exception) -> str:
         except Exception:
             pass
         return f"HTTP {resp.status_code}"
+    if isinstance(exc, requests.RequestException):
+        # 连不上/超时的 requests 异常文本里带着本地后端地址和完整请求路径
+        # （HTTPConnectionPool(host='127.0.0.1', port=...) ... url: /api/...），
+        # 这些回复也会发给成员，只记服务端日志。
+        logger.warning("local backend request failed: %r", exc)
+        if isinstance(exc, requests.Timeout):
+            return "服务响应超时，请稍后查看结果，确认后再重试"
+        return "服务暂时不可用，请稍后再试"
     return str(exc)[:300]
 
 
@@ -237,11 +245,71 @@ def _team_lines(teams: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# 配对码错误锁定：同一个 chat 在 _PAIR_FAILURE_WINDOW 内输错 _PAIR_MAX_BAD_CODES 次
+# （码根本不存在），之后 _PAIR_LOCKOUT_SECONDS 内这个 chat 的 /pair 一律拒绝、不查库。
+# 管理员配对码能直接换来后台权限，不能让人对着机器人无限次猜。只由轮询线程访问。
+_PAIR_MAX_BAD_CODES = 5
+_PAIR_FAILURE_WINDOW = 3600
+_PAIR_LOCKOUT_SECONDS = 1800
+_pair_failures: dict[str, dict] = {}  # chat_id -> {"count", "first_at", "locked_until"}
+
+
+def _pair_locked(chat_id: str, now: float) -> bool:
+    entry = _pair_failures.get(str(chat_id))
+    return bool(entry) and entry.get("locked_until", 0) > now
+
+
+def _record_bad_pair_code(chat_id: str, now: float) -> bool:
+    """记一次错误配对码；返回这一次之后是否进入锁定。"""
+    if len(_pair_failures) > 1000:
+        for key in list(_pair_failures):
+            entry = _pair_failures[key]
+            if entry.get("locked_until", 0) <= now and now - entry["first_at"] > _PAIR_FAILURE_WINDOW:
+                del _pair_failures[key]
+
+    key = str(chat_id)
+    entry = _pair_failures.get(key)
+    if entry is None or now - entry["first_at"] > _PAIR_FAILURE_WINDOW:
+        entry = {"count": 0, "first_at": now, "locked_until": 0}
+        _pair_failures[key] = entry
+    entry["count"] += 1
+    if entry["count"] >= _PAIR_MAX_BAD_CODES:
+        entry["locked_until"] = now + _PAIR_LOCKOUT_SECONDS
+        return True
+    return False
+
+
+_PAIR_LOCKED_TEXT = f"配对码错误次数过多，请 {_PAIR_LOCKOUT_SECONDS // 60} 分钟后再试。"
+
+
+def _notify_admins_of_new_admin(recipients: list[str], chat_id: str, username: Optional[str], paired_at: str) -> None:
+    """有人用配对码拿到管理员身份时，告诉此前所有管理员。
+
+    配对码一旦外泄，这条通知是现有管理员唯一能及时发现的信号。
+    """
+    who = username or "（未知）"  # Telegram 用户名，没有时是对方自己填的名字
+    text = (
+        "🔔 有新的 Telegram 管理员完成了配对\n"
+        f"👤 账号：{who}\n"
+        f"🆔 Chat ID：{chat_id}\n"
+        f"🕒 时间：{paired_at}\n"
+        "如果这不是你们自己的操作，请立即到后台的 Telegram 设置里停用这个账号，并吊销未使用的配对码。"
+    )
+    for recipient in recipients:
+        try:
+            _send(recipient, text)
+        except Exception:
+            logger.exception("failed to notify an admin about a new admin pairing")
+
+
 def _pair(chat_id: str, username: Optional[str], code: str) -> str:
     """尝试用配对码注册当前 chat。返回要回复的文本。"""
     code = (code or "").strip().upper()
     if not code:
         return "配对码不能为空。发送 /pair <配对码> 完成注册。"
+
+    if _pair_locked(chat_id, time.time()):
+        return _PAIR_LOCKED_TEXT
 
     member_result = claim_member_pairing_code_sync(chat_id, username, code)
     if member_result is not None:
@@ -259,6 +327,8 @@ def _pair(chat_id: str, username: Optional[str], code: str) -> str:
                 "SELECT * FROM tg_pairing_codes WHERE code = ?", (code,)
             ).fetchone()
             if not row:
+                if _record_bad_pair_code(chat_id, time.time()):
+                    return _PAIR_LOCKED_TEXT
                 return "配对码无效，请核对后重试。"
             if row["disabled"]:
                 return "配对码已被吊销。"
@@ -287,6 +357,13 @@ def _pair(chat_id: str, username: Optional[str], code: str) -> str:
                 conn.rollback()
                 return "配对码已被其他用户同时使用，请稍后重试或向管理员索取新的配对码。"
 
+            existing_admins = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT chat_id FROM tg_users WHERE disabled = 0 AND chat_id != ?",
+                    (str(chat_id),),
+                ).fetchall()
+            ]
             conn.execute(
                 """INSERT INTO tg_users (chat_id, username, paired_at, created_at, disabled)
                    VALUES (?, ?, ?, ?, 0)
@@ -296,6 +373,7 @@ def _pair(chat_id: str, username: Optional[str], code: str) -> str:
                 (str(chat_id), username, now, now),
             )
             conn.commit()
+            _pair_failures.pop(str(chat_id), None)
 
             try:
                 sync_chat_commands_sync(str(chat_id), conn=conn)
@@ -309,6 +387,7 @@ def _pair(chat_id: str, username: Optional[str], code: str) -> str:
         logger.exception("admin pairing failed")
         return "注册失败，请联系管理员。"
 
+    _notify_admins_of_new_admin(existing_admins, str(chat_id), username, now)
     return "✅ 管理员注册成功。发送 /help 查看管理命令。"
 
 
@@ -1552,8 +1631,10 @@ def _handle_message(message: dict) -> None:
         _reset_wizard(chat_id)
         try:
             _handle_info(user, chat_id, args, member_emails)
-        except Exception as exc:
-            _send(chat_id, f"命令执行出错：{exc}")
+        except Exception:
+            # 成员也能走到这里，异常原文不回给对方。
+            logger.exception("tg /info failed")
+            _send(chat_id, "查询失败，请稍后再试。")
         return
 
     # 只有成员身份、没有操作员权限时，不能进入任何后台命令。
