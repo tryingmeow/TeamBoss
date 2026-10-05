@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Query
-from typing import Literal, Optional
+from fastapi import APIRouter, HTTPException, Query
+from typing import Literal, Optional, Sequence, Union
 
 from ..database import get_db
 
@@ -47,19 +47,58 @@ MEMBER_LOG_ACTION_PREFIXES = (
 )
 
 
-def add_log_search_condition(conditions: list[str], params: list[str], q: Optional[str]) -> None:
-    query = (q or "").strip()
-    if not query:
+# 单次请求最多接受的搜索词 / 动作码个数，避免拼出无界 SQL。
+MAX_LOG_FILTER_VALUES = 50
+
+
+def normalize_log_values(
+    values: Union[str, Sequence[str], None],
+    *,
+    split_commas: bool = False,
+    lowercase: bool = False,
+) -> list[str]:
+    """Flatten repeated params into stripped, de-duplicated, non-blank values (order kept)."""
+    if values is None:
+        return []
+    raw = [values] if isinstance(values, str) else list(values)
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        for part in (item.split(",") if split_commas else [item]):
+            value = part.strip()
+            if lowercase:
+                value = value.lower()
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+    if len(out) > MAX_LOG_FILTER_VALUES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"too many filter values (max {MAX_LOG_FILTER_VALUES})",
+        )
+    return out
+
+
+def add_log_search_condition(
+    conditions: list[str],
+    params: list[str],
+    q: Union[str, Sequence[str], None],
+    q_actions: Union[str, Sequence[str], None] = None,
+) -> None:
+    """Search group: any term is a substring of any column, OR action is one of q_actions."""
+    terms = normalize_log_values(q, lowercase=True)
+    actions = normalize_log_values(q_actions, split_commas=True)
+    if not terms and not actions:
         return
 
-    conditions.append(
-        "("
-        + " OR ".join(
-            f"LOWER(COALESCE({column}, '')) LIKE ?" for column in LOG_SEARCH_COLUMNS
-        )
-        + ")"
-    )
-    params.extend([f"%{query.lower()}%"] * len(LOG_SEARCH_COLUMNS))
+    clauses: list[str] = []
+    for term in terms:
+        clauses.extend(f"LOWER(COALESCE({column}, '')) LIKE ?" for column in LOG_SEARCH_COLUMNS)
+        params.extend([f"%{term}%"] * len(LOG_SEARCH_COLUMNS))
+    if actions:
+        clauses.append(f"l.action IN ({', '.join('?' for _ in actions)})")
+        params.extend(actions)
+    conditions.append("(" + " OR ".join(clauses) + ")")
 
 
 def add_log_scope_condition(
@@ -81,11 +120,12 @@ def add_log_scope_condition(
 @router.get("")
 async def get_logs(
     team_id: Optional[str] = Query(None),
-    action: Optional[str] = Query(None),
+    action: Optional[list[str]] = Query(None),
     scope: Optional[Literal["members"]] = Query(None),
-    q: Optional[str] = Query(None),
+    q: Optional[list[str]] = Query(None),
+    q_action: Optional[list[str]] = Query(None),
     page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200)
+    per_page: int = Query(50, ge=1, le=1000)
 ):
     conditions = []
     params = []
@@ -93,11 +133,15 @@ async def get_logs(
     if team_id:
         conditions.append("l.team_id = ?")
         params.append(team_id)
-    if action:
+    actions = normalize_log_values(action, split_commas=True)
+    if len(actions) == 1:
         conditions.append("l.action = ?")
-        params.append(action)
+        params.append(actions[0])
+    elif actions:
+        conditions.append(f"l.action IN ({', '.join('?' for _ in actions)})")
+        params.extend(actions)
     add_log_scope_condition(conditions, params, scope)
-    add_log_search_condition(conditions, params, q)
+    add_log_search_condition(conditions, params, q, q_action)
 
     where_clause = ""
     if conditions:

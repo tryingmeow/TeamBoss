@@ -398,17 +398,21 @@ export interface LogsResult {
 
 export async function fetchLogs(params?: {
   team_id?: string;
-  action?: string;
+  action?: string | string[];
   scope?: 'members';
-  q?: string;
+  /** Repeated terms are ORed: a row matches if any term is a substring of any searched column. */
+  q?: string | string[];
+  /** Action codes ORed into the `q` search group. */
+  q_action?: string[];
   page?: number;
   per_page?: number;
 }): Promise<LogsResult> {
   const query = new URLSearchParams();
   if (params?.team_id) query.set('team_id', params.team_id);
-  if (params?.action) query.set('action', params.action);
+  for (const action of [params?.action ?? []].flat()) if (action) query.append('action', action);
   if (params?.scope) query.set('scope', params.scope);
-  if (params?.q?.trim()) query.set('q', params.q.trim());
+  for (const term of [params?.q ?? []].flat()) if (term.trim()) query.append('q', term.trim());
+  for (const code of params?.q_action ?? []) if (code) query.append('q_action', code);
   if (params?.page) query.set('page', String(params.page));
   if (params?.per_page) query.set('per_page', String(params.per_page));
   const qs = query.toString();

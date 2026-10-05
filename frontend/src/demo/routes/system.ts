@@ -144,10 +144,13 @@ function checkProxy(ctx: DemoContext): DemoResponse {
 function listLogs(ctx: DemoContext): DemoResponse {
   const { query, db } = ctx;
   const teamId = query.get('team_id');
-  const action = query.get('action');
+  const csv = (name: string) =>
+    query.getAll(name).flatMap((v) => v.split(',')).map((v) => v.trim()).filter(Boolean);
+  const actions = csv('action');
+  const qActions = csv('q_action');
+  const terms = query.getAll('q').map((v) => v.trim().toLowerCase()).filter(Boolean);
   const scope = query.get('scope');
-  const q = (query.get('q') ?? '').trim().toLowerCase();
-  const perPage = Math.min(Math.max(Number(query.get('per_page')) || 50, 1), 200);
+  const perPage = Math.min(Math.max(Number(query.get('per_page')) || 50, 1), 1000);
   const page = Math.max(Number(query.get('page')) || 1, 1);
 
   const joined: OperationLog[] = db.logs.map((row) => {
@@ -163,13 +166,15 @@ function listLogs(ctx: DemoContext): DemoResponse {
 
   const filtered = joined.filter((log) => {
     if (teamId && log.team_id !== teamId) return false;
-    if (action && log.action !== action) return false;
+    if (actions.length && !actions.includes(log.action ?? '')) return false;
     if (scope === 'members' && !isMemberLog(log.action)) return false;
-    if (!q) return true;
-    return [
+    if (!terms.length && !qActions.length) return true;
+    if (qActions.includes(log.action ?? '')) return true;
+    const haystack = [
       log.team_id, log.action, log.target_email, log.detail, log.result, log.error_message, log.trigger_type,
       log.created_at, log.team_name, log.team_remark, log.team_owner_email, log.team_status,
-    ].some((value) => (value ?? '').toLowerCase().includes(q));
+    ].map((value) => (value ?? '').toLowerCase());
+    return terms.some((term) => haystack.some((value) => value.includes(term)));
   });
 
   const total = filtered.length;
