@@ -4,7 +4,6 @@
 职责：
 - 读写 member_cache 表（成员列表快照）
 - 写入 member_watch 表（变动监视任务）
-- 为搜索提供成员邮件列表
 
 缓存策略（懒加载）：
   首次打开成员面板时写入缓存。
@@ -129,24 +128,6 @@ async def update_cached_member_expiry(
         await db.commit()
 
 
-async def get_cached_member_emails(team_id: str) -> list[str]:
-    """
-    返回该 team 缓存中所有成员（active + pending）的邮件列表，供搜索使用。
-    若无缓存返回空列表。
-    """
-    cached = await get_cached_members(team_id)
-    if not cached:
-        return []
-    emails = set()
-    for m in cached["members"]:
-        if m.get("email"):
-            emails.add(m["email"].lower())
-    for p in cached["pending_invites"]:
-        if p.get("email"):
-            emails.add(p["email"].lower())
-    return list(emails)
-
-
 # ── 监视任务 ─────────────────────────────────────────────────────────────────
 
 WATCH_TIMEOUT_MINUTES = 30  # 监视最长时间，超时后强制刷新缓存并退出
@@ -191,25 +172,6 @@ async def add_member_watch(
         """, (team_id, reason, target_email, target_user_id, now_iso, expires_at,
               tg_chat_id, tg_message_id))
         await db.commit()
-
-
-async def mark_watch_done(watch_id: int):
-    async with get_db() as db:
-        await db.execute("UPDATE member_watch SET done = 1 WHERE id = ?", (watch_id,))
-        await db.commit()
-
-
-async def get_pending_watches() -> list[dict]:
-    """获取所有尚未完成的监视任务。"""
-    async with get_db() as db:
-        cursor = await db.execute("""
-            SELECT mw.*, t.access_token, t.device_id
-            FROM member_watch mw
-            JOIN teams t ON mw.team_id = t.id
-            WHERE mw.done = 0 AND t.status = 'active'
-        """)
-        rows = await cursor.fetchall()
-    return [dict(r) for r in rows]
 
 
 # ── 实时拉取并写缓存（供 GET /members 首次调用） ─────────────────────────────
