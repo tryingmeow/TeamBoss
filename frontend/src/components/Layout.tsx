@@ -253,6 +253,12 @@ export default function Layout() {
     showToast('设置已保存');
   };
 
+  // The server unbinds a deleted proxy from its Teams; mirror that at once, then re-read.
+  const handleProxyDeleted = (proxyId: number) => {
+    setTeams((prev) => prev.map((team) => (team.proxy_id === proxyId ? { ...team, proxy_id: null } : team)));
+    void refresh();
+  };
+
   const handleGptMembersAdded = async (result?: unknown) => {
     const data = result as InviteGptMembersResult | undefined;
     const added = data?.added?.length ?? 0;
@@ -483,6 +489,7 @@ export default function Layout() {
           onLoad={loadSettings}
           onSave={handleSaveSettings}
           teams={teams}
+          onProxyDeleted={handleProxyDeleted}
         />
 
         <ConfirmDialog

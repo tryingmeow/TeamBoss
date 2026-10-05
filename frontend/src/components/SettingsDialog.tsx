@@ -69,6 +69,8 @@ interface SettingsDialogProps {
   onSave: (data: Partial<Settings>) => Promise<void>;
   /** Used to tell which Teams a proxy deletion affects. */
   teams?: Pick<Team, 'name' | 'proxy_id'>[];
+  /** Called after a proxy is deleted; the server has already unbound it from its Teams. */
+  onProxyDeleted?: (proxyId: number) => void;
 }
 
 const STATUS_CLEAR_MS = 4000;
@@ -81,6 +83,7 @@ export default function SettingsDialog({
   onLoad,
   onSave,
   teams = [],
+  onProxyDeleted,
 }: SettingsDialogProps) {
   const [interval, setInterval_] = useState(settings.sync_interval_minutes);
   const [concurrency, setConcurrency] = useState(settings.api_concurrency);
@@ -250,6 +253,7 @@ export default function SettingsDialog({
       await deleteProxy(id);
       setProxies((prev) => prev.filter((p) => p.id !== id));
       setProxyToDelete(null);
+      onProxyDeleted?.(id);
     } catch (err) {
       setProxyToDelete(null);
       setErrorText(err instanceof Error ? err.message : '删除失败');
