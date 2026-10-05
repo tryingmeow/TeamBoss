@@ -473,7 +473,9 @@ export default function JoinPage() {
                   );
                 })}
               </div>
-              {redeemResult.choices.some((choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged') && (
+              {redeemResult.choices.some(
+                (choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged' && choice.renewable !== false,
+              ) && (
                 <p className="mt-3 text-xs text-gray-500 dark:text-ink-400">
                   续期「未纳入到期管理」的 Team 会自动设定到期时间，到期后自动移出。
                 </p>
