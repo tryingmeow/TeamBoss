@@ -47,7 +47,7 @@ from ..chatgpt_limiter import run_chatgpt_call_sync
 from ..database import get_db_path
 from ..tg_format import detail_card
 from .member_expiry import compute_effective_kick_at, normalize_kick_mode
-from .seat_capacity import member_seat_usage_from_members
+from .seat_capacity import member_seat_usage_from_members, positive_seat_count
 from .tg_member_bindings import deactivate_member_binding_if_inactive_sync
 from .tg_commands import sync_email_chat_commands_sync
 from .tg_notify import notify_admins_sync
@@ -539,11 +539,10 @@ def valid_seats_entitled(value: Any) -> Optional[int]:
 
     超员判定是 over_by = active_chatgpt - seats_entitled。把 NULL/0/负数/脏数据当成 0
     会让每个 default 席位都"超员"，巡逻就把所有 detected 成员都当成候选——未知的
-    席位数绝不能当成"0 个席位"，只能当成"判断不了"。
+    席位数绝不能当成"0 个席位"，只能当成"判断不了"。合法性规则和写库端共用
+    seat_capacity.positive_seat_count，两边不能各判各的。
     """
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if value > 0 else None
+    return positive_seat_count(value)
 
 
 def classify_team(*, team_id: str, name: str, codex_enabled: bool,
