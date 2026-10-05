@@ -150,9 +150,11 @@ class UnavailableTeamMembershipBlocksRedemptionTest(_RedeemFlowTest):
         self.assertEqual(await self._rows("SELECT * FROM redemption_email_claims"), [])
         uses = await self._rows("SELECT result FROM access_token_uses WHERE token_id = ?", (token_id,))
         self.assertEqual([u["result"] for u in uses], ["failed"])
-        # 整个过程没碰上游，单码和全站的尝试次数都不扣。
-        self.assertEqual(self.budget._per_code_hits.get(token_id, []), [])
-        self.assertEqual(self.budget._global_hits, [])
+        # 拒绝前要先实时扫描可用 Team（人若在其中就该走选择提示而不是拒绝），所以这次
+        # 尝试像其他实时查询之后的拒绝一样计入预算。没有可用 Team 时的纯本地拒绝仍全额
+        # 退回，见 test_final_fix_g1_redeem。
+        self.assertEqual(len(self.budget._per_code_hits.get(token_id, [])), 1)
+        self.assertEqual(len(self.budget._global_hits), 1)
 
     async def test_paid_member_of_a_token_expired_team_is_not_invited_elsewhere(self):
         await self._team("team-a")
@@ -174,7 +176,15 @@ class UnavailableTeamMembershipBlocksRedemptionTest(_RedeemFlowTest):
         }
         token_id = await self._token("atm_inactive_renew")
 
-        await self._assert_blocked_without_consuming("atm_inactive_renew", token_id)
+        # 不替用户选 Team：走多 Team 提示，不可用的 team-x 列出但不可续，码不消耗。
+        result = await self._redeem("atm_inactive_renew")
+        self.assertEqual(result["status"], "team_selection_required")
+        self.assertEqual(
+            {(c["team_id"], c["renewable"]) for c in result["choices"]},
+            {("team-a", True), ("team-x", False)},
+        )
+        self.assertEqual(self.invites, [])
+        self.assertEqual(await self._used_count(token_id), 0)
         rows = await self._rows(
             "SELECT expires_at FROM member_expiry WHERE team_id = 'team-a'"
         )

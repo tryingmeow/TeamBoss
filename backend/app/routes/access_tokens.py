@@ -396,6 +396,57 @@ async def _mark_token_use_uncertain(
             raise RuntimeError(f"failed to lock uncertain redemption: {token_use_id}")
 
 
+async def _lock_uncertain_with_barrier(
+    token_use_id: int,
+    *,
+    team_id: str,
+    email: str,
+    error_message: str,
+    reason: str,
+) -> bool:
+    """在同一个写事务里把兑换从 pending 锁成 uncertain，并立 kind='barrier' 的巡逻屏障。
+
+    两步必须同生同灭。分两个事务写时，这笔兑换在中间那一刻已经是 uncertain、
+    别的流程看得见：管理员收尾或对账任务若恰好在这时把它结清，结清时撤屏障是空操作，
+    随后才写进来的屏障就永远停在 resolved=0——巡逻和自动踢人从此永远跳过这个人。
+    同一事务里，结清要么发生在前（行已不是 pending，什么都不写），要么发生在后
+    （屏障已在，结清会把它一起撤掉）。
+
+    行已不是 pending 时什么都不写，返回 False；两步都提交才返回 True；任何一步失败
+    都整体回滚并抛出，兑换保持 pending，由 ``reconcile_pending_redemptions`` 稍后重试。
+
+    屏障行的列与 services/member_expiry.py ``_insert_pending_invite_reconciliation``
+    写的一致（那个函数自己开连接提交，没法并进这个事务）：user_id 为空、
+    expires_at 为 NULL、source='self_service'。时长结算只走对账的累加语义。
+    """
+    now = utc_now().isoformat()
+    async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                """UPDATE access_token_uses
+                   SET action = 'invite_pending', team_id = ?, result = 'uncertain',
+                       error_message = ?
+                   WHERE id = ? AND result = 'pending'""",
+                (team_id, error_message, token_use_id),
+            )
+            if cursor.rowcount != 1:
+                await db.rollback()
+                return False
+            await db.execute(
+                """INSERT INTO pending_invite_reconciliations
+                   (team_id, user_id, email, expires_at, source, reason, resolved,
+                    created_at, token_use_id, kind)
+                   VALUES (?, '', ?, NULL, 'self_service', ?, 0, ?, ?, 'barrier')""",
+                (team_id, (email or "").strip().lower(), reason, now, token_use_id),
+            )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+    return True
+
+
 async def _get_redemption_history(
     email: str, *, token_id: int, limit: int = 20
 ) -> list[dict[str, Any]]:
@@ -746,14 +797,14 @@ _UNAVAILABLE_TEAM_SQL = (
 )
 
 
-async def _memberships_in_unavailable_teams(email: str) -> list[str]:
-    """本地记录显示这个邮箱身在其中、但本次兑换无法实时核对的 Team id 列表。
+async def _memberships_in_unavailable_teams(email: str) -> list[dict[str, Any]]:
+    """本地记录显示这个邮箱身在其中、但本次兑换无法实时核对的 Team，按 team_id 排序。
 
     兑换只实时扫描 active 且登录正常的 Team。邮箱若身在一个非 active（例如
     token_expired）或登录被拒的 Team 里，实时扫描看不到他：没指定 Team 时会给他
     在别的队另开一个席位，旧队的到期照样在走；他若同时在一个可实时扫描的 Team，
-    那个队会在没问过他的情况下被续期。
-    这两种都是替用户选了 Team，所以只要本地有任何迹象就拒绝、退码、请管理员处理。
+    那个队会在没问过他的情况下被续期。这两种都是替用户选了 Team。调用方据此：
+    要发新邀请时拒绝；人在可用 Team 里但没选 Team 时把这些队列进选择提示（不可续）。
 
     算作"在里面"的本地迹象（都只算 teams 表里仍存在的 Team）：
     * member_expiry 中 kicked=0 的记录，任何 source——包括 ``detected``：detected
@@ -763,39 +814,102 @@ async def _memberships_in_unavailable_teams(email: str) -> list[str]:
     Team 已从 teams 表删除的记录不算：删除 Team 时 member_expiry 刻意保留作审计
     （见 routes/teams.py delete_team），那个 Team 已不受本系统管理，也没有任何
     可续的对象；拿它挡兑换只会让这些人永远无法再兑换。team_id 为空的老记录同理。
+
+    每项：``team_id``、``team_name``、``kind``（member：有到期记录或缓存里已加入；
+    invite：只在缓存的待接受邀请里）、``expires_at``（最新一条 kicked=0 记录的到期，
+    取法同 get_active_expiry_state，没有记录时为 None）。
     """
     normalized = (email or "").strip().lower()
     if not normalized:
         return []
-    found: set[str] = set()
+    found: dict[str, dict[str, Any]] = {}
     async with get_db() as db:
         cursor = await db.execute(
-            f"""SELECT DISTINCT me.team_id
+            f"""SELECT me.team_id, t.name AS team_name, me.expires_at
                 FROM member_expiry me
                 JOIN teams t ON t.id = me.team_id
-                WHERE me.kicked = 0 AND lower(me.email) = ? AND {_UNAVAILABLE_TEAM_SQL}""",
+                WHERE me.kicked = 0 AND lower(me.email) = ? AND {_UNAVAILABLE_TEAM_SQL}
+                ORDER BY COALESCE(me.created_at, me.first_seen_at) DESC, me.id DESC""",
             (normalized,),
         )
-        found.update(row["team_id"] for row in await cursor.fetchall())
+        for row in await cursor.fetchall():
+            # 按最新在前排序，每个 Team 只留第一条。
+            found.setdefault(
+                row["team_id"],
+                {
+                    "team_id": row["team_id"],
+                    "team_name": row["team_name"],
+                    "kind": "member",
+                    "expires_at": row["expires_at"],
+                },
+            )
         cursor = await db.execute(
-            f"""SELECT mc.team_id, mc.members_json, mc.pending_json
+            f"""SELECT mc.team_id, t.name AS team_name, mc.members_json, mc.pending_json
                 FROM member_cache mc
                 JOIN teams t ON t.id = mc.team_id
                 WHERE {_UNAVAILABLE_TEAM_SQL}"""
         )
         cache_rows = await cursor.fetchall()
     for row in cache_rows:
+        if row["team_id"] in found:
+            continue
         try:
-            snapshot = {
-                "members": json.loads(row["members_json"] or "[]"),
-                "pending_invites": json.loads(row["pending_json"] or "[]"),
-            }
+            members = json.loads(row["members_json"] or "[]") or []
+            pending = json.loads(row["pending_json"] or "[]") or []
         except (TypeError, ValueError):
             logger.warning("unreadable member cache for team=%s", row["team_id"])
             continue
-        if _snapshot_contains_email(snapshot, normalized):
-            found.add(row["team_id"])
-    return sorted(found)
+        if _snapshot_contains_email({"members": members}, normalized):
+            kind = "member"
+        elif _snapshot_contains_email({"pending_invites": pending}, normalized):
+            kind = "invite"
+        else:
+            continue
+        found[row["team_id"]] = {
+            "team_id": row["team_id"],
+            "team_name": row["team_name"],
+            "kind": kind,
+            "expires_at": None,
+        }
+    return [found[team_id] for team_id in sorted(found)]
+
+
+async def _unavailable_team_choices(
+    email: str, unavailable: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """选择提示里的不可用 Team：照常列出（用户要认得出自己在哪些队），一律不可续。
+
+    选了它服务端也只会按"所选 Team 当前不可用"退码，这里先把按钮禁掉。
+    """
+    choices: list[dict[str, Any]] = []
+    for hit in unavailable:
+        expiry_state = await get_active_expiry_state(hit["team_id"], "", email)
+        choices.append(
+            {
+                "team_id": hit["team_id"],
+                "team_name": hit.get("team_name"),
+                "status": "joined" if hit["kind"] == "member" else "pending",
+                "expires_at": hit.get("expires_at") if expiry_state == "dated" else None,
+                "is_owner": False,
+                "expiry_state": expiry_state,
+                "renewable": False,
+                "blocked_reason": "team_unavailable",
+            }
+        )
+    return choices
+
+
+async def _log_unavailable_team_refusal(email: str, team_ids: list[str]) -> None:
+    try:
+        await log_operation(
+            None,
+            "self_service_redeem",
+            email,
+            "reason=unavailable_team_membership, teams=" + ",".join(team_ids),
+            "failed",
+        )
+    except Exception:
+        logger.exception("failed to log unavailable-team refusal email=%s", email)
 
 
 async def _find_existing_membership(
@@ -954,7 +1068,10 @@ async def _query_token(raw_token: str) -> dict[str, Any]:
             "email_status_label": email_status.get("status_label"),
             "team_id": latest_use.get("team_id") or email_status.get("team_id"),
             "team_name": latest_use.get("team_name") or email_status.get("team_name"),
-            "user_id": latest_use.get("user_id"),
+            # 上游成员 id 只在这次兑换真的落到这个人身上时才给持码人。失败的尝试也可能
+            # 记着它（例如 Owner/永久成员续期被拒时记下的是对方的 id），而邮箱是持码人
+            # 自己填的，任何人都能拿未用的码对别人的邮箱试一次。
+            "user_id": latest_use.get("user_id") if latest_use.get("result") == "success" else None,
             "action": _PUBLIC_USE_ACTION_ALIASES.get(latest_use.get("action"), latest_use.get("action")),
             "result": latest_use.get("result"),
             "error_message": (
@@ -1101,33 +1218,33 @@ async def _invite_to_available_team(
 
             if mutation_status == "uncertain":
                 error = str(result.get("error") or "OpenAI invite result is uncertain")
-                await _mark_token_use_uncertain(
-                    token_use_id,
-                    team_id=team["id"],
-                    error_message=error,
-                )
-                # 结果未定的邀请也必须先在 pending_invite_reconciliations 里立一道
-                # 屏障，否则同步任务会把远端那个对象当成"陌生邀请"，巡逻随后撤销
-                # 我们自己刚发出去的邀请。kind='barrier' + expires_at=None：这行只
-                # 挡巡逻，时长结算走 reconcile_pending_redemptions 的累加语义。
+                # 结果未定的邀请也必须在 pending_invite_reconciliations 里立一道屏障，
+                # 否则同步任务会把远端那个对象当成"陌生邀请"，巡逻随后撤销我们自己刚
+                # 发出去的邀请。锁 uncertain 和立屏障在同一个事务里（见
+                # _lock_uncertain_with_barrier），中间不留能被结清的空当。
                 try:
-                    await record_uncertain_invite(
-                        team["id"],
-                        "",
-                        email,
-                        None,
-                        source="self_service",
+                    locked = await _lock_uncertain_with_barrier(
+                        token_use_id,
+                        team_id=team["id"],
+                        email=email,
+                        error_message=error,
                         reason=error,
-                        token_use_id=token_use_id,
-                        kind="barrier",
                     )
                 except Exception:
+                    # 两步一起回滚：兑换仍是 invite_pending/pending，码照旧锁在这个
+                    # Team 上。请求结束后对账任务会按"被中断的邀请"把它锁成 uncertain
+                    # 并立屏障（_lock_interrupted_invite），对用户的答复不变。
                     logger.exception(
-                        "failed to arm patrol barrier for uncertain invite "
+                        "failed to lock uncertain invite with its patrol barrier "
                         "team=%s token_use_id=%s",
                         team["id"],
                         token_use_id,
                     )
+                else:
+                    if not locked:
+                        raise RuntimeError(
+                            f"failed to lock uncertain redemption: {token_use_id}"
+                        )
                 try:
                     await log_operation(
                         team["id"],
@@ -1330,35 +1447,27 @@ async def _lock_interrupted_invite(
     if utc_now().timestamp() - created_at.timestamp() < _INTERRUPTED_INVITE_AFTER_SECONDS:
         return False
 
-    try:
-        await _mark_token_use_uncertain(
-            token_use_id,
-            team_id=team_id,
-            error_message=_UNCERTAIN_INVITE_ERROR,
-        )
-    except RuntimeError:
-        # 行已经不是 pending：处理它的兑换刚好落了终态，以那个终态为准。屏障必须在
-        # 转换成功之后才立，否则这里会给一笔已结清的兑换留下一道永远不撤的屏障。
-        return False
-
     reason = "invite interrupted before its result was recorded"
     try:
-        await record_uncertain_invite(
-            team_id,
-            "",
-            attempt["email"],
-            None,
-            source="self_service",
+        locked = await _lock_uncertain_with_barrier(
+            token_use_id,
+            team_id=team_id,
+            email=attempt["email"],
+            error_message=_UNCERTAIN_INVITE_ERROR,
             reason=reason,
-            token_use_id=token_use_id,
-            kind="barrier",
         )
     except Exception:
+        # 两步一起回滚了，兑换仍是 pending：下一轮对账再试。
         logger.exception(
-            "failed to arm patrol barrier for interrupted invite team=%s token_use_id=%s",
+            "failed to lock interrupted invite as uncertain team=%s token_use_id=%s",
             team_id,
             token_use_id,
         )
+        return False
+    if not locked:
+        # 行已经不是 pending：处理它的兑换刚好落了终态，以那个终态为准，也不立屏障。
+        return False
+
     try:
         await log_operation(
             team_id,
@@ -1938,32 +2047,33 @@ async def _redeem_valid_token(
     try:
         # 登录已被上游拒绝的 Team 实时拉名单必然失败，留在扫描里只会让每一次兑换都
         # 503（_find_all_memberships 是 fail-closed 的）。把它和非 active Team 同等
-        # 对待：不实时扫描、不发邀请，人若在里面由下面的本地记录检查拦下。
+        # 对待：不实时扫描、不发邀请，人若在里面由下面的本地记录检查接手。
         teams = [team for team in await load_active_teams() if not team_login_rejected(team)]
 
-        # 先排除"人在一个本次无法实时核对的 Team 里"：下面的实时扫描只覆盖 teams，
-        # 看不到他就会替他另开席位或续另一个队（见 _memberships_in_unavailable_teams）。
+        # "人在一个本次无法实时核对的 Team 里"的本地迹象（见
+        # _memberships_in_unavailable_teams）。下面的实时扫描只覆盖 teams，看不到那些队。
+        # 它只挡"下一步会是新邀请"的兑换；用户选了一个实时确认在里面的 Team 照常续，
+        # 没选 Team 而人在可用 Team 里则进选择提示（不可用的队列出但不可续）。
         # 放在 load_active_teams 之后读：Team 在两次读取之间变成非 active 时，它要么
-        # 还在 teams 里被实时扫描，要么在这里被看到，不会两边都漏掉。
-        # 这一步只读本地库、在任何上游请求之前，所以按 _LocalRefusal 全额退回尝试预算。
-        unavailable_team_ids = await _memberships_in_unavailable_teams(email)
-        if unavailable_team_ids:
+        # 还在 teams 里被实时扫描，要么在这里被看到，不会两边都漏掉；两边都有时以实时
+        # 扫描为准，不重复列。
+        scanned_team_ids = {team["id"] for team in teams}
+        unavailable = [
+            hit
+            for hit in await _memberships_in_unavailable_teams(email)
+            if hit["team_id"] not in scanned_team_ids
+        ]
+        unavailable_team_ids = [hit["team_id"] for hit in unavailable]
+
+        if not teams and unavailable_team_ids:
+            # 没有任何可实时核对的 Team，下一步只可能是新邀请。只读了本地库、没碰上游，
+            # 按 _LocalRefusal 全额退回尝试预算。
             failure_recorded = await _fail_and_release_token_use(
                 token_use_id,
                 action="redeem_failed",
                 error_message="unavailable_team_membership",
             )
-            try:
-                await log_operation(
-                    None,
-                    "self_service_redeem",
-                    email,
-                    "reason=unavailable_team_membership, teams="
-                    + ",".join(unavailable_team_ids),
-                    "failed",
-                )
-            except Exception:
-                logger.exception("failed to log unavailable-team refusal email=%s", email)
+            await _log_unavailable_team_refusal(email, unavailable_team_ids)
             raise _LocalRefusal(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=_UNAVAILABLE_TEAM_DETAIL,
@@ -2017,6 +2127,43 @@ async def _redeem_valid_token(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="所选 Team 已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。",
             )
+
+        if not selected_team_id and unavailable:
+            if not memberships:
+                # 可用 Team 里实时都没有他，下一步就是新邀请：另开席位而不可用 Team 里的
+                # 到期照样在走。退码，请管理员处理。实时扫描已经碰过上游，这次尝试照常
+                # 计入预算（和其他实时查询之后的拒绝一样）。
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="redeem_failed",
+                    error_message="unavailable_team_membership",
+                )
+                await _log_unavailable_team_refusal(email, unavailable_team_ids)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=_UNAVAILABLE_TEAM_DETAIL,
+                )
+            # 人同时在可用 Team 和不可用 Team 里：续哪一个不能替他选。走多 Team 提示，
+            # 不可用的队列出但不可续；他选了可用的队再提交，就走上面"已选 Team"的路径。
+            choices = await _build_team_choices(email, memberships)
+            choices += await _unavailable_team_choices(email, unavailable)
+            failure_recorded = await _fail_and_release_token_use(
+                token_use_id,
+                action="renew_multi_team_prompt",
+                error_message=None,
+                result_value="notice",
+                clear_expires_at=True,
+            )
+            return {
+                "status": "team_selection_required",
+                "action": None,
+                "team_id": None,
+                "team_name": None,
+                "email": email,
+                "expires_at": None,
+                "message": "该邮箱同时在多个 Team 中，请选择要续期的 Team 后再提交。兑换码未使用。",
+                "choices": choices,
+            }
 
         if len(memberships) > 1:
             choices = await _build_team_choices(email, memberships)
