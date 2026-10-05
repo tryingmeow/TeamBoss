@@ -15,7 +15,9 @@ from .services.pricing import account_billing_updates, fetch_seat_pricing_sync
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
     member_seat_usage_from_members,
+    positive_seat_count,
     seat_type_count_from_seat_counts,
+    subscription_column_updates,
 )
 from .services.tg_member_bindings import (
     deactivate_member_binding_if_inactive_sync,
@@ -1007,19 +1009,21 @@ def data_sync_job():
                 updates = []
                 params = []
 
+                # seats_entitled 是 patrol 算 over_by 的分母。这一轮没拿到合法值
+                # （null / 0 / 非正整数 / 缺失）时库里保留上一次的值，但那已经不是
+                # 本轮刷新出来的输入，这个 team 本轮不进巡逻白名单（见 round_ok 处）。
+                entitlement_fresh = False
                 if "error" not in subscription:
-                    # 缺字段就不写这一列，避免把原本正确的值覆盖成 NULL。seats_entitled
-                    # 尤其关键：被清成 NULL 会让 patrol 把 over_by 抬成全部席位，非严格
-                    # 模式没有批量刹车，一趟踢光。见 seat_capacity 的同款守卫。
-                    for col in ("seats_in_use", "seats_entitled", "billing_currency",
-                                "active_start", "active_until"):
-                        if col in subscription:
-                            updates.append(f"{col} = ?")
-                            params.append(subscription.get(col))
-                    if "will_renew" in subscription:
-                        will_renew_raw = subscription.get("will_renew")
-                        updates.append("will_renew = ?")
-                        params.append(None if will_renew_raw is None else (1 if will_renew_raw else 0))
+                    # 缺字段不写、seats_entitled 只认正整数：规则见
+                    # seat_capacity.subscription_column_updates。
+                    for col, value in subscription_column_updates(
+                        subscription, team_id=team_id
+                    ).items():
+                        updates.append(f"{col} = ?")
+                        params.append(value)
+                    entitlement_fresh = isinstance(subscription, dict) and (
+                        positive_seat_count(subscription.get("seats_entitled")) is not None
+                    )
 
                 if balance_info is not None and "error" not in balance_info:
                     balance_value = balance_info.get("balance")
@@ -1485,8 +1489,17 @@ def data_sync_job():
                         source="scheduled_data_sync",
                     )
 
-                if round_ok:
+                if round_ok and entitlement_fresh:
                     refreshed_team_ids.add(team_id)
+                elif round_ok:
+                    _log_operation_sync(
+                        team_id,
+                        "data_sync",
+                        None,
+                        "subscription returned no valid seats_entitled; "
+                        "kept the previous value and left this team out of patrol this round",
+                        "warning",
+                    )
 
                 event = _record_team_sync_outcome(
                     conn,

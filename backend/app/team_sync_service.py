@@ -16,6 +16,7 @@ from .services.seat_capacity import (
     member_seat_usage_from_members_data,
     safe_int,
     seat_type_count_from_seat_counts,
+    subscription_column_updates,
     update_member_seat_usage_cache,
 )
 from .services.team_clients import (
@@ -159,15 +160,10 @@ async def _fetch_overview(
     # value instead of being overwritten with a hardcoded guess.
     updates: dict[str, Any] = {}
     if "error" not in subscription:
-        # 缺字段就不写这一列，避免把原本正确的值覆盖成 NULL（seats_entitled 被清成
-        # NULL 会让 patrol 的 over_by 抬成全部席位，一趟踢光）。
-        for col in ("seats_in_use", "seats_entitled", "billing_currency",
-                    "active_start", "active_until"):
-            if col in subscription:
-                updates[col] = subscription.get(col)
-        if "will_renew" in subscription:
-            will_renew_raw = subscription.get("will_renew")
-            updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
+        # 缺字段不写这一列；seats_entitled 只认正整数，不合格就保留库里上一次的
+        # 合法值（null/0 落库会让 patrol 把全部默认席位算成超员）。规则见
+        # seat_capacity.subscription_column_updates。
+        updates.update(subscription_column_updates(subscription, team_id=client.team_id))
 
         pricing_updates = await fetch_seat_pricing(
             client,

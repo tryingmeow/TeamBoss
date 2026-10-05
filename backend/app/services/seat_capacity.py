@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -7,12 +8,74 @@ from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db
 from ..utils.durations import utc_now
 
+logger = logging.getLogger(__name__)
+
 
 def safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def positive_seat_count(value: Any) -> int | None:
+    """上游 ``seats_entitled`` 的唯一合法形态：JSON 整数且 >= 1。其余一律 None（= 未知）。
+
+    ``seats_entitled`` 是 patrol 算 over_by 的分母，也是邀请前的容量上限。null / 0 /
+    负数落库后，patrol 会把每个默认席位都算成超员、一轮就开始踢 detected 成员；
+    bool 是 int 的子类，必须单独排除；数字字符串（"25"）和浮点数（25.0）也不认——
+    上游契约就是整数，类型变了说明响应结构变了，宁可这一轮当未知，也不去猜。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
+def _describe_untrusted_value(value: Any) -> str:
+    """给日志用：只说形态，不回显任意字符串内容。"""
+    if value is None or isinstance(value, (bool, int, float)):
+        return repr(value)
+    return f"<{type(value).__name__}>"
+
+
+def subscription_column_updates(subscription: dict[str, Any], *, team_id: Any) -> dict[str, Any]:
+    """一次成功的 ``get_subscription`` 响应里可以直接写进 ``teams`` 的列。
+
+    所有写 teams 订阅字段的路径（定时同步、手动同步、导入会话、邀请前的容量缓存）
+    共用这一份规则：
+
+    * 缺字段就不写这一列，避免把原本正确的值覆盖成 NULL。
+    * ``seats_entitled`` 只接受 ``positive_seat_count`` 认可的正整数；不合格（含缺失）
+      就不写，保留上一次的合法值，并记一条 warning。
+    """
+    updates: dict[str, Any] = {}
+    if not isinstance(subscription, dict):
+        logger.warning(
+            "subscription: unrecognized response shape %s for team=%s; nothing written",
+            _describe_untrusted_value(subscription), team_id,
+        )
+        return updates
+    for col in ("seats_in_use", "billing_currency", "active_start", "active_until"):
+        if col in subscription:
+            updates[col] = subscription.get(col)
+
+    raw_entitled = subscription.get("seats_entitled")
+    entitled = positive_seat_count(raw_entitled)
+    if entitled is not None:
+        updates["seats_entitled"] = entitled
+    else:
+        logger.warning(
+            "subscription: ignoring seats_entitled=%s for team=%s; "
+            "keeping the previously stored value",
+            "<missing>" if "seats_entitled" not in subscription
+            else _describe_untrusted_value(raw_entitled),
+            team_id,
+        )
+
+    if "will_renew" in subscription:
+        will_renew_raw = subscription.get("will_renew")
+        updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
+    return updates
 
 
 @dataclass(frozen=True)
@@ -162,8 +225,19 @@ async def fetch_live_chatgpt_seat_capacity(client: Any, pending_limit: int = 100
         if error:
             raise SeatCapacityFetchError(error)
 
+    # 拿不到合法的 seats_entitled 就没有可信的容量：按拉取失败处理（邀请不往这个
+    # team 发、手动巡逻不把它算作刷新成功），而不是 safe_int 成 0 或者把
+    # "25"/True 当成 25/1 个席位。
+    entitled = (
+        positive_seat_count(subscription.get("seats_entitled"))
+        if isinstance(subscription, dict)
+        else None
+    )
+    if entitled is None:
+        raise SeatCapacityFetchError("subscription response has no valid seats_entitled")
+
     capacity = chatgpt_seat_capacity(
-        seats_entitled=subscription.get("seats_entitled"),
+        seats_entitled=entitled,
         seats_in_use=subscription.get("seats_in_use"),
         codex_count=codex_count_from_seat_counts(seat_counts),
         active_chatgpt=chatgpt_count_from_seat_counts(seat_counts),
@@ -218,27 +292,16 @@ async def update_capacity_cache(
             else max(0, seats_in_use - codex_count)
         )
 
-        # Build update dict with only fields that are actually present in the API response.
-        # Omitted fields keep their existing DB values (including NULL if never set).
-        updates: dict[str, Any] = {
+        # Subscription columns follow the shared rule (absent → keep the DB value,
+        # seats_entitled only when it is a positive integer). seats_in_use is
+        # resolved above with member-cache fallbacks, so it overrides the raw one.
+        updates: dict[str, Any] = subscription_column_updates(subscription, team_id=team_id)
+        updates.update({
             "seats_in_use": seats_in_use,
             "codex_count": codex_count,
             "chatgpt_count": chatgpt_count,
             "updated_at": now,
-        }
-
-        # Only add these if they're actually in the subscription response
-        if "active_start" in subscription:
-            updates["active_start"] = subscription["active_start"]
-        if "active_until" in subscription:
-            updates["active_until"] = subscription["active_until"]
-        if "seats_entitled" in subscription:
-            updates["seats_entitled"] = subscription["seats_entitled"]
-        if "billing_currency" in subscription:
-            updates["billing_currency"] = subscription["billing_currency"]
-        if "will_renew" in subscription:
-            will_renew_raw = subscription["will_renew"]
-            updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
+        })
 
         set_clause = ", ".join(f"{key} = ?" for key in updates)
         values = list(updates.values()) + [team_id]

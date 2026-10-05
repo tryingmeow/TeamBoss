@@ -286,5 +286,281 @@ class SingleCreditAcrossRecoveryPathsTest(_TempDbTest):
         self.assertEqual(unresolved, 0)
 
 
+
+# ── 2. seats_entitled 只认正整数，不合格就保留上一次的值 ─────────────────────
+
+# 上游契约是 JSON 整数。null / 0 / 负数一旦落库，patrol 把每个默认席位都算成超员；
+# 数字字符串、浮点数、bool 说明响应结构变了，同样不认。
+_BAD_ENTITLEMENTS = (None, 0, -3, "25", 25.0, True)
+
+
+class _Missing:
+    def __repr__(self):
+        return "<missing>"
+
+
+_MISSING = _Missing()
+
+
+def _subscription(entitled):
+    sub = {
+        "seats_in_use": 3,
+        "billing_currency": "USD",
+        "active_start": "2026-10-01T00:00:00+00:00",
+        "active_until": "2026-11-01T00:00:00+00:00",
+        "will_renew": True,
+    }
+    if entitled is not _MISSING:
+        sub["seats_entitled"] = entitled
+    return sub
+
+
+class _FakeSyncClient:
+    subscription: dict = {}
+
+    def __init__(self, access_token, team_id, device_id, proxy_url=None):
+        self.team_id = team_id
+
+    def get_subscription(self):
+        return dict(_FakeSyncClient.subscription)
+
+    def get_seat_type_counts(self):
+        return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+    def get_members(self, offset=0, limit=100):
+        return {"items": [], "total": 0}
+
+    def get_pending_invites(self, offset=0, limit=100):
+        return {"items": [], "total": 0}
+
+
+class PositiveSeatCountTest(unittest.TestCase):
+    def test_only_positive_json_integers_are_accepted(self):
+        from app.services.seat_capacity import positive_seat_count
+
+        self.assertEqual(positive_seat_count(1), 1)
+        self.assertEqual(positive_seat_count(25), 25)
+        for bad in _BAD_ENTITLEMENTS + (False, 1.0, "abc", [], {}):
+            with self.subTest(value=bad):
+                self.assertIsNone(positive_seat_count(bad))
+
+
+class SeatsEntitledGuardTest(_TempDbTest):
+    def setUp(self):
+        super().setUp()
+        conn = self._conn()
+        conn.execute(
+            "UPDATE teams SET seats_entitled = 5, display_synced_at = ? WHERE id = 'team-1'",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.commit()
+        conn.close()
+
+    def _set_entitled(self, value):
+        conn = self._conn()
+        conn.execute("UPDATE teams SET seats_entitled = ? WHERE id = 'team-1'", (value,))
+        conn.commit()
+        conn.close()
+
+    def _entitled(self, team_id="team-1"):
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT seats_entitled, typeof(seats_entitled) AS t FROM teams WHERE id = ?",
+            (team_id,),
+        ).fetchone()
+        conn.close()
+        return row["seats_entitled"], row["t"]
+
+    def _run_data_sync(self, subscription):
+        from app import scheduler as app_scheduler
+        from app.services import patrol as patrol_service
+        from app.services import tg_notify, tg_summary
+
+        _FakeSyncClient.subscription = subscription
+        run_patrol = MagicMock(return_value={})
+        with patch.object(app_scheduler, "ChatGPTClient", _FakeSyncClient), \
+             patch.object(app_scheduler, "run_chatgpt_call_sync",
+                          lambda fn, *a, **kw: fn(*a, **kw)), \
+             patch.object(app_scheduler, "refresh_invoices_if_stale_sync", lambda *a, **kw: None), \
+             patch.object(app_scheduler, "report_team_recovery_sync", lambda *a, **kw: None), \
+             patch.object(app_scheduler, "report_team_failure_sync", lambda *a, **kw: None), \
+             patch.object(app_scheduler, "notify_member_event_sync", lambda *a, **kw: None), \
+             patch.object(patrol_service, "run_patrol", run_patrol), \
+             patch.object(tg_notify, "notify_admins_sync", lambda *a, **kw: None), \
+             patch.object(tg_summary, "maybe_send_summary_sync", lambda *a, **kw: None):
+            app_scheduler.data_sync_job()
+        run_patrol.assert_called_once()
+        return set(run_patrol.call_args.kwargs["allow_team_ids"])
+
+    def test_scheduled_sync_keeps_previous_entitlement_and_skips_patrol(self):
+        for bad in _BAD_ENTITLEMENTS + (_MISSING,):
+            with self.subTest(seats_entitled=bad):
+                self._set_entitled(5)
+                patrolled = self._run_data_sync(_subscription(bad))
+                self.assertEqual(self._entitled(), (5, "integer"))
+                # 这一轮分母没刷新到可信值，巡逻不碰这个 team。
+                self.assertNotIn("team-1", patrolled)
+
+    def test_scheduled_sync_writes_a_valid_entitlement(self):
+        patrolled = self._run_data_sync(_subscription(7))
+        self.assertEqual(self._entitled(), (7, "integer"))
+        self.assertIn("team-1", patrolled)
+
+    def test_capacity_cache_keeps_previous_entitlement(self):
+        from app.services.seat_capacity import update_capacity_cache
+
+        seat_counts = {"seat_type_counts": {"default": 3, "usage_based": 0}}
+        for bad in _BAD_ENTITLEMENTS:
+            with self.subTest(seats_entitled=bad):
+                self._set_entitled(5)
+                asyncio.run(update_capacity_cache("team-1", _subscription(bad), seat_counts))
+                self.assertEqual(self._entitled(), (5, "integer"))
+        asyncio.run(update_capacity_cache("team-1", _subscription(9), seat_counts))
+        self.assertEqual(self._entitled(), (9, "integer"))
+
+    def test_live_capacity_with_invalid_entitlement_is_a_fetch_error(self):
+        """邀请前的实时容量判断不能把不合格的 seats_entitled 当成一个可信数字
+        （null → 0 个空位只是碰巧安全；"25"/True 会被当成 25/1 个席位）。"""
+        from app.services import seat_capacity
+
+        class _Client:
+            def __init__(self, sub):
+                self.sub = sub
+
+            def get_subscription(self):
+                return dict(self.sub)
+
+            def get_seat_type_counts(self):
+                return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+            def get_pending_invites(self, offset=0, limit=100):
+                return {"items": [], "total": 0}
+
+        async def _direct(fn, *a, **kw):
+            return fn(*a, **kw)
+
+        with patch.object(seat_capacity, "run_chatgpt_call", _direct):
+            for bad in _BAD_ENTITLEMENTS + (_MISSING,):
+                with self.subTest(seats_entitled=bad):
+                    with self.assertRaises(seat_capacity.SeatCapacityFetchError):
+                        asyncio.run(
+                            seat_capacity.fetch_live_chatgpt_seat_capacity(
+                                _Client(_subscription(bad))
+                            )
+                        )
+            capacity, *_ = asyncio.run(
+                seat_capacity.fetch_live_chatgpt_seat_capacity(_Client(_subscription(6)))
+            )
+        self.assertEqual(capacity.seats_entitled, 6)
+        self.assertEqual(capacity.available, 3)
+
+    def test_manual_team_sync_does_not_write_invalid_entitlement(self):
+        from app import team_sync_service
+
+        class _Client:
+            team_id = "team-1"
+
+            def __init__(self, sub):
+                self.sub = sub
+
+            def get_subscription(self):
+                return dict(self.sub)
+
+            def get_remaining_balance(self):
+                return {"balance": 0}
+
+            def get_seat_type_counts(self):
+                return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+            def get_payment_methods(self):
+                return {"payment_methods": []}
+
+            def get_account_info(self):
+                return {"accounts": {"team-1": {"account": {"name": "Team 1"}}}}
+
+        async def _direct(fn, *a, **kw):
+            return fn(*a, **kw)
+
+        with patch.object(team_sync_service, "run_chatgpt_call", _direct), \
+             patch.object(team_sync_service, "fetch_seat_pricing", AsyncMock(return_value={})):
+            for bad in _BAD_ENTITLEMENTS + (_MISSING,):
+                with self.subTest(seats_entitled=bad):
+                    updates, _ = asyncio.run(
+                        team_sync_service._fetch_overview(_Client(_subscription(bad)))
+                    )
+                    self.assertNotIn("seats_entitled", updates)
+                    # 同一响应里的其它字段照常写。
+                    self.assertEqual(updates["seats_in_use"], 3)
+            updates, _ = asyncio.run(
+                team_sync_service._fetch_overview(_Client(_subscription(8)))
+            )
+        self.assertEqual(updates["seats_entitled"], 8)
+
+    def test_session_import_does_not_write_invalid_entitlement(self):
+        import jwt
+
+        from app import team_service
+        from app.models import TeamSession
+
+        team_uuid = "11111111-2222-3333-4444-555555555555"
+        token = jwt.encode(
+            {"https://api.openai.com/auth": {"chatgpt_account_id": team_uuid},
+             "exp": int(datetime.now(timezone.utc).timestamp()) + 3600},
+            "test-signing-key-not-a-secret-0000000000",
+            algorithm="HS256",
+        )
+
+        class _Client:
+            sub: dict = {}
+
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_account_info(self):
+                return {"accounts": {team_uuid: {"account": {"name": "Imported"}}}}
+
+            def get_subscription(self):
+                return dict(_Client.sub)
+
+            def get_remaining_balance(self):
+                return {"balance": 0}
+
+            def get_seat_type_counts(self):
+                return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+            def get_payment_methods(self):
+                return {"payment_methods": []}
+
+        async def _direct(fn, *a, **kw):
+            return fn(*a, **kw)
+
+        session = TeamSession(
+            user={"email": "owner@example.com"},
+            expires="2099-01-01T00:00:00Z",
+            account={"id": team_uuid},
+            accessToken=token,
+            sessionToken="stub-session",
+        )
+
+        def _import(entitled):
+            _Client.sub = _subscription(entitled)
+            with patch.object(team_service, "ChatGPTClient", _Client), \
+                 patch.object(team_service, "run_chatgpt_call", _direct), \
+                 patch.object(team_service, "fetch_seat_pricing", AsyncMock(return_value={})), \
+                 patch.object(team_service, "write_session_file", lambda *a, **kw: None):
+                asyncio.run(team_service.upsert_team_from_session(session))
+
+        # 新 Team：不合格的值不能被当成数字写进去（留 NULL = 未知）。
+        _import(0)
+        self.assertEqual(self._entitled(team_uuid), (None, "null"))
+        _import(4)
+        self.assertEqual(self._entitled(team_uuid), (4, "integer"))
+        # 已有 Team：保留上一次的合法值。
+        for bad in _BAD_ENTITLEMENTS:
+            with self.subTest(seats_entitled=bad):
+                _import(bad)
+                self.assertEqual(self._entitled(team_uuid), (4, "integer"))
+
+
 if __name__ == "__main__":
     unittest.main()
