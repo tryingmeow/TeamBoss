@@ -10,6 +10,7 @@ import {
   logTriggerLabel,
   teamStatusLabel,
 } from '../../lib/logLabels';
+import { csvField } from '../../lib/csv';
 import { collectLogs, searchLogsPage } from '../../lib/logSearch';
 import { cn } from '../../lib/utils';
 import PageShell from '../../components/PageShell';
@@ -17,11 +18,6 @@ import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 
 const PER_PAGE = 50;
 const EXPORT_MAX_ROWS = 1000;
-
-function csvField(value: string | number | null | undefined): string {
-  const s = value === null || value === undefined ? '' : String(value);
-  return `"${s.replace(/"/g, '""')}"`;
-}
 
 function logToCsvRow(log: OperationLog): string {
   return [
