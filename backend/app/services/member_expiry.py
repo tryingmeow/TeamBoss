@@ -501,26 +501,55 @@ async def _insert_pending_invite_reconciliation(
     绝不能据此写到期时间——结算必须走 ``reconcile_pending_redemptions`` 的累加
     语义，否则同一张码会被两条恢复路径各加一次时长。
     """
-    now = utc_now().isoformat()
     async with get_db() as db:
-        await db.execute(
-            """INSERT INTO pending_invite_reconciliations
-               (team_id, user_id, email, expires_at, source, reason, resolved, created_at,
-                token_use_id, kind)
-               VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
-            (
-                team_id,
-                user_id or "",
-                (email or "").strip().lower(),
-                expires_iso,
-                source,
-                reason,
-                now,
-                token_use_id,
-                kind,
-            ),
+        await insert_pending_invite_reconciliation_row(
+            db,
+            team_id,
+            user_id,
+            email,
+            expires_iso,
+            source,
+            reason,
+            token_use_id=token_use_id,
+            kind=kind,
         )
         await db.commit()
+
+
+async def insert_pending_invite_reconciliation_row(
+    db,
+    team_id: str,
+    user_id: str,
+    email: str,
+    expires_iso: Optional[str],
+    source: str,
+    reason: str,
+    *,
+    token_use_id: Optional[int] = None,
+    kind: str = "backfill",
+) -> None:
+    """在调用方的连接 / 事务里写一条 pending_invite_reconciliations 行，不提交。
+
+    ``kind`` 的语义见 ``_insert_pending_invite_reconciliation``。需要和别的写入同生
+    同灭的调用方（例如兑换把一次邀请锁成 uncertain 并立屏障）用这个，自己管事务。
+    """
+    await db.execute(
+        """INSERT INTO pending_invite_reconciliations
+           (team_id, user_id, email, expires_at, source, reason, resolved, created_at,
+            token_use_id, kind)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+        (
+            team_id,
+            user_id or "",
+            (email or "").strip().lower(),
+            expires_iso,
+            source,
+            reason,
+            utc_now().isoformat(),
+            token_use_id,
+            kind,
+        ),
+    )
 
 
 async def record_uncertain_invite(

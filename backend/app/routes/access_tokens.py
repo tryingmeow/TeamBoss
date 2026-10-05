@@ -22,8 +22,8 @@ from ..services.member_expiry import (
     PermanentMembershipError,
     extend_member_expiry,
     get_active_expiry_state,
+    insert_pending_invite_reconciliation_row,
     record_confirmed_invite_extension,
-    record_uncertain_invite,
     resolve_invite_barrier,
 )
 from ..services.team_clients import get_proxy_url as _get_proxy_url
@@ -377,25 +377,6 @@ async def _set_token_use_phase(
             raise RuntimeError(f"redemption attempt is no longer pending: {token_use_id}")
 
 
-async def _mark_token_use_uncertain(
-    token_use_id: int,
-    *,
-    team_id: str,
-    error_message: str,
-) -> None:
-    async with get_db() as db:
-        cursor = await db.execute(
-            """UPDATE access_token_uses
-               SET action = 'invite_pending', team_id = ?, result = 'uncertain',
-                   error_message = ?
-               WHERE id = ? AND result = 'pending'""",
-            (team_id, error_message, token_use_id),
-        )
-        await db.commit()
-        if cursor.rowcount != 1:
-            raise RuntimeError(f"failed to lock uncertain redemption: {token_use_id}")
-
-
 async def _lock_uncertain_with_barrier(
     token_use_id: int,
     *,
@@ -415,11 +396,9 @@ async def _lock_uncertain_with_barrier(
     行已不是 pending 时什么都不写，返回 False；两步都提交才返回 True；任何一步失败
     都整体回滚并抛出，兑换保持 pending，由 ``reconcile_pending_redemptions`` 稍后重试。
 
-    屏障行的列与 services/member_expiry.py ``_insert_pending_invite_reconciliation``
-    写的一致（那个函数自己开连接提交，没法并进这个事务）：user_id 为空、
-    expires_at 为 NULL、source='self_service'。时长结算只走对账的累加语义。
+    屏障行经 ``insert_pending_invite_reconciliation_row`` 写在本事务里：user_id 为空、
+    expires_at 为 NULL、source='self_service'、kind='barrier'。时长结算只走对账的累加语义。
     """
-    now = utc_now().isoformat()
     async with get_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
@@ -433,12 +412,16 @@ async def _lock_uncertain_with_barrier(
             if cursor.rowcount != 1:
                 await db.rollback()
                 return False
-            await db.execute(
-                """INSERT INTO pending_invite_reconciliations
-                   (team_id, user_id, email, expires_at, source, reason, resolved,
-                    created_at, token_use_id, kind)
-                   VALUES (?, '', ?, NULL, 'self_service', ?, 0, ?, ?, 'barrier')""",
-                (team_id, (email or "").strip().lower(), reason, now, token_use_id),
+            await insert_pending_invite_reconciliation_row(
+                db,
+                team_id,
+                "",
+                email,
+                None,
+                "self_service",
+                reason,
+                token_use_id=token_use_id,
+                kind="barrier",
             )
             await db.commit()
         except BaseException:

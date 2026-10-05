@@ -112,8 +112,9 @@ class UncertainIsNotRejectedTest(unittest.IsolatedAsyncioTestCase):
                 access_tokens, "_chatgpt_available", new=AsyncMock(return_value=(True, "ok"))
             ),
             patch.object(access_tokens, "_set_token_use_phase", new=AsyncMock()),
-            patch.object(access_tokens, "_mark_token_use_uncertain", new=AsyncMock()),
-            patch.object(access_tokens, "record_uncertain_invite", new=AsyncMock()),
+            patch.object(
+                access_tokens, "_lock_uncertain_with_barrier", new=AsyncMock(return_value=True)
+            ),
             patch.object(
                 access_tokens, "run_chatgpt_call", new=AsyncMock(return_value=invite_result)
             ),
