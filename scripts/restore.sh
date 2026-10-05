@@ -112,9 +112,75 @@ if [[ "$BACKUP_FILE" == *.db ]]; then
     print_info "恢复数据库..."
     print_warning "原数据库将备份到: $BACKUP_COPY"
 
-    cp "$BACKUP_FILE" "$RESTORE_TEMP"
+    # 用 SQLite backup API 生成自包含的临时库：备份文件若是 WAL 模式，直接 cp 过来的
+    # 文件头仍声明 WAL，打开时会在旁边生成 -wal/-shm。这里统一转成 DELETE 日志模式，
+    # 并做完整性检查；临时库旁边不留任何日志文件。
+    if ! python3 - "$BACKUP_FILE" "$RESTORE_TEMP" <<'PY'
+import sqlite3
+import sys
+
+src = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+dst = sqlite3.connect(sys.argv[2])
+try:
+    src.backup(dst)
+    dst.execute("PRAGMA journal_mode=DELETE")
+    result = dst.execute("PRAGMA integrity_check").fetchone()
+finally:
+    dst.close()
+    src.close()
+if not result or str(result[0]).lower() != "ok":
+    raise SystemExit(1)
+PY
+    then
+        rm -f "$RESTORE_TEMP" "${RESTORE_TEMP}-wal" "${RESTORE_TEMP}-shm" "${RESTORE_TEMP}-journal"
+        print_error "恢复的数据库无法读取或完整性检查失败，现有数据库未改动。"
+        exit 1
+    fi
+    rm -f "${RESTORE_TEMP}-wal" "${RESTORE_TEMP}-shm" "${RESTORE_TEMP}-journal"
     chmod 600 "$RESTORE_TEMP"
-    if ! python3 - "$RESTORE_TEMP" <<'PY'
+
+    # 备份现有数据库。服务已停但 app.db 旁可能还有未检查点的 -wal，单独 cp app.db
+    # 会丢掉这部分提交；所以用 backup API 读出包含 WAL 的一致快照。
+    # 现有库损坏到无法打开时，退化为把 app.db 与 -wal/-shm 原样一并保存，不阻断恢复。
+    if [ -f "$DB_PATH" ]; then
+        if python3 - "$DB_PATH" "$BACKUP_COPY" <<'PY'
+import sqlite3
+import sys
+
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+try:
+    src.backup(dst)
+    dst.execute("PRAGMA journal_mode=DELETE")
+finally:
+    dst.close()
+    src.close()
+PY
+        then
+            rm -f "${BACKUP_COPY}-wal" "${BACKUP_COPY}-shm"
+        else
+            print_warning "无法用 SQLite 备份接口读取现有数据库，改为原样复制 app.db 及其 -wal/-shm"
+            rm -f "$BACKUP_COPY"
+            cp "$DB_PATH" "$BACKUP_COPY"
+            for ext in -wal -shm; do
+                if [ -f "${DB_PATH}${ext}" ]; then
+                    cp "${DB_PATH}${ext}" "${BACKUP_COPY}${ext}"
+                    chmod 600 "${BACKUP_COPY}${ext}"
+                fi
+            done
+        fi
+        chmod 600 "$BACKUP_COPY"
+        print_success "原数据库已备份: $BACKUP_COPY"
+    fi
+
+    # 旧库遗留的 -wal/-shm 绝不能留在恢复后的库旁边：SQLite 会把旧 WAL 重放到新库上，
+    # 造成数据库损坏。安全副本已完成，在替换前一刻清掉，再同一文件系统内原子替换。
+    rm -f "${DB_PATH}-wal" "${DB_PATH}-shm"
+    mv "$RESTORE_TEMP" "$DB_PATH"
+    chmod 600 "$DB_PATH"
+
+    # 最终路径上再检查一次；失败时原库在 $BACKUP_COPY。
+    if ! python3 - "$DB_PATH" <<'PY'
 import sqlite3
 import sys
 
@@ -127,21 +193,9 @@ if not result or str(result[0]).lower() != "ok":
     raise SystemExit(1)
 PY
     then
-        rm -f "$RESTORE_TEMP"
-        print_error "恢复的数据库完整性检查失败，现有数据库未改动。"
+        print_error "恢复后的数据库完整性检查失败！原数据库备份在: $BACKUP_COPY"
         exit 1
     fi
-
-    # 备份现有数据库
-    if [ -f "$DB_PATH" ]; then
-        cp "$DB_PATH" "$BACKUP_COPY"
-        chmod 600 "$BACKUP_COPY"
-        print_success "原数据库已备份: $BACKUP_COPY"
-    fi
-
-    # 同一文件系统内原子替换，避免复制中断留下半个数据库。
-    mv "$RESTORE_TEMP" "$DB_PATH"
-    chmod 600 "$DB_PATH"
 
     print_success "数据库恢复成功"
 

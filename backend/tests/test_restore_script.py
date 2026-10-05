@@ -4,6 +4,7 @@ import _isolation  # noqa: F401  must precede any app import
 import io
 import os
 import shutil
+import sqlite3
 import subprocess
 import tarfile
 import tempfile
@@ -97,6 +98,69 @@ class RestoreScriptTest(unittest.TestCase):
         restored = self.data_dir / "sessions" / "team.json"
         self.assertEqual(restored.read_text(encoding="utf-8"), '{"ok": true}')
         self.assertEqual(restored.stat().st_mode & 0o777, 0o600)
+
+
+    def _make_db(self, path: Path, rows, wal=False):
+        conn = sqlite3.connect(path)
+        if wal:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
+        conn.executemany("INSERT INTO t VALUES (?)", [(r,) for r in rows])
+        conn.commit()
+        return conn
+
+    def test_db_restore_drops_stale_wal_and_keeps_consistent_safety_copy(self):
+        live = self.data_dir / "app.db"
+        # 旧库：WAL 模式，行 old-wal 只存在于未检查点的 -wal 里；连接保持打开，
+        # 这样 -wal 文件留在磁盘上（模拟服务异常退出后的现场）。
+        conn = self._make_db(live, ["old-base"], wal=True)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("INSERT INTO t VALUES ('old-wal')")
+        conn.commit()
+        self.addCleanup(conn.close)
+        self.assertGreater(Path(str(live) + "-wal").stat().st_size, 0)
+
+        backup = self.tmp / "app-backup.db"
+        self._make_db(backup, ["restored-1", "restored-2"]).close()
+
+        result = self._restore(backup)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        check = sqlite3.connect(live)
+        try:
+            self.assertEqual(check.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(sorted(r[0] for r in check.execute("SELECT v FROM t")), ["restored-1", "restored-2"])
+        finally:
+            check.close()
+        self.assertEqual(live.stat().st_mode & 0o777, 0o600)
+
+        # 打开恢复后的库后，旁边不应有来自旧库的 -wal 内容。
+        stale = Path(str(live) + "-wal")
+        self.assertFalse(stale.exists() and stale.stat().st_size > 0)
+
+        copies = [p for p in self.data_dir.iterdir() if p.name.startswith("app.db.restore-backup-") and not p.name.endswith(("-wal", "-shm"))]
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].stat().st_mode & 0o777, 0o600)
+        safety = sqlite3.connect(copies[0])
+        try:
+            self.assertEqual(safety.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(sorted(r[0] for r in safety.execute("SELECT v FROM t")), ["old-base", "old-wal"])
+        finally:
+            safety.close()
+
+    def test_db_restore_rejects_corrupt_backup_and_leaves_live_db(self):
+        live = self.data_dir / "app.db"
+        self._make_db(live, ["keep"]).close()
+        bad = self.tmp / "bad.db"
+        bad.write_bytes(b"not a sqlite database" * 100)
+        result = self._restore(bad)
+        self.assertNotEqual(result.returncode, 0)
+        check = sqlite3.connect(live)
+        try:
+            self.assertEqual([r[0] for r in check.execute("SELECT v FROM t")], ["keep"])
+        finally:
+            check.close()
 
 
 if __name__ == "__main__":
