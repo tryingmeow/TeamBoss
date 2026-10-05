@@ -562,5 +562,170 @@ class SeatsEntitledGuardTest(_TempDbTest):
                 self.assertEqual(self._entitled(team_uuid), (4, "integer"))
 
 
+
+# ── 3. 自动踢人的邮箱查找：结构不认识的 200 是"未知"，不是"人不在" ──────────
+
+class _PagedClient:
+    """按调用顺序吐出预设的 get_members / get_pending_invites 响应。"""
+
+    def __init__(self, members_pages=None, invite_pages=None):
+        self.members_pages = list(members_pages or [])
+        self.invite_pages = list(invite_pages or [])
+
+    def get_members(self, offset=0, limit=100):
+        return self.members_pages.pop(0)
+
+    def get_pending_invites(self, offset=0, limit=100):
+        return self.invite_pages.pop(0)
+
+
+def _full_page(n=100, key="items"):
+    return {key: [{"id": f"u{i}", "email": f"other{i}@example.com",
+                   "email_address": f"other{i}@example.com"} for i in range(n)]}
+
+
+# 200 但结构不认识 / 不完整的名单：都不能证明这个人不在。
+_UNRECOGNIZED_PAGES = {
+    "empty object": [{}],
+    "null items": [{"items": None}],
+    "string items": [{"items": "nope"}],
+    "list body": [[]],
+    "null body": [None],
+    "non-object entry": [{"items": ["buyer@example.com"]}],
+    "truncated before total": [dict(_full_page(), total=250), {"items": [], "total": 250}],
+}
+
+
+class AutoKickLookupFailsClosedTest(unittest.TestCase):
+    def _direct(self):
+        from app import scheduler as app_scheduler
+
+        return patch.object(
+            app_scheduler, "run_chatgpt_call_sync", lambda fn, *a, **kw: fn(*a, **kw)
+        )
+
+    def test_member_lookup_reports_unrecognized_replies_as_errors(self):
+        from app.scheduler import _find_member_user_id_by_email
+
+        with self._direct():
+            for label, pages in _UNRECOGNIZED_PAGES.items():
+                with self.subTest(reply=label):
+                    user_id, error = _find_member_user_id_by_email(
+                        _PagedClient(members_pages=list(pages)), EMAIL
+                    )
+                    self.assertIsNone(user_id)
+                    self.assertTrue(error)
+
+            # 找到了这个邮箱却没有 user id：同样不能当成"不在"。
+            user_id, error = _find_member_user_id_by_email(
+                _PagedClient(members_pages=[{"items": [{"email": EMAIL}]}]), EMAIL
+            )
+            self.assertIsNone(user_id)
+            self.assertTrue(error)
+
+            # 结构完整：真的空队 / 真的找到。
+            self.assertEqual(
+                _find_member_user_id_by_email(
+                    _PagedClient(members_pages=[{"items": [], "total": 0}]), EMAIL
+                ),
+                (None, None),
+            )
+            self.assertEqual(
+                _find_member_user_id_by_email(
+                    _PagedClient(members_pages=[_full_page(),
+                                                {"items": [{"id": "u-buyer", "email": EMAIL}]}]),
+                    EMAIL,
+                ),
+                ("u-buyer", None),
+            )
+
+    def test_pending_lookup_reports_unrecognized_replies_as_errors(self):
+        from app.scheduler import _pending_invite_exists
+
+        with self._direct():
+            for label, pages in _UNRECOGNIZED_PAGES.items():
+                with self.subTest(reply=label):
+                    exists, error = _pending_invite_exists(
+                        _PagedClient(invite_pages=list(pages)), EMAIL
+                    )
+                    self.assertFalse(exists)
+                    self.assertTrue(error)
+
+            self.assertEqual(
+                _pending_invite_exists(_PagedClient(invite_pages=[{"invites": []}]), EMAIL),
+                (False, None),
+            )
+            self.assertEqual(
+                _pending_invite_exists(
+                    _PagedClient(invite_pages=[{"items": [{"email_address": EMAIL}]}]), EMAIL
+                ),
+                (True, None),
+            )
+
+
+class AutoKickKeepsRowOnUnrecognizedReplyTest(_TempDbTest):
+    """到期行没有 user_id，只能按邮箱查。查找拿到结构不认识的 200 时，这一行必须
+    原样留着（下一轮重试），不能被当成"人已不在"关掉——关掉之后这个人会被重新
+    检测成 detected、没有到期时间，白占席位。"""
+
+    def _seed_expired_row(self):
+        past = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO member_expiry
+               (team_id, user_id, email, expires_at, auto_kick, kicked,
+                first_seen_at, source, created_at)
+               VALUES ('team-1', '', ?, ?, 1, 0, ?, 'self_service', ?)""",
+            (EMAIL, past, past, past),
+        )
+        conn.commit()
+        conn.close()
+
+    def _run(self, members_pages, invite_pages):
+        from app import scheduler as app_scheduler
+
+        def _factory(*a, **kw):
+            return _PagedClient(list(members_pages), list(invite_pages))
+
+        with patch.object(app_scheduler, "ChatGPTClient", side_effect=_factory), \
+             patch.object(app_scheduler, "run_chatgpt_call_sync",
+                          lambda fn, *a, **kw: fn(*a, **kw)), \
+             patch.object(app_scheduler, "notify_member_event_sync", lambda *a, **kw: None):
+            app_scheduler.auto_kick_job()
+
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT kicked, kick_source FROM member_expiry WHERE email = ?", (EMAIL,)
+        ).fetchone()
+        log = conn.execute(
+            """SELECT action, result, detail FROM operation_logs
+               WHERE action IN ('auto_kick', 'auto_revoke_invite')
+               ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        return dict(row), dict(log) if log else None
+
+    def test_unrecognized_member_reply_leaves_the_row_for_next_round(self):
+        self._seed_expired_row()
+        row, log = self._run(members_pages=[{"total": 1}], invite_pages=[{"items": []}])
+        self.assertEqual(row["kicked"], 0)
+        self.assertEqual(log["result"], "failed")
+        self.assertEqual(log["detail"], "lookup member by email")
+
+    def test_unrecognized_invite_reply_leaves_the_row_for_next_round(self):
+        self._seed_expired_row()
+        row, log = self._run(members_pages=[{"items": []}], invite_pages=[{"invites": None}])
+        self.assertEqual(row["kicked"], 0)
+        self.assertEqual(log["result"], "failed")
+        self.assertEqual(log["detail"], "lookup pending invite")
+
+    def test_confirmed_absence_still_closes_the_row(self):
+        self._seed_expired_row()
+        row, log = self._run(members_pages=[{"items": []}], invite_pages=[{"items": []}])
+        self.assertEqual(row["kicked"], 1)
+        self.assertEqual(row["kick_source"], "auto_expire")
+        self.assertEqual(log["detail"], "member or invite already absent")
+
+
 if __name__ == "__main__":
     unittest.main()

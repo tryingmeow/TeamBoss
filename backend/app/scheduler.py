@@ -201,7 +201,9 @@ def _log_operation_sync(team_id, action, target_email=None, detail=None,
 
 
 def _api_items(data, *fallback_keys):
-    if "error" in data:
+    """取出响应里的列表字段。只能在 ``_response_has_item_list`` 确认过结构之后用：
+    这里对错误/不认识的结构返回 []，单独拿来判断"人在不在"会把未知当成缺席。"""
+    if not isinstance(data, dict) or "error" in data:
         return []
     for key in ("items",) + fallback_keys:
         items = data.get(key)
@@ -226,16 +228,25 @@ def _response_has_item_list(data, *fallback_keys):
 
 
 def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000):
+    """分页拉完整份成员/邀请名单，返回 ``(items, error)``。
+
+    只有拿到完整、结构可识别的名单才返回 ``(items, None)``——调用方会据此判
+    "某人不在"（反向检测、到期踢人的邮箱查找、踢人监视）。任何认不出的 200
+    （非对象响应体、缺列表键、条目不是对象）、total 之前被截断、翻到上限还没
+    结束，都返回 error：那是未知状态，不是空名单。
+    """
     items = []
     offset = 0
     while offset < max_items:
         data = run_chatgpt_call_sync(method, offset=offset, limit=limit)
-        if "error" in data:
+        if isinstance(data, dict) and "error" in data:
             return None, data["error"]
         if not _response_has_item_list(data, *fallback_keys):
             # 200 但结构不认识：fail closed，绝不当空队交给反向检测。
             return None, "unrecognized member/invite response structure"
         page_items = _api_items(data, *fallback_keys)
+        if not all(isinstance(item, dict) for item in page_items):
+            return None, "unrecognized member/invite entry structure"
         items.extend(page_items)
         total = data.get("total")
         short_page = len(page_items) < limit
@@ -248,6 +259,9 @@ def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000
         elif short_page:
             break
         offset += limit
+    else:
+        # 翻到上限还没结束：没见到的人不能判为缺席。
+        return None, "member/invite list exceeds the paging limit"
     return items, None
 
 
@@ -298,20 +312,27 @@ def _effective_kick_at(expires_at, mode, delay_hours):
     return expires_at + timedelta(hours=delay_hours)
 
 
+# auto_kick_job 拿下面两个查找的"没找到"直接关掉到期行（"人已不在"）。所以
+# "没找到"只能来自一份完整、结构可识别的名单：拉取走 _fetch_all_api_items_sync，
+# 它对认不出的 200、截断、翻页超限一律返回 error，调用方原样保留这一行、下一轮
+# 重试。把认不出的 200 当成空页会让到期行被关掉，人随后被重新检测成 detected、
+# 没有到期时间，继续占着席位。
+
+
 def _find_member_user_id_by_email(client: ChatGPTClient, email: str):
     if not email:
         return None, None
     email = email.lower()
-    for offset in range(0, 500, 100):
-        data = run_chatgpt_call_sync(client.get_members, offset=offset, limit=100)
-        if "error" in data:
-            return None, data["error"]
-        items = _api_items(data, "users")
-        for member in items:
-            if (member.get("email") or "").lower() == email:
-                return member.get("id") or member.get("user_id"), None
-        if len(items) < 100:
-            break
+    members, error = _fetch_all_api_items_sync(client.get_members, "users", limit=100)
+    if error:
+        return None, error
+    for member in members:
+        if str(member.get("email") or "").lower() == email:
+            user_id = member.get("id") or member.get("user_id")
+            if not user_id:
+                # 人在名单里却拿不到 id：既踢不了，也绝不能当成"不在"。
+                return None, "member entry has no user id"
+            return user_id, None
     return None, None
 
 
@@ -319,17 +340,15 @@ def _pending_invite_exists(client: ChatGPTClient, email: str):
     if not email:
         return False, None
     email = email.lower()
-    for offset in range(0, 500, 100):
-        data = run_chatgpt_call_sync(client.get_pending_invites, offset=offset, limit=100)
-        if "error" in data:
-            return False, data["error"]
-        items = _api_items(data, "invites")
-        for invite in items:
-            invite_email = invite.get("email_address") or invite.get("email") or ""
-            if invite_email.lower() == email:
-                return True, None
-        if len(items) < 100:
-            break
+    invites, error = _fetch_all_api_items_sync(
+        client.get_pending_invites, "invites", limit=100
+    )
+    if error:
+        return False, error
+    for invite in invites:
+        invite_email = invite.get("email_address") or invite.get("email") or ""
+        if str(invite_email).lower() == email:
+            return True, None
     return False, None
 
 
