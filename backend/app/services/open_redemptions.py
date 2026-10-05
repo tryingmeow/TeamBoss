@@ -169,3 +169,63 @@ def settled_redemption_row_detail(
         token_use_id=token_use_id,
         outcome=_SETTLED_OUTCOMES[outcome],
     )
+
+
+# 删除 Team 前要结清的兑换：兑换本身落在这个 Team，或这个 Team 上有它未结清的屏障 /
+# 兜底行。删 Team 不动兑换、屏障和邮箱占用，但删掉之后对账拿不到这个 Team 的凭据，
+# 管理员邀请又不再把已删 Team 里的 uncertain 当阻拦（见上面 ``_OPEN_REDEMPTION_SQL``）。
+# 管理员于是能把这个邮箱拉进别的 Team；之后重新添加同一个 Team（Team id 就是上游账号
+# id，加回来还是同一个），对账在原 Team 里看到人又确认一次，一笔兑换占两个席位。
+_OPEN_REDEMPTIONS_IN_TEAM_SQL = """
+    SELECT atu.id AS token_use_id, atu.result AS result
+      FROM access_token_uses atu
+     WHERE atu.team_id = ? AND atu.result IN ('pending', 'uncertain')
+    UNION
+    SELECT atu.id AS token_use_id, atu.result AS result
+      FROM pending_invite_reconciliations r
+      JOIN access_token_uses atu ON atu.id = r.token_use_id
+     WHERE r.team_id = ? AND r.resolved = 0
+       AND atu.result IN ('pending', 'uncertain')
+    ORDER BY token_use_id
+"""
+_DELETE_TEAM_LISTED_IDS = 5
+_DELETE_TEAM_DETAIL = (
+    "Team {team_label} 还有未结的兑换（兑换记录 {ids}），未删除：删除后就无法再在"
+    "这个 Team 里确认。"
+)
+_DELETE_TEAM_UNCERTAIN = "结果待确认的，请先在「兑换码 → 待确认的兑换」里确认成功或确认失败。"
+_DELETE_TEAM_PENDING = (
+    "正在处理的会自动收尾，进入邀请阶段、发起满 {invite_minutes} 分钟仍未在 Team 里"
+    "出现的会转入「兑换码 → 待确认的兑换」。"
+)
+_DELETE_TEAM_THEN = "都收尾后再删除。"
+
+
+async def find_open_redemptions_in_team(db, team_id: str) -> list[dict[str, Any]]:
+    """落在 ``team_id`` 上、还没结的兑换（``token_use_id`` / ``result``），按记录号排序。
+
+    在调用方的连接里读：删除 Team 在同一个写事务里先查后删，查完之后不会再有兑换
+    抢在删除前落到这个 Team 上而不被看到。
+    """
+    cursor = await db.execute(_OPEN_REDEMPTIONS_IN_TEAM_SQL, (team_id, team_id))
+    return [dict(row) for row in await cursor.fetchall()]
+
+
+def delete_team_refusal_detail(team_label: str, open_redemptions: list[dict[str, Any]]) -> str:
+    """因 ``open_redemptions``（``find_open_redemptions_in_team`` 的结果）拒绝删除
+    Team 时，管理员看到的说明。"""
+    ids = "、".join(
+        f"#{item['token_use_id']}" for item in open_redemptions[:_DELETE_TEAM_LISTED_IDS]
+    )
+    if len(open_redemptions) > _DELETE_TEAM_LISTED_IDS:
+        ids += f" 等 {len(open_redemptions)} 笔"
+    results = {item["result"] for item in open_redemptions}
+    parts = [_DELETE_TEAM_DETAIL.format(team_label=team_label, ids=ids)]
+    if "uncertain" in results:
+        parts.append(_DELETE_TEAM_UNCERTAIN)
+    if "pending" in results:
+        parts.append(
+            _DELETE_TEAM_PENDING.format(invite_minutes=_minutes(INTERRUPTED_INVITE_AFTER_SECONDS))
+        )
+    parts.append(_DELETE_TEAM_THEN)
+    return "".join(parts)

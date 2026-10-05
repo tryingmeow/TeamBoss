@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from ..chatgpt_limiter import refresh_team_auth, run_chatgpt_call
 from ..database import get_db, log_operation, get_sessions_dir
 from ..models import DefaultSeatTypeRequest, TeamProxyUpdate, TeamRemarkUpdate, TeamSession, TeamResponse
+from ..services.open_redemptions import delete_team_refusal_detail, find_open_redemptions_in_team
 from ..services.pricing import discounted_monthly_total
 from ..services.subscription_status import subscription_status_display
 from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
@@ -315,10 +316,23 @@ async def reimport_team(
 @router.delete("/{team_id}")
 async def delete_team(team_id: str):
     async with get_db() as db:
-        cursor = await db.execute("SELECT id FROM teams WHERE id = ?", (team_id,))
+        # 先拿写锁再查未结兑换：查完到删除之间，不会有兑换落到这个 Team 上而没被看到。
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute("SELECT id, name FROM teams WHERE id = ?", (team_id,))
         row = await cursor.fetchone()
         if not row:
+            await db.rollback()
             raise HTTPException(status_code=404, detail="Team not found")
+
+        # 未结的兑换钉在这个 Team 上，只能在这里确认或退码；删掉再加回来会一笔兑换
+        # 占两个席位（见 find_open_redemptions_in_team）。
+        open_redemptions = await find_open_redemptions_in_team(db, team_id)
+        if open_redemptions:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=delete_team_refusal_detail(row["name"] or team_id, open_redemptions),
+            )
 
         expiry_cursor = await db.execute(
             "SELECT DISTINCT lower(trim(email)) AS email FROM member_expiry WHERE team_id = ? AND trim(email) != ''",
