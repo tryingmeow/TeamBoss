@@ -19,7 +19,9 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     server: {
-      host: true,
+      // Loopback only by default: the dev server proxies /api with no auth of its own.
+      // Set AUTO_TEAM_FRONTEND_HOST (e.g. 0.0.0.0) to expose it on purpose.
+      host: env.AUTO_TEAM_FRONTEND_HOST || '127.0.0.1',
       port: Number(env.AUTO_TEAM_FRONTEND_PORT || '5173'),
       proxy: isDemo
         ? undefined
