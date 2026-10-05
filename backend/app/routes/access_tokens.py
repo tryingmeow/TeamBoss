@@ -78,8 +78,9 @@ class _RedeemLookupBudget:
     两层是否都有余量，都有才同时记账——否则一张已被单码上限挡住的码还能继续消耗全站
     额度，一张码就能把所有人的兑换堵死。码的消耗时机和规则完全不受影响。
 
-    以「请选择 Team」提示（正常兑换的第一步）或服务端/上游故障（5xx）结尾的尝试，事后用
-    ``refund_code`` 退回单码的那一次：客户在上游故障期间反复重试，不该把自己的码锁一小时。
+    以服务端/上游故障（5xx）结尾的尝试，事后用 ``refund_code`` 退回单码的那一次：客户在
+    上游故障期间反复重试，不该把自己的码锁一小时。「请选择 Team」提示（正常兑换的第一步）
+    用 ``refund_prompt`` 退，但每张码每小时最多退 2 次，之后照常计数。
     全站那一次不退——这些尝试照样实时拉了上游，全站上限本来就是给上游兜底的。
     """
 
@@ -90,6 +91,7 @@ class _RedeemLookupBudget:
         self.global_window = global_window
         self._per_code_hits: dict[int, list[float]] = {}
         self._global_hits: list[float] = []
+        self._prompt_refunds: dict[int, list[float]] = {}
 
     def try_take(self, token_id: int, now: float) -> Optional[str]:
         """有余量就记一次并返回 None；否则返回被哪一层挡住（"per_code" / "global"）。"""
@@ -121,8 +123,28 @@ class _RedeemLookupBudget:
         if hits and taken_at in hits:
             hits.remove(taken_at)
 
+    def refund_prompt(self, token_id: int, taken_at: float, now: float, limit: int = 2) -> bool:
+        """「请选择 Team」提示的退回：每张码每个滚动窗口最多退 ``limit`` 次，超出照常计数。
 
-# 每张码每小时 10 次（选择提示和 5xx 不算）：选错 Team、没空位后重试都够用；
+        否则一张码配一个在多个 Team 里的邮箱就能无限提示、永不触达单码上限，一张码耗尽全站额度。
+        """
+        recent = [
+            ts for ts in self._prompt_refunds.get(token_id, ()) if ts > now - self.per_code_window
+        ]
+        if len(recent) >= limit:
+            self._prompt_refunds[token_id] = recent
+            return False
+        self.refund_code(token_id, taken_at)
+        recent.append(now)
+        self._prompt_refunds[token_id] = recent
+        if len(self._prompt_refunds) > 10000:
+            cutoff = now - self.per_code_window
+            for key in [k for k, v in self._prompt_refunds.items() if not v or v[-1] <= cutoff]:
+                del self._prompt_refunds[key]
+        return True
+
+
+# 每张码每小时 10 次（5xx 和前 2 次选择提示不算）：选错 Team、没空位后重试都够用；
 # 全站每 10 分钟 60 次：正常售卖远低于此，被挡的人码不消耗，稍后重试即可。
 _redeem_lookup_budget = _RedeemLookupBudget(
     per_code=10, per_code_window=3600, global_limit=60, global_window=600
@@ -1683,7 +1705,7 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
         _redeem_lookup_budget.refund_code(token_id, charged_at)
         raise
     if result.get("status") == "team_selection_required":
-        _redeem_lookup_budget.refund_code(token_id, charged_at)
+        _redeem_lookup_budget.refund_prompt(token_id, charged_at, time.time())
     return result
 
 
@@ -2013,6 +2035,7 @@ async def _query_membership_status(email: str, proof_token: Optional[str] = None
     hits = (
         await _find_all_memberships(email, teams, use_cache_only=True) if teams else []
     )
+    # 匿名按邮箱查是有意保留的功能，但不能借它确认「某个邮箱是不是 Team 的 Owner」：
     # 匿名按邮箱查是有意保留的功能，但不能借它确认「某个邮箱是不是 Team 的 Owner」：
     # Owner 行直接不出现在公开结果里（只是 Owner 的邮箱看起来和查无此人一样），
     # is_owner 字段为了兼容响应结构保留，恒为 False。

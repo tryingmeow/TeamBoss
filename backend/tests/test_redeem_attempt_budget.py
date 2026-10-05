@@ -32,6 +32,25 @@ class RedeemLookupBudgetUnitTest(unittest.TestCase):
         # The window slides.
         self.assertIsNone(budget.try_take(1, now + 3601))
 
+    def test_only_two_pick_a_team_prompts_per_code_per_hour_are_refunded(self):
+        budget = access_tokens._RedeemLookupBudget(per_code=3, per_code_window=3600, global_limit=1000, global_window=600)
+        now = 1_000.0
+        outcomes = []
+        for i in range(10):
+            t = now + i
+            if budget.try_take(1, t) is not None:
+                outcomes.append("blocked")
+                continue
+            outcomes.append("refunded" if budget.refund_prompt(1, t, t) else "charged")
+        self.assertEqual(outcomes[:5], ["refunded", "refunded", "charged", "charged", "charged"])
+        self.assertEqual(outcomes[5:], ["blocked"] * 5)
+        # The refund allowance is per code and slides with the window.
+        self.assertIsNone(budget.try_take(2, now))
+        self.assertTrue(budget.refund_prompt(2, now, now))
+        later = now + 3700
+        self.assertIsNone(budget.try_take(1, later))
+        self.assertTrue(budget.refund_prompt(1, later, later))
+
     def test_global_limit_across_codes(self):
         budget = access_tokens._RedeemLookupBudget(per_code=10, per_code_window=3600, global_limit=4, global_window=600)
         now = 1_000.0
@@ -200,7 +219,7 @@ class RedeemAttemptBudgetRouteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(access_tokens._redeem_lookup_budget._per_code_hits[token_id], [])
         self.assertEqual(await self._used_count(token_id), 0)
 
-    async def test_team_selection_prompt_does_not_spend_the_codes_attempts(self):
+    async def test_only_two_team_prompts_per_hour_are_free_then_the_code_limit_stops_replay(self):
         raw = "atm_budget_pick_team"
         token_id = await self._make_token(raw)
         hits = [
@@ -208,12 +227,19 @@ class RedeemAttemptBudgetRouteTest(unittest.IsolatedAsyncioTestCase):
              "expires_at": "2026-12-01T00:00:00+00:00", "cache_updated_at": None}
             for team in (TEAM_A, TEAM_B)
         ]
+        lookup = AsyncMock(return_value=hits)
         with patch.object(access_tokens, "load_active_teams", new=AsyncMock(return_value=[TEAM_A, TEAM_B])), \
-             patch.object(access_tokens, "_find_all_memberships", new=AsyncMock(return_value=hits)):
-            for _ in range(15):
+             patch.object(access_tokens, "_find_all_memberships", new=lookup):
+            # per_code=6: two free prompts, then six charged ones.
+            for _ in range(8):
                 result = await self._redeem(raw)
                 self.assertEqual(result["status"], "team_selection_required")
-        self.assertEqual(access_tokens._redeem_lookup_budget._per_code_hits[token_id], [])
+            with self.assertRaises(HTTPException) as cm:
+                await self._redeem(raw)
+        self.assertEqual(cm.exception.status_code, 429)
+        self.assertIn("兑换码未使用", cm.exception.detail)
+        self.assertEqual(lookup.await_count, 8)
+        self.assertEqual(len(access_tokens._redeem_lookup_budget._per_code_hits[token_id]), 6)
         self.assertEqual(await self._used_count(token_id), 0)
 
     async def test_refused_attempts_still_count_against_the_code(self):
