@@ -45,6 +45,8 @@ def is_auth_error(error: Any) -> bool:
     if status_code == 401:
         return True
     detail = getattr(error, "detail", None)
+    if isinstance(detail, dict) and detail.get("code") == "team_auth_rejected":
+        return True
     text = str(detail if detail is not None else error).lower()
     return "401" in text or "unauthorized" in text
 

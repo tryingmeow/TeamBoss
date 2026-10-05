@@ -81,6 +81,26 @@ class TeamAuthRejectedRoutesTest(unittest.TestCase):
         conn.commit()
         conn.close()
 
+    def test_token_expired_team_client_is_409_not_401(self):
+        # A 401 here would make the frontend log the admin out.
+        from app.services.team_clients import get_team_client
+        from app.services.team_health_alerts import is_auth_error
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("UPDATE teams SET status = 'token_expired' WHERE id = ?", (TEAM_ID,))
+        conn.commit()
+        conn.close()
+
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(get_team_client(TEAM_ID))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(
+            ctx.exception.detail,
+            {"code": "team_auth_rejected", "message": TEAM_AUTH_REJECTED_DETAIL},
+        )
+        # Health alerts must keep classifying it as an auth failure.
+        self.assertTrue(is_auth_error(ctx.exception))
+
     def _set_auth_state(self, auth_state: str | None):
         conn = sqlite3.connect(self.db_path)
         conn.execute(

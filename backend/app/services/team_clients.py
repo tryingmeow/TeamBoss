@@ -51,7 +51,9 @@ async def get_team_client(team_id: str) -> ChatGPTClient:
     if not row:
         raise HTTPException(status_code=404, detail="Team not found")
     if row["status"] == "token_expired":
-        raise HTTPException(status_code=401, detail="Team token expired, please refresh")
+        # session 已死（status=token_expired），只有重新导入才能恢复；
+        # 复用 team_auth_rejected 的 409，避免前端把 401 当成管理员 key 失效。
+        raise team_auth_rejected_error()
 
     proxy_url = await get_proxy_url(row["proxy_id"])
     return ChatGPTClient(row["access_token"], team_id, row["device_id"], proxy_url=proxy_url)
