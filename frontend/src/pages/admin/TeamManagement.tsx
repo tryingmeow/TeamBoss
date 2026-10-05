@@ -395,12 +395,17 @@ export default function TeamManagement() {
                               <>
                                 {item.card_brand && <span className="shrink-0">{item.card_brand.toUpperCase()}</span>}
                                 <span className="shrink-0 font-mono">•••• {item.card_last4}</span>
-                                {item.card_note && <span className="truncate" title={item.card_note}>· {item.card_note}</span>}
                               </>
                             ) : (
                               <span>未绑定卡片</span>
                             )}
                           </div>
+                          {/* Own line: squeezed inline on a phone it left only a dangling "·". */}
+                          {item.card_last4 && item.card_note && (
+                            <div className="mt-0.5 truncate pl-5 text-xs text-gray-500 dark:text-ink-400" title={item.card_note}>
+                              {item.card_note}
+                            </div>
+                          )}
                         </div>
                         <div className="shrink-0 text-right">
                           <div className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">
