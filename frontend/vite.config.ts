@@ -12,17 +12,23 @@ export default defineConfig(({ mode }) => {
   const backendPort = env.AUTO_TEAM_BACKEND_PORT || '18087'
   const proxyTarget = (env.VITE_API_BASE_URL || `http://${backendHost}:${backendPort}`).replace(/\/$/, '')
 
+  // `npm run demo` answers /api/* in the browser from src/demo fixtures, so it must never
+  // proxy to a real backend.
+  const isDemo = mode === 'demo'
+
   return {
     plugins: [react(), tailwindcss()],
     server: {
       host: true,
       port: Number(env.AUTO_TEAM_FRONTEND_PORT || '5173'),
-      proxy: {
-        '/api': {
-          target: proxyTarget,
-          changeOrigin: true,
-        },
-      },
+      proxy: isDemo
+        ? undefined
+        : {
+            '/api': {
+              target: proxyTarget,
+              changeOrigin: true,
+            },
+          },
     },
   }
 })
