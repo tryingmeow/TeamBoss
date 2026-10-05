@@ -2036,10 +2036,8 @@ async def _query_membership_status(email: str, proof_token: Optional[str] = None
         await _find_all_memberships(email, teams, use_cache_only=True) if teams else []
     )
     # 匿名按邮箱查是有意保留的功能，但不能借它确认「某个邮箱是不是 Team 的 Owner」：
-    # 匿名按邮箱查是有意保留的功能，但不能借它确认「某个邮箱是不是 Team 的 Owner」：
-    # Owner 行直接不出现在公开结果里（只是 Owner 的邮箱看起来和查无此人一样），
-    # is_owner 字段为了兼容响应结构保留，恒为 False。
-    hits = [hit for hit in hits if not hit.get("is_owner")]
+    # Owner 按普通已加入成员返回（无到期时间、expiry_state=permanent），和 /redeem 对
+    # Owner 的回答一致；is_owner 字段为了兼容响应结构保留，恒为 False。
     if not hits:
         return {
             "status": "absent",
@@ -2055,9 +2053,9 @@ async def _query_membership_status(email: str, proof_token: Optional[str] = None
             "status": "pending" if hit["kind"] == "invite" else "joined",
             "team_id": hit["team"]["id"],
             "team_name": hit["team"]["name"],
-            "expires_at": hit.get("expires_at"),
+            "expires_at": None if hit.get("is_owner") else hit.get("expires_at"),
             "is_owner": False,
-            "expiry_state": _public_expiry_state(hit),
+            "expiry_state": "permanent" if hit.get("is_owner") else _public_expiry_state(hit),
             "cache_updated_at": hit.get("cache_updated_at"),
         }
         for hit in hits

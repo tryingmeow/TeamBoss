@@ -97,13 +97,17 @@ class PublicLookupOwnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["query_type"], "email")
         return result["membership"]
 
-    async def test_owner_email_looks_exactly_like_an_unknown_email(self):
+    async def test_owner_email_looks_like_a_member_without_an_expiry(self):
         owner = await self._query(OWNER)
-        unknown = await self._query("nobody@example.com")
-        self.assertEqual(owner["status"], "absent")
-        self.assertEqual(owner["memberships"], [])
-        self.assertEqual({k: v for k, v in owner.items() if k != "email"},
-                         {k: v for k, v in unknown.items() if k != "email"})
+        self.assertEqual(owner["status"], "joined")
+        self.assertFalse(owner["is_owner"])
+        self.assertIsNone(owner["expires_at"])
+        self.assertEqual(len(owner["memberships"]), 1)
+        entry = owner["memberships"][0]
+        self.assertEqual(entry["expiry_state"], "permanent")
+        self.assertFalse(entry["is_owner"])
+        self.assertIsNone(entry["expires_at"])
+        self.assertNotIn("owner", json.dumps(owner).lower().replace("is_owner", "").replace(OWNER, ""))
 
     async def test_member_lookup_keeps_its_shape_and_never_flags_owner(self):
         member = await self._query(MEMBER)
@@ -116,11 +120,13 @@ class PublicLookupOwnerTest(unittest.IsolatedAsyncioTestCase):
                 set(entry), {"status", "team_id", "team_name", "expires_at", "is_owner", "expiry_state", "cache_updated_at"}
             )
 
-    async def test_status_endpoint_hides_the_owner_too(self):
+    async def test_status_endpoint_answers_for_the_owner_like_query(self):
         result = await access_tokens.query_membership_status(
             access_tokens.QueryMembershipRequest(email=OWNER), Mock()
         )
-        self.assertEqual(result["status"], "absent")
+        self.assertEqual(result["status"], "joined")
+        self.assertEqual(result["memberships"][0]["expiry_state"], "permanent")
+        self.assertFalse(result["is_owner"])
 
 
 class PublicRedeemOwnerTest(unittest.IsolatedAsyncioTestCase):
