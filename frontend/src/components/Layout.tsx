@@ -127,14 +127,19 @@ export default function Layout() {
   }, []);
 
   useEffect(() => {
+    // Scroll the tab row only as far as needed to show the active tab in full.
     const frame = window.requestAnimationFrame(() => {
       const nav = navRef.current;
       const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
       if (!nav || !active) return;
-      nav.scrollTo({
-        left: Math.max(active.offsetLeft - (nav.clientWidth - active.offsetWidth) / 2, 0),
-        behavior: 'smooth',
-      });
+      const edge = 28;
+      const bounds = nav.getBoundingClientRect();
+      const tab = active.getBoundingClientRect();
+      if (tab.left < bounds.left + edge) {
+        nav.scrollBy({ left: tab.left - bounds.left - edge, behavior: 'smooth' });
+      } else if (tab.right > bounds.right - edge) {
+        nav.scrollBy({ left: tab.right - bounds.right + edge, behavior: 'smooth' });
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, [location.pathname]);
@@ -292,7 +297,7 @@ export default function Layout() {
             </NavLink>
 
             <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
-              <HeaderTooltip label="导入 owner 的 Session，接入一个 Team">
+              <HeaderTooltip label="导入 Owner 的 Session，接入一个 Team">
                 <button type="button" onClick={handleOpenAddTeam} className={cn(BUTTON.primary, 'h-9 px-2.5 sm:px-3.5')} aria-label="添加 Team">
                   <Plus size={17} strokeWidth={2.4} />
                   <span className="hidden sm:inline">添加 Team</span>
@@ -380,7 +385,7 @@ export default function Layout() {
           <nav
             ref={navRef}
             aria-label="主导航"
-            className={cn(CONTAINER, 'no-scrollbar flex gap-1 overflow-x-auto [mask-image:linear-gradient(to_right,#000_85%,transparent)] sm:gap-2 sm:[mask-image:none]')}
+            className={cn(CONTAINER, 'no-scrollbar flex gap-1 overflow-x-auto [mask-image:linear-gradient(to_right,transparent,#000_16px,#000_calc(100%_-_28px),transparent)] sm:gap-2 sm:[mask-image:none]')}
           >
             {NAV_ITEMS.map((item) => (
               <NavLink
@@ -483,7 +488,7 @@ export default function Layout() {
             if (!exporting) setExportOpen(open);
           }}
           title="导出全部 Session？"
-          message={`将下载一个 JSON 文件，内含全部 ${teams.length} 个 Team 的 owner 登录凭证（access token 与 session cookie）。拿到这个文件的人可以直接接管这些工作区，请只保存在安全的位置。`}
+          message={`将下载一个 JSON 文件，内含全部 ${teams.length} 个 Team 的 Owner 登录凭证（access token 与 session cookie）。拿到这个文件的人可以直接接管这些 Team，请只保存在安全的位置。`}
           confirmLabel="下载文件"
           loading={exporting}
           onConfirm={() => void handleExport()}

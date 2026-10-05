@@ -17,6 +17,8 @@ interface AddMemberDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   teamId?: string;
+  /** Name of the Team the invites go to; shown under the title of the per-Team dialog. */
+  teamName?: string;
   title?: string;
   fixedSeatType?: SeatType;
   submitLabel?: string;
@@ -61,6 +63,7 @@ export default function AddMemberDialog({
   open,
   onOpenChange,
   teamId,
+  teamName,
   title = '添加成员',
   fixedSeatType,
   submitLabel = '确认添加',
@@ -197,6 +200,15 @@ export default function AddMemberDialog({
         open={open}
         onOpenChange={handleDialogOpenChange}
         title={title}
+        description={
+          !teamId
+            ? '系统自动为每个邮箱挑选有空闲 ChatGPT 席位的 Team。'
+            : teamName && (
+              <>
+                邀请加入 <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>
+              </>
+            )
+        }
         footer={
           <>
             <Dialog.Close asChild>

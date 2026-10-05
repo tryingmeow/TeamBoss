@@ -18,6 +18,9 @@ interface TeamSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   teamId: string;
+  /** Shown in the description so the operator can tell which Team this dialog belongs to. */
+  teamName?: string;
+  ownerEmail?: string;
   currentProxyId: number | null;
   initialSettings?: TeamWorkspaceSettings | null;
   onChanged?: (settings: TeamWorkspaceSettings) => void;
@@ -32,6 +35,8 @@ export default function TeamSettingsDialog({
   open,
   onOpenChange,
   teamId,
+  teamName,
+  ownerEmail,
   currentProxyId,
   initialSettings,
   onChanged,
@@ -174,7 +179,22 @@ export default function TeamSettingsDialog({
 
   return (
     <>
-      <DialogFrame open={open} onOpenChange={handleOpenChange} title="Team 设置" size="md">
+      <DialogFrame
+        open={open}
+        onOpenChange={handleOpenChange}
+        title="Team 设置"
+        description={
+          (teamName || ownerEmail) && (
+            <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+              {teamName && <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>}
+              {ownerEmail && (
+                <span className="min-w-0 truncate text-gray-500 dark:text-ink-400" title={ownerEmail}>{ownerEmail}</span>
+              )}
+            </span>
+          )
+        }
+        size="md"
+      >
         <div className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
           <div className="flex items-center justify-between gap-3 p-3">
             <div className="min-w-0">

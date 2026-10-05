@@ -438,6 +438,7 @@ export default function TeamCard({
     : 'hover:border-blue-300 dark:hover:border-ink-700';
 
   const unit = moneySuffix(team);
+  const teamDisplayName = team.remark ? `${team.name}（${team.remark}）` : team.name;
   const seatsEntitled = Number(team.seats_entitled) || 0;
   const overSeats = seatsEntitled > 0 && activeGptSeats > seatsEntitled;
   const seatFill = seatsEntitled > 0 ? Math.min(100, (activeGptSeats / seatsEntitled) * 100) : 0;
@@ -527,10 +528,10 @@ export default function TeamCard({
           <div className="flex items-center gap-2">
             <span className={`size-2.5 shrink-0 rounded-full ${statusDotClass}`} title={statusLabel} aria-label={statusLabel} />
             <h3 className="flex min-w-0 items-baseline text-base font-semibold text-gray-900 dark:text-gray-50">
-              <span className="min-w-0 truncate" title={team.name}>{team.name}</span>
+              <span className="max-w-full shrink-0 truncate" title={team.name}>{team.name}</span>
               {team.remark && (
                 <span
-                  className="ml-1 min-w-0 max-w-[10rem] shrink-[4] truncate text-sm font-medium text-gray-500 dark:text-ink-400"
+                  className="ml-1 min-w-0 max-w-[10rem] truncate text-sm font-medium text-gray-500 dark:text-ink-400"
                   title={team.remark}
                 >
                   （{team.remark}）
@@ -541,8 +542,8 @@ export default function TeamCard({
               type="button"
               onClick={(e) => { e.stopPropagation(); handleOpenRemark(); }}
               className="shrink-0 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-blue-400"
-              aria-label="编辑备注（不修改工作区名称）"
-              title="编辑备注（不修改工作区名称）"
+              aria-label="编辑备注（不改 ChatGPT 里的名称）"
+              title="编辑备注（不改 ChatGPT 里的名称）"
             >
               <Pencil size={13} />
             </button>
@@ -723,10 +724,8 @@ export default function TeamCard({
                 {team.card_last4 ? (
                   <>
                     <CreditCard size={14} className="shrink-0 text-gray-400 dark:text-ink-500" />
-                    <span className="truncate">
-                      {team.card_brand ? `${cardBrandLabel(team.card_brand)} ` : ''}
-                      <span className="tabular-nums">···· {team.card_last4}</span>
-                    </span>
+                    {team.card_brand && <span className="min-w-0 truncate">{cardBrandLabel(team.card_brand)}</span>}
+                    <span className="shrink-0 tabular-nums">···· {team.card_last4}</span>
                   </>
                 ) : (
                   <span className="font-normal text-gray-400 dark:text-ink-500">未绑定</span>
@@ -758,21 +757,23 @@ export default function TeamCard({
           </div>
         </div>
 
+        {/* Animates to the panel's natural height (grid 0fr → 1fr), so long member lists are never clipped. */}
         <div
-          className="overflow-hidden bg-gray-50/60 transition-all duration-300 ease-in-out dark:bg-ink-950/40"
-          style={{ maxHeight: expanded ? '600px' : '0px' }}
+          className={`grid bg-gray-50/60 transition-[grid-template-rows] duration-300 ease-in-out dark:bg-ink-950/40 ${expanded ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}
         >
-          <div className="border-t border-gray-100 px-2 pb-3 dark:border-ink-800">
-            <MemberPanel
-              teamId={team.id}
-              data={membersData}
-              loading={membersLoading || syncing}
-              settling={settling}
-              isCodexEnabled={team.is_codex_enabled}
-              onRefresh={startMemberSettle}
-              onRemarkSaved={handleRemarkSaved}
-              showToast={showToast}
-            />
+          <div className="min-h-0 overflow-hidden" inert={!expanded}>
+            <div className="border-t border-gray-100 px-2 pb-3 dark:border-ink-800">
+              <MemberPanel
+                teamId={team.id}
+                data={membersData}
+                loading={membersLoading || syncing}
+                settling={settling}
+                isCodexEnabled={team.is_codex_enabled}
+                onRefresh={startMemberSettle}
+                onRemarkSaved={handleRemarkSaved}
+                showToast={showToast}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -794,7 +795,7 @@ export default function TeamCard({
         open={defaultSeatInfoOpen}
         onOpenChange={setDefaultSeatInfoOpen}
         title="默认邀请席位"
-        description="工作区邀请新成员时默认使用的席位类型。"
+        description="这个 Team 邀请新成员时默认使用的席位类型。"
         footer={
           <button type="button" onClick={() => setDefaultSeatInfoOpen(false)} className={BUTTON.primary}>
             知道了
@@ -828,7 +829,7 @@ export default function TeamCard({
         onOpenChange={handleRemarkOpenChange}
         size="sm"
         title="Team 备注"
-        description="只保存在 TeamBoss 里，不会修改 ChatGPT 工作区名称。"
+        description="只保存在 TeamBoss 里，不会修改 ChatGPT 里的 Team 名称。"
         footer={
           <>
             <button type="button" onClick={() => handleRemarkOpenChange(false)} disabled={savingRemark} className={BUTTON.secondary}>
@@ -869,6 +870,7 @@ export default function TeamCard({
         open={addMemberOpen}
         onOpenChange={setAddMemberOpen}
         teamId={team.id}
+        teamName={teamDisplayName}
         onSuccess={startMemberSettle}
       />
 
@@ -876,6 +878,8 @@ export default function TeamCard({
         open={settingsOpen}
         onOpenChange={setSettingsOpen}
         teamId={team.id}
+        teamName={teamDisplayName}
+        ownerEmail={team.owner_email}
         currentProxyId={team.proxy_id}
         initialSettings={workspaceSettings}
         onChanged={(settings) => {

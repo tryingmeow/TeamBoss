@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect } from 'react';
 import BrandMark from './BrandMark';
 import ThemeToggle from './ThemeToggle';
+import { CONTAINER } from './ui';
 
 interface PublicShellProps {
   /** Browser tab title, shown as "<title> · TeamBoss". */
@@ -29,7 +30,7 @@ export default function PublicShell({ title, children, width = 'md' }: PublicShe
 
   return (
     <div className="flex min-h-dvh flex-col bg-gray-50 dark:bg-ink-950">
-      <header className="flex items-center justify-between px-4 py-3 sm:px-6 sm:py-4">
+      <header className={`${CONTAINER} flex h-14 items-center justify-between`}>
         <div className="flex items-center gap-2.5">
           <BrandMark size={26} />
           <span className="text-[15px] font-semibold tracking-tight text-gray-900 dark:text-gray-100">TeamBoss</span>

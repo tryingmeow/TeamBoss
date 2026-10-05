@@ -89,7 +89,7 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
       title={team ? `重新导入 ${team.name}` : '添加 Team'}
       description={team
         ? '只更新这个 Team 的 Session，备注、成员到期和管理记录都会保留。属于其他 Team 的 Session 会被拒绝。'
-        : '用工作区 owner 账号的 Session 接入一个 ChatGPT Team。'}
+        : '用 ChatGPT Team 的 Owner 账号 Session 接入。'}
       footer={
         <>
           <button type="button" onClick={() => onOpenChange(false)} className={BUTTON.secondary}>取消</button>
@@ -103,7 +103,7 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
           <ol className="space-y-2 text-sm text-gray-600 dark:text-ink-300">
             <li className="flex gap-2.5">
               <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-semibold text-gray-500 dark:bg-ink-800 dark:text-ink-300">1</span>
-              <span>在浏览器里用 owner 账号登录 chatgpt.com</span>
+              <span>在浏览器里用 Owner 账号登录 chatgpt.com</span>
             </li>
             <li className="flex gap-2.5">
               <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-semibold text-gray-500 dark:bg-ink-800 dark:text-ink-300">2</span>

@@ -69,7 +69,7 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
       ) : (
         <ul
           aria-label="成员列表"
-          className="max-h-[30rem] divide-y divide-gray-100 overflow-y-auto border-t border-gray-100 dark:divide-ink-800 dark:border-ink-800"
+          className="divide-y divide-gray-100 border-t border-gray-100 dark:divide-ink-800 dark:border-ink-800"
         >
           {data.members.map((m) => (
             <MemberRow

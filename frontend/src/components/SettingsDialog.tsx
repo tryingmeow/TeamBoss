@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Globe, Loader2, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
 import type { Settings } from '../types';
 import {
@@ -19,6 +19,41 @@ import { cn } from '../lib/utils';
 
 const SECTION_TITLE = 'text-sm font-semibold text-gray-900 dark:text-gray-100';
 const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
+/** Native range/radio/checkbox: blue accent and a blue keyboard-focus outline instead of the browser's black one. */
+const NATIVE_CONTROL =
+  'accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500/50 dark:accent-blue-500';
+
+/**
+ * Hairline at the top or bottom edge of the dialog's scrolling body, shown only while content
+ * is scrolled underneath it. A 1px sentinel next to it reports whether that end is in view.
+ * The negative margins cancel the body's padding so the line spans the full dialog width.
+ */
+function ScrollEdge({ side }: { side: 'top' | 'bottom' }) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const [covered, setCovered] = useState(false);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(([entry]) => setCovered(!entry.isIntersecting));
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, []);
+
+  const line = (
+    <div
+      aria-hidden="true"
+      className={cn(
+        'pointer-events-none sticky z-10 -mx-5 h-px transition-colors sm:-mx-6',
+        side === 'top' ? 'top-0 -mt-4' : 'bottom-0',
+        covered ? 'bg-gray-200 dark:bg-ink-800' : 'bg-transparent',
+      )}
+    />
+  );
+  const sentinel = <div ref={sentinelRef} aria-hidden="true" className={cn('h-px', side === 'top' && 'mb-3.5')} />;
+
+  return side === 'top' ? <>{line}{sentinel}</> : <>{sentinel}{line}</>;
+}
 
 interface SettingsDialogProps {
   open: boolean;
@@ -178,6 +213,8 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
     return <Globe size={14} className="shrink-0 text-gray-400" />;
   };
 
+  const hasFooter = Boolean(statusText || errorText);
+
   return (
     <DialogFrame
       open={open}
@@ -186,7 +223,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
       description="全局设置，对所有 Team 生效。"
       size="lg"
       footer={
-        (statusText || errorText) && (
+        hasFooter && (
           <p
             role="status"
             className={cn(
@@ -200,6 +237,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
         )
       }
     >
+      <ScrollEdge side="top" />
       <div className="space-y-6">
         <section className="space-y-4">
           <h3 className={SECTION_TITLE}>常规</h3>
@@ -217,7 +255,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
               step={5}
               value={interval}
               onChange={(event) => setInterval_(Number(event.target.value))}
-              className="w-full accent-blue-600 dark:accent-blue-500"
+              className={cn(NATIVE_CONTROL, 'w-full rounded-full')}
             />
           </div>
 
@@ -243,7 +281,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
                   name="kickMode"
                   checked={kickMode === 'delay_hours'}
                   onChange={() => setKickMode('delay_hours')}
-                  className="size-4 accent-blue-600 dark:accent-blue-500"
+                  className={cn(NATIVE_CONTROL, 'size-4')}
                 />
                 到期后
                 <input
@@ -265,7 +303,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
                   name="kickMode"
                   checked={kickMode === 'day_end'}
                   onChange={() => setKickMode('day_end')}
-                  className="size-4 accent-blue-600 dark:accent-blue-500"
+                  className={cn(NATIVE_CONTROL, 'size-4')}
                 />
                 到期当天 23:59 移出
               </label>
@@ -278,7 +316,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
                 type="checkbox"
                 checked={skipOverageConfirmation}
                 onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
-                className="size-4 accent-blue-600 dark:accent-blue-500"
+                className={cn(NATIVE_CONTROL, 'size-4')}
               />
               超额添加不再确认
             </label>
@@ -463,6 +501,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
           </div>
         </section>
       </div>
+      {hasFooter && <ScrollEdge side="bottom" />}
     </DialogFrame>
   );
 }
