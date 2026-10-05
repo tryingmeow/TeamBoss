@@ -263,6 +263,50 @@ class RetryFailedSkipsUnresolvedInviteTest(_BatchInviteHarness):
         self.assertEqual(clients[TEAM_A].invites, [])
         self.assertEqual(clients[TEAM_B].invites, [])
 
+    async def test_settled_redemption_row_points_to_redeeming_again_not_a_manual_invite(self):
+        """挡住批量的行挂着一笔已退码的兑换（修复前的确认兜底会在退码之后留下这种
+        'extend' 行）：说明同样不能让管理员到原 Team 单独邀请，客户还拿着能用的码。"""
+        await self._start()
+        conn = self._conn()
+        token_id = conn.execute(
+            """INSERT INTO access_tokens
+               (token_hash, token_prefix, grant_expires_in, max_uses, used_count,
+                disabled, created_at)
+               VALUES ('hash-settled', 'atm_x', '30d', 1, 0, 0, '2026-10-01')"""
+        ).lastrowid
+        conn.commit()
+        conn.close()
+        token_use_id = await access_tokens._reserve_token_use(token_id, EMAIL, None)
+        await access_tokens._set_token_use_phase(token_use_id, "invite_pending", team_id=TEAM_A)
+        self.assertTrue(await access_tokens._lock_uncertain_with_barrier(
+            token_use_id, team_id=TEAM_A, email=EMAIL,
+            error_message="OpenAI invite result is uncertain",
+            reason="OpenAI invite result is uncertain",
+        ))
+        self.assertTrue(await access_tokens._release_uncertain_token_use(
+            token_use_id, error_message="admin_released: verified absent"
+        ))
+        self._execute(
+            """INSERT INTO pending_invite_reconciliations
+               (team_id, user_id, email, expires_at, source, reason, resolved, created_at,
+                token_use_id, kind)
+               VALUES (?, '', ?, NULL, 'self_service', 'database is locked', 0,
+                       '2026-10-05T00:00:00+00:00', ?, 'extend')""",
+            TEAM_A, EMAIL, token_use_id,
+        )
+        clients = {TEAM_A: _Client(), TEAM_B: _Client()}
+
+        result = await self._submit([EMAIL], clients)
+
+        self.assertEqual(result["added"], [])
+        error = result["failed"][0]["error"]
+        self.assertIn(f"#{token_use_id}", error)
+        self.assertIn("已退码", error)
+        self.assertIn("请让客户用同一兑换码重新兑换", error)
+        self.assertNotIn("单独邀请", error)
+        self.assertEqual(clients[TEAM_A].invites, [])
+        self.assertEqual(clients[TEAM_B].invites, [])
+
     async def test_resolved_row_no_longer_blocks_a_retry(self):
         await self._start()
         clients = {TEAM_A: _Client([UNCERTAIN]), TEAM_B: _Client()}

@@ -492,8 +492,10 @@ async def _insert_pending_invite_reconciliation(
     *,
     token_use_id: Optional[int] = None,
     kind: str = "backfill",
-) -> None:
-    """写一条巡逻屏障行。
+    only_while_redemption_open: bool = False,
+) -> bool:
+    """写一条巡逻屏障行，返回是否写入（``only_while_redemption_open`` 见
+    ``insert_pending_invite_reconciliation_row``）。
 
     ``kind='backfill'``：远端邀请已确认成功、本地 member_expiry 落库失败，调度器
     看到人出现后按行内 ``expires_at`` 回填，并顺带结清 ``token_use_id`` 这次兑换。
@@ -508,7 +510,7 @@ async def _insert_pending_invite_reconciliation(
     语义，否则同一张码会被两条恢复路径各加一次时长。
     """
     async with get_db() as db:
-        await insert_pending_invite_reconciliation_row(
+        inserted = await insert_pending_invite_reconciliation_row(
             db,
             team_id,
             user_id,
@@ -518,8 +520,10 @@ async def _insert_pending_invite_reconciliation(
             reason,
             token_use_id=token_use_id,
             kind=kind,
+            only_while_redemption_open=only_while_redemption_open,
         )
         await db.commit()
+    return inserted
 
 
 async def insert_pending_invite_reconciliation_row(
@@ -533,29 +537,51 @@ async def insert_pending_invite_reconciliation_row(
     *,
     token_use_id: Optional[int] = None,
     kind: str = "backfill",
-) -> None:
+    only_while_redemption_open: bool = False,
+) -> bool:
     """在调用方的连接 / 事务里写一条 pending_invite_reconciliations 行，不提交。
+    返回是否写入。
 
     ``kind`` 的语义见 ``_insert_pending_invite_reconciliation``。需要和别的写入同生
     同灭的调用方（例如兑换把一次邀请锁成 uncertain 并立屏障）用这个，自己管事务。
+
+    ``only_while_redemption_open=True``（且带 ``token_use_id``）：只在那次兑换仍是
+    pending / uncertain 时写入，判断和插入是同一条语句；兑换已结清就什么都不写，
+    返回 False。兑换的每条结清路径都在结清的同一事务里撤掉它名下的行，之后才写进来
+    的行没人撤：确认的本地写入因为兑换刚被并发退码（管理员「确认失败」）而失败，
+    兜底若照样留一行 'extend'，这行在那个 Team 的同步看到这个人之前一直未结，批量
+    拉人就一直拒绝这个邮箱。
     """
-    await db.execute(
+    params = (
+        team_id,
+        user_id or "",
+        (email or "").strip().lower(),
+        expires_iso,
+        source,
+        reason,
+        utc_now().isoformat(),
+        token_use_id,
+        kind,
+    )
+    if token_use_id is None or not only_while_redemption_open:
+        await db.execute(
+            """INSERT INTO pending_invite_reconciliations
+               (team_id, user_id, email, expires_at, source, reason, resolved, created_at,
+                token_use_id, kind)
+               VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+            params,
+        )
+        return True
+    cursor = await db.execute(
         """INSERT INTO pending_invite_reconciliations
            (team_id, user_id, email, expires_at, source, reason, resolved, created_at,
             token_use_id, kind)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
-        (
-            team_id,
-            user_id or "",
-            (email or "").strip().lower(),
-            expires_iso,
-            source,
-            reason,
-            utc_now().isoformat(),
-            token_use_id,
-            kind,
-        ),
+           SELECT ?, ?, ?, ?, ?, ?, 0, ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM access_token_uses
+                           WHERE id = ? AND result IN ('pending', 'uncertain'))""",
+        params + (token_use_id,),
     )
+    return cursor.rowcount == 1
 
 
 async def record_uncertain_invite(
@@ -919,15 +945,25 @@ async def _persist_confirmed_membership(
     )
 
     try:
-        await _insert_pending_invite_reconciliation(
+        inserted = await _insert_pending_invite_reconciliation(
             team_id, user_id, email, expires_iso, source, error_text,
             token_use_id=token_use_id,
             kind=reconciliation_kind,
+            only_while_redemption_open=True,
         )
     except Exception as exc:  # pragma: no cover - defensive
+        inserted = True
         logger.error(
             "record_confirmed_invite: FAILED to persist pending_invite_reconciliations "
             "row too (%s). %s", exc, backfill_detail,
+        )
+    if not inserted:
+        # 这次兑换在重试期间已被别的路径结清：确认成功（时长已记过一次），或管理员
+        # 核实原 Team 里没有这个人后退码。两种都没有要回填的东西，也就不留行。
+        backfill_detail = (
+            f"member_expiry write failed after {_CONFIRM_WRITE_ATTEMPTS} attempts, but "
+            f"redemption token_use_id={token_use_id} had already been settled by another "
+            f"path; no fallback row written: team_id={team_id!r}, email={email!r}"
         )
 
     try:

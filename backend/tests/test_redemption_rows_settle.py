@@ -276,6 +276,75 @@ class AdminReleaseSettlesAllRowsTest(_RowsCase):
         )
 
 
+class RefundRacingReconcilerTest(_RowsCase):
+    """The admin's 确认失败 commits after the reconciler saw the person but before
+    its local write: that write fails because the redemption is no longer open,
+    and its fallback must not leave an 'extend' row behind for a refunded code.
+    Nothing would ever close that row, so batch invites would refuse the email
+    for good."""
+
+    def _uncertain_redemption(self):
+        conn = self._conn()
+        token_id = conn.execute(
+            """INSERT INTO access_tokens
+               (token_hash, token_prefix, grant_expires_in, max_uses, used_count,
+                disabled, created_at)
+               VALUES (?, 'atm_x', '30d', 1, 0, 0, '2026-10-01')""",
+            (f"hash-{uuid.uuid4().hex}",),
+        ).lastrowid
+        conn.commit()
+        conn.close()
+        token_use_id = asyncio.run(access_tokens._reserve_token_use(token_id, EMAIL, None))
+        asyncio.run(
+            access_tokens._set_token_use_phase(token_use_id, "invite_pending", team_id=TEAM)
+        )
+        self.assertTrue(
+            asyncio.run(
+                access_tokens._lock_uncertain_with_barrier(
+                    token_use_id,
+                    team_id=TEAM,
+                    email=EMAIL,
+                    error_message="OpenAI invite result is uncertain",
+                    reason="OpenAI invite result is uncertain",
+                )
+            )
+        )
+        return token_use_id
+
+    def test_refund_during_reconciler_write_leaves_no_extend_row(self):
+        token_use_id = self._uncertain_redemption()
+
+        async def snapshot_then_admin_refund(*_args, **_kwargs):
+            # The reconciler has its snapshot (the person is there); the admin's
+            # refund commits before the reconciler writes anything.
+            released = await access_tokens._release_uncertain_token_use(
+                token_use_id, error_message="admin_released: verified absent"
+            )
+            self.assertTrue(released)
+            return PRESENT
+
+        with (
+            patch.object(access_tokens, "_get_proxy_url", new=AsyncMock(return_value=None)),
+            patch.object(access_tokens, "ChatGPTClient", lambda *a, **k: object()),
+            patch.object(
+                access_tokens,
+                "fetch_and_cache_members",
+                new=AsyncMock(side_effect=snapshot_then_admin_refund),
+            ),
+        ):
+            counts = asyncio.run(access_tokens.reconcile_pending_redemptions())
+
+        self.assertEqual(counts["confirmed"], 0)
+        use = self._use(token_use_id)
+        self.assertEqual((use["result"], use["used_count"]), ("failed", 0))
+        self.assertEqual(self._rows(token_use_id), [("barrier", 1)])
+        self.assertEqual(self._expiry_rows(), [])
+        self.assertIsNone(
+            self._unresolved_invite_team(),
+            "a refunded redemption must not leave a row that blocks batch invites",
+        )
+
+
 class OtherRowsStayOpenTest(_RowsCase):
     """Settling one redemption closes its own rows only."""
 

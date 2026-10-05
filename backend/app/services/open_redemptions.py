@@ -117,6 +117,23 @@ _REFUSALS = {
 }
 
 
+# 批量拉人被一条未结对账行挡住、行上挂着兑换凭据、兑换却已结束时的说明。兑换结清后
+# 不会再给它写新行（见 ``member_expiry.insert_pending_invite_reconciliation_row``），
+# 这里给库里的旧行。和上面一样，退码的让客户重新兑换，不让管理员到那个 Team 手动补发。
+_SETTLED_ROW_DETAIL = (
+    "该邮箱在 Team {team_label} 留有一笔已结束兑换（兑换记录 #{token_use_id}）的对账记录，"
+    "未邀请、未换 Team 重新邀请。{outcome}"
+    "该邮箱出现在 Team {team_label}（含待接受邀请）后，下一轮同步会清除这条记录。"
+)
+_SETTLED_OUTCOMES = {
+    "success": "这笔兑换已确认成功，兑换码时长已记过一次。",
+    "refunded": "这笔兑换已退码，" + _REDEEM_AGAIN,
+}
+# 兑换的终态。success 之外的两种（failed：失败 / 退码；notice：多 Team 选择提示中断）
+# 都已把码退回。
+SETTLED_REDEMPTION_RESULTS = ("success", "failed", "notice")
+
+
 def _minutes(seconds: int) -> int:
     """秒数向上取整成分钟：说明告诉管理员要等到什么时候，宁可说长、不能说短。"""
     return max(1, -(-int(seconds) // 60))
@@ -136,4 +153,19 @@ def open_redemption_detail(open_redemption: dict[str, Any], *, operation: str) -
         refused=_REFUSALS[operation],
         invite_minutes=_minutes(INTERRUPTED_INVITE_AFTER_SECONDS),
         stale_minutes=_minutes(STALE_LOCAL_REDEMPTION_AFTER_SECONDS),
+    )
+
+
+def settled_redemption_row_detail(
+    token_use_id: int, token_use_result: Optional[str], team_label: str
+) -> str:
+    """批量拉人因一条挂着已结束兑换的未结对账行被拒时，管理员看到的说明。
+
+    ``token_use_result`` 是那次兑换的终态（``SETTLED_REDEMPTION_RESULTS`` 之一）。
+    """
+    outcome = "success" if token_use_result == "success" else "refunded"
+    return _SETTLED_ROW_DETAIL.format(
+        team_label=team_label,
+        token_use_id=token_use_id,
+        outcome=_SETTLED_OUTCOMES[outcome],
     )

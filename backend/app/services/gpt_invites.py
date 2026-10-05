@@ -7,7 +7,12 @@ from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db, log_operation
 from ..member_cache_service import add_member_watch, fetch_and_cache_members
 from ..services.member_expiry import record_confirmed_invite, record_uncertain_invite
-from ..services.open_redemptions import find_open_redemption, open_redemption_detail
+from ..services.open_redemptions import (
+    find_open_redemption,
+    SETTLED_REDEMPTION_RESULTS,
+    open_redemption_detail,
+    settled_redemption_row_detail,
+)
 from ..services.seat_capacity import (
     SeatCapacityFetchError,
     chatgpt_seat_capacity,
@@ -397,17 +402,21 @@ async def _team_with_unresolved_invite(email: str) -> dict[str, Any] | None:
     落库失败"的兜底都写这张表：邀请可能已经到了那个 Team，换 Team 再拉就是一人两席。
     行只在两处被结清：调度器同步在那个 Team 的完整现拉名单里看到这个邮箱（成员或
     待接受邀请）；挂着兑换凭据的行（屏障、'extend' 兜底行）随那次兑换的终态一起
-    撤掉。邀请其实没送达的行不会自己结清，出口是在原 Team 里单独拉一次（那条路径
-    不受这里限制），下一轮同步看到人后结清。
+    撤掉。管理员邀请（不挂凭据）其实没送达的行不会自己结清，出口是在原 Team 里单独
+    拉一次（那条路径不受这里限制），下一轮同步看到人后结清。
+
+    返回 ``id`` / ``name``（行所在的 Team）、``token_use_id``（不挂凭据为 None）和
+    ``token_use_result``（那次兑换此刻的 result）。
 
     已从系统删除的 Team 不算：删 Team 不撤这些行、之后也不再同步它，算上就会让这个
     邮箱永远拉不进别的 Team。
     """
     async with get_db() as db:
         cursor = await db.execute(
-            """SELECT r.team_id, t.name
+            """SELECT r.team_id, t.name, r.token_use_id, atu.result AS token_use_result
                FROM pending_invite_reconciliations r
                JOIN teams t ON t.id = r.team_id
+               LEFT JOIN access_token_uses atu ON atu.id = r.token_use_id
                WHERE r.resolved = 0 AND lower(trim(r.email)) = ?
                ORDER BY r.id DESC
                LIMIT 1""",
@@ -416,7 +425,12 @@ async def _team_with_unresolved_invite(email: str) -> dict[str, Any] | None:
         row = await cursor.fetchone()
     if row is None:
         return None
-    return {"id": row["team_id"], "name": row["name"]}
+    return {
+        "id": row["team_id"],
+        "name": row["name"],
+        "token_use_id": row["token_use_id"],
+        "token_use_result": row["token_use_result"],
+    }
 
 
 async def invite_gpt_member_any_team(
@@ -443,13 +457,19 @@ async def invite_gpt_member_any_team(
     unresolved = await _team_with_unresolved_invite(email)
     if unresolved is not None:
         label = unresolved.get("name") or unresolved["id"]
-        # 这行若是一笔未结兑换的屏障 / 兜底行，"确认没送达请单独邀请"会让管理员在退码
-        # 之后手动补发，客户还能拿退回的码再兑换一次。这时改用兑换自己的说明。
+        # 这行若挂着兑换凭据（屏障 / 兜底行），"确认没送达请单独邀请"会让管理员在退码
+        # 之后手动补发，客户还能拿退回的码再兑换一次。这时改用兑换自己的说明：兑换
+        # 未结用 open_redemption_detail，已结束用 settled_redemption_row_detail。只有
+        # 管理员邀请留下的行（不挂凭据）才让管理员到原 Team 单独邀请。
         open_redemption = await find_open_redemption(
             unresolved["id"], email, uncertain_in_any_team=True
         )
         if open_redemption is not None:
             reason = open_redemption_detail(open_redemption, operation="batch_invite")
+        elif unresolved.get("token_use_result") in SETTLED_REDEMPTION_RESULTS:
+            reason = settled_redemption_row_detail(
+                unresolved["token_use_id"], unresolved.get("token_use_result"), label
+            )
         else:
             reason = (
                 f"邮箱在 Team {label} 有一次结果未确认的邀请，等待对账，本次跳过、未换 Team 重新邀请。"
