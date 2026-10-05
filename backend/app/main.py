@@ -130,9 +130,9 @@ async def health_check(is_admin: bool = Depends(_is_admin_request)):
     """
     Comprehensive health check endpoint.
 
-    公网可裸调，但只返回粗粒度状态（status/version/timestamp）——这个服务是公网可
-    访问的，逐组件的错误信息可能带出数据库路径、Team 数量等内部细节。带管理员凭据
-    调用才返回 components 明细。
+    公网可裸调，但只返回粗粒度状态（status/timestamp）——这个服务是公网可访问的，
+    逐组件的错误信息可能带出数据库路径、Team 数量等内部细节，精确版本号能让人对照
+    源码找已知问题。带管理员凭据调用才返回 version 和 components 明细。
 
     Returns a tiered status (healthy/degraded/unhealthy) with details on:
     - Database connectivity and query capability
@@ -351,11 +351,12 @@ async def health_check(is_admin: bool = Depends(_is_admin_request)):
     # ──────────────────────────────────────────────────────────────────
     response = {
         "status": overall_status,
-        "version": APP_VERSION,
         "timestamp": now_iso,
     }
-    # 明细只给管理员：状态码对所有人一致，编排/监控靠 200/503 就够判断了。
+    # 版本号和明细只给管理员：精确的 commit 能让人直接对照源码找已知问题。
+    # 状态码对所有人一致，编排/监控靠 200/503 就够判断了。
     if is_admin:
+        response["version"] = APP_VERSION
         response["components"] = checks
 
     from fastapi.responses import JSONResponse

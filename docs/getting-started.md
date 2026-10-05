@@ -54,7 +54,7 @@ curl -fsS http://127.0.0.1:8080/api/health
 健康就是这样：
 
 ```json
-{"status":"healthy","version":"...","timestamp":"..."}
+{"status":"healthy","timestamp":"..."}
 ```
 
 ### 1.3 第一次打开后台

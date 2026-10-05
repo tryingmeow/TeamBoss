@@ -211,7 +211,7 @@ sudo systemctl start <服务名>
 | `AUTO_TEAM_DATA_VOLUME` | 存放数据库 / 会话 / 备份的 Docker 命名卷名 | `auto_team_data` |
 | `AUTO_TEAM_DATA_DIR` | 数据目录（裸机运行时用；镜像里已设成 `/app/data`） | `backend/data` |
 | `AUTO_TEAM_BACKEND_HOST` / `AUTO_TEAM_BACKEND_PORT` | 后端监听地址与端口（**裸机运行必需**；Docker 里固定走容器内 8000，不读这两个值） | `127.0.0.1` / `18087` |
-| `AUTO_TEAM_VERSION` | `/api/health` 与启动日志里报告的版本号；不设时回退到 `git rev-parse --short HEAD`，再回退到 `unknown`（镜像里没有 `.git` 时建议显式设置） | 空 |
+| `AUTO_TEAM_VERSION` | 带管理员凭据（`X-API-Key`）请求 `/api/health` 时返回的版本号（匿名请求不返回）；不设时回退到 `git rev-parse --short HEAD`，再回退到 `unknown`（镜像里没有 `.git` 时建议显式设置） | 空 |
 | `VITE_API_BASE_URL` | 前端**构建期**变量，只影响本机 `npm run dev` / `npm run build`；Docker Compose 构建不读它（同源 `/api`，无需设置） | 空（`.env.example` 里给的是本机开发用的 `http://127.0.0.1:18087`） |
 
 完整清单见 [`.env.example`](./.env.example)。
