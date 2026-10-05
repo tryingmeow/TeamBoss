@@ -9,7 +9,7 @@ import TeamSettingsDialog from './TeamSettingsDialog';
 import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
 import { activeChatGptSeats } from '../lib/seatCapacity';
-import { formatSeatTypeLabel } from '../lib/seatType';
+import { SEAT_STYLE, formatSeatTypeLabel } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
@@ -187,6 +187,9 @@ export default function TeamCard({
   const defaultSeatLabel = team.default_seat_type
     ? formatSeatTypeLabel(team.default_seat_type)
     : '—';
+  const defaultSeatPill = team.default_seat_type === 'usage_based' || team.default_seat_type === 'default'
+    ? SEAT_STYLE[team.default_seat_type].pill
+    : TONE.neutral;
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -603,17 +606,11 @@ export default function TeamCard({
                 同步已暂停
               </span>
             )}
-            <span className={`${PILL} ${team.is_codex_enabled ? TONE.codex : TONE.neutral}`}>
+            <span className={`${PILL} ${team.is_codex_enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral}`}>
               <Zap size={11} /> {team.is_codex_enabled ? 'Codex 已开' : 'Codex 未开'}
             </span>
             <span
-              className={`${PILL} ${
-                team.default_seat_type === 'usage_based'
-                  ? TONE.codex
-                  : team.default_seat_type === 'default'
-                    ? TONE.info
-                    : TONE.neutral
-              }`}
+              className={`${PILL} ${defaultSeatPill}`}
             >
               默认席位 {defaultSeatLabel}
               <button
@@ -631,29 +628,29 @@ export default function TeamCard({
             </span>
           </div>
 
-          {/* Seats */}
+          {/* Seats: ChatGPT and Codex are billed differently, so each box wears its seat color. */}
           <div className={`mt-4 grid gap-3 ${showCodex ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            <div className="rounded-xl bg-gray-50 px-3.5 py-3 dark:bg-ink-950/60">
-              <div className="flex items-center justify-between gap-2 text-xs text-gray-500 dark:text-ink-400">
-                <span className="flex items-center gap-1.5 whitespace-nowrap"><Users size={13} /> ChatGPT 席位</span>
+            <div className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.default.surface}`}>
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className={`flex items-center gap-1.5 whitespace-nowrap font-medium ${SEAT_STYLE.default.text}`}><Users size={13} /> ChatGPT 席位</span>
                 {overSeats && <span className="whitespace-nowrap font-medium text-red-600 dark:text-red-400">超出 {activeGptSeats - seatsEntitled}</span>}
               </div>
               <div className="mt-1 flex items-baseline gap-1">
-                <span className={`text-xl font-semibold tabular-nums ${overSeats ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-50'}`}>{activeGptSeats}</span>
-                <span className="text-sm tabular-nums text-gray-400 dark:text-ink-500">/ {team.seats_entitled}</span>
+                <span className={`text-xl font-semibold tabular-nums ${overSeats ? 'text-red-600 dark:text-red-400' : SEAT_STYLE.default.text}`}>{activeGptSeats}</span>
+                <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {team.seats_entitled}</span>
               </div>
-              <div className="mt-2 h-1 overflow-hidden rounded-full bg-gray-200 dark:bg-ink-800" aria-hidden="true">
-                <div className={`h-full rounded-full ${overSeats ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${seatFill}%` }} />
+              <div className={`mt-2 h-1 overflow-hidden rounded-full ${SEAT_STYLE.default.track}`} aria-hidden="true">
+                <div className={`h-full rounded-full ${overSeats ? 'bg-red-500' : SEAT_STYLE.default.solid}`} style={{ width: `${seatFill}%` }} />
               </div>
             </div>
             {showCodex && (
-              <div className="rounded-xl bg-gray-50 px-3.5 py-3 dark:bg-ink-950/60">
-                <div className="flex items-center gap-1.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
+              <div className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.usage_based.surface}`}>
+                <div className={`flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${SEAT_STYLE.usage_based.text}`}>
                   <Zap size={13} /> Codex 成员
                 </div>
                 <div className="mt-1 flex items-baseline gap-1">
-                  <span className="text-xl font-semibold tabular-nums text-gray-900 dark:text-gray-50">{team.codex_count}</span>
-                  <span className="text-sm text-gray-400 dark:text-ink-500">人</span>
+                  <span className={`text-xl font-semibold tabular-nums ${SEAT_STYLE.usage_based.text}`}>{team.codex_count}</span>
+                  <span className="text-sm text-gray-500 dark:text-ink-400">人</span>
                 </div>
               </div>
             )}
@@ -810,13 +807,7 @@ export default function TeamCard({
         <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-50 px-4 py-3 dark:bg-ink-950/60">
           <span className="text-sm text-gray-500 dark:text-ink-400">当前默认席位</span>
           <span
-            className={`${PILL} ${
-              team.default_seat_type === 'usage_based'
-                ? TONE.codex
-                : team.default_seat_type === 'default'
-                  ? TONE.info
-                  : TONE.neutral
-            }`}
+            className={`${PILL} ${defaultSeatPill}`}
           >
             {defaultSeatLabel}
           </span>

@@ -39,10 +39,11 @@ import { NO_EXPIRY_LABEL, noExpiryKind, type KickPolicy } from '../../lib/expiry
 import { cn } from '../../lib/utils';
 import SystemLogs from './SystemLogs';
 import {
+  SEAT_STYLE,
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
-  isCodexSeat,
   normalizeSeatType,
+  seatStyle,
   seatUpdateErrorMessage,
 } from '../../lib/seatType';
 import { ExpiryExtensionRequestIds } from '../../lib/expiryExtensionRequest';
@@ -572,7 +573,7 @@ function CodexBadge({ isCodexEnabled }: { isCodexEnabled?: boolean | number }) {
   const enabled = Boolean(isCodexEnabled);
   return (
     <span
-      className={cn(PILL, enabled ? TONE.codex : TONE.neutral)}
+      className={cn(PILL, enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral)}
       title={enabled ? '这个 Team 已开启 Codex 席位' : '这个 Team 未开启 Codex 席位'}
     >
       <Zap className="size-2.5" />
@@ -597,7 +598,7 @@ function SeatTypeCell({
   }
   return (
     <div className="flex items-center gap-1">
-      <span className={cn(PILL, isCodexSeat(seatType) ? TONE.codex : TONE.info)}>
+      <span className={cn(PILL, seatStyle(seatType).pill)}>
         {formatSeatTypeLabel(seatType)}
       </span>
       {editable && onChange && (
@@ -622,7 +623,7 @@ function SeatTypeCell({
                     className="flex h-9 w-full items-center justify-between rounded-md px-2.5 text-sm text-gray-700 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-ink-300 dark:hover:bg-ink-800 dark:hover:text-gray-100"
                   >
                     <span className="flex items-center gap-2">
-                      <span className={cn('size-2 rounded-full', value === 'usage_based' ? 'bg-purple-500' : 'bg-blue-500')} />
+                      <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} />
                       {label}
                     </span>
                     {normalizeSeatType(seatType) === value && (
@@ -1582,7 +1583,7 @@ export default function UserManagement() {
       ...SEAT_TYPE_OPTIONS.map(({ value, label }) => ({
         value,
         label,
-        dotClass: value === 'usage_based' ? 'bg-purple-500' : 'bg-blue-500',
+        dotClass: SEAT_STYLE[value].solid,
       })),
     ],
     []

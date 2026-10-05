@@ -4,10 +4,11 @@ import * as Popover from '@radix-ui/react-popover';
 import type { Member, ShowToast } from '../types';
 import { removeMember, changeSeat, extendMemberExpiry, removeExpiry, updateMemberExpiry } from '../api/client';
 import {
+  SEAT_STYLE,
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
-  isCodexSeat,
   normalizeSeatType,
+  seatStyle,
   seatUpdateErrorMessage,
 } from '../lib/seatType';
 import { NO_EXPIRY_LABEL, formatAppLocalFull, noExpiryKind, toAppLocal } from '../lib/expiry';
@@ -16,7 +17,7 @@ import MemberRemarkEditor from './MemberRemarkEditor';
 import { useKickPolicy } from '../hooks/useKickPolicy';
 import ConfirmDialog from './ConfirmDialog';
 import { ExpiryExtensionRequestIds } from '../lib/expiryExtensionRequest';
-import { PILL, TONE } from './ui';
+import { PILL } from './ui';
 import { cn } from '../lib/utils';
 
 interface MemberRowProps {
@@ -34,7 +35,7 @@ const POPOVER =
   'z-50 rounded-xl border border-gray-200 bg-white shadow-xl dark:border-ink-800 dark:bg-ink-900';
 
 function seatPillClass(seatType: string | null | undefined): string {
-  return cn(PILL, isCodexSeat(seatType) ? TONE.codex : TONE.info);
+  return cn(PILL, seatStyle(seatType).pill);
 }
 
 /**
@@ -194,7 +195,10 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
                   disabled={loading}
                   className="flex h-9 w-full items-center justify-between rounded-lg px-3 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-200 dark:hover:bg-ink-800"
                 >
-                  {label}
+                  <span className="flex items-center gap-2">
+                    <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
+                    {label}
+                  </span>
                   {normalizeSeatType(member.seat_type) === value && (
                     <Check size={14} className="text-blue-600 dark:text-blue-400" />
                   )}

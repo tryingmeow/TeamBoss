@@ -6,7 +6,7 @@ import MemberRemarkEditor from './MemberRemarkEditor';
 import LoadingSpinner from './LoadingSpinner';
 import ConfirmDialog from './ConfirmDialog';
 import { revokeInvite } from '../api/client';
-import { formatSeatTypeLabel, isCodexSeat } from '../lib/seatType';
+import { formatSeatTypeLabel, seatStyle } from '../lib/seatType';
 import { formatAppLocalFull } from '../lib/expiry';
 import { PILL, TONE } from './ui';
 import { cn } from '../lib/utils';
@@ -112,7 +112,7 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
                 </div>
 
                 <div className="flex shrink-0 flex-col items-end gap-1">
-                  <span className={cn(PILL, isCodexSeat(inv.seat_type) ? TONE.codex : TONE.info)}>
+                  <span className={cn(PILL, seatStyle(inv.seat_type).pill)}>
                     {formatSeatTypeLabel(inv.seat_type)}
                   </span>
                   {inv.expires_at && (

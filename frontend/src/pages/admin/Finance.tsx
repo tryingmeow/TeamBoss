@@ -40,6 +40,7 @@ import CostTrendChart from '../../components/CostTrendChart';
 import PageShell from '../../components/PageShell';
 import SegmentedTabs from '../../components/SegmentedTabs';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
+import { SEAT_STYLE } from '../../lib/seatType';
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
 
@@ -1111,11 +1112,11 @@ export default function Finance() {
                           </td>
                           <td className="px-3 py-3.5">
                             <div className="whitespace-nowrap">
-                              <span className="text-xs text-gray-500 dark:text-ink-400">ChatGPT </span>
+                              <span className={cn('text-xs font-medium', SEAT_STYLE.default.text)}>ChatGPT </span>
                               <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{team.chatgpt_in_use}</span>
                               <span className="tabular-nums text-gray-400 dark:text-ink-500">/{team.seats_entitled}</span>
                             </div>
-                            <span className={cn(PILL, 'mt-1', team.is_codex_enabled ? TONE.codex : TONE.neutral)}>
+                            <span className={cn(PILL, 'mt-1', team.is_codex_enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral)}>
                               <Zap className="size-2.5" />
                               {team.is_codex_enabled ? 'Codex 已开' : 'Codex 未开'}
                               {team.codex_count > 0 ? ` · ${team.codex_count}` : ''}

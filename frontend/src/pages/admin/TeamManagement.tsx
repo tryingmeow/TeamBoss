@@ -7,13 +7,13 @@ import {
   Clock,
   CreditCard,
   Loader2,
-  PieChart,
   RefreshCw,
   Server,
   Shield,
   UserRound,
   Users,
   Wallet,
+  Zap,
 } from 'lucide-react';
 import {
   fetchAllMembers,
@@ -26,7 +26,8 @@ import {
 import PageShell from '../../components/PageShell';
 import { BUTTON, CARD, PILL, TONE } from '../../components/ui';
 import { formatMoney } from '../../lib/money';
-import { formatSeatTypeLabel, isCodexSeat } from '../../lib/seatType';
+import { SEAT_STYLE, formatSeatTypeLabel, seatStyle } from '../../lib/seatType';
+import type { SeatType } from '../../types';
 import { cn } from '../../lib/utils';
 
 interface DashboardMember {
@@ -52,23 +53,25 @@ function StatCard({
   value,
   detail,
   icon: Icon,
-  iconClassName,
+  seat,
   children,
 }: {
   title: string;
   value: ReactNode;
   detail: ReactNode;
   icon: typeof Shield;
-  iconClassName?: string;
+  /** Tiles about one seat type wear that seat's color (same as the Team cards). */
+  seat?: SeatType;
   children?: ReactNode;
 }) {
+  const tone = seat ? SEAT_STYLE[seat] : null;
   return (
-    <div className={cn(CARD, 'flex min-w-0 flex-col p-4 sm:p-5')}>
+    <div className={cn(CARD, 'flex min-w-0 flex-col p-4 sm:p-5', tone?.surface)}>
       <div className="flex items-center justify-between gap-2">
-        <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{title}</p>
-        <Icon className={cn('size-4 shrink-0 text-gray-400 dark:text-ink-500', iconClassName)} />
+        <p className={cn('truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400', tone?.text)}>{title}</p>
+        <Icon className={cn('size-4 shrink-0 text-gray-400 dark:text-ink-500', tone?.text)} />
       </div>
-      <p className="mt-2 break-words text-lg font-semibold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50">
+      <p className={cn('mt-2 break-words text-lg font-semibold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50', tone?.text)}>
         {value}
       </p>
       {children}
@@ -323,19 +326,19 @@ export default function TeamManagement() {
                 title="ChatGPT 席位"
                 value={`${seatUtilization}%`}
                 detail={`已用 ${data.inuse_gpt} / ${data.total_gpt_seats} · 剩余 ${data.free_gpt_seats}`}
-                icon={PieChart}
-                iconClassName="text-blue-500 dark:text-blue-400"
+                icon={Users}
+                seat="default"
               >
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-ink-800">
-                  <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(seatUtilization, 100)}%` }} />
+                <div className={cn('mt-2 h-1.5 overflow-hidden rounded-full', SEAT_STYLE.default.track)}>
+                  <div className={cn('h-full rounded-full', SEAT_STYLE.default.solid)} style={{ width: `${Math.min(seatUtilization, 100)}%` }} />
                 </div>
               </StatCard>
               <StatCard
                 title="Codex 席位"
                 value={data.inuse_codex}
                 detail="使用中 · 按用量计费"
-                icon={Users}
-                iconClassName="text-purple-500 dark:text-purple-400"
+                icon={Zap}
+                seat="usage_based"
               />
               <StatCard
                 title="有空位的 Team"
@@ -452,7 +455,7 @@ export default function TeamManagement() {
                           <div className="mt-1 truncate text-xs text-gray-500 dark:text-ink-400" title={member.team_name}>{member.team_name}</div>
                         </div>
                         <div className="flex shrink-0 flex-col items-end">
-                          <span className={cn(PILL, isCodexSeat(member.seat_type) ? TONE.codex : TONE.info)}>
+                          <span className={cn(PILL, seatStyle(member.seat_type).pill)}>
                             {formatSeatTypeLabel(member.seat_type)}
                           </span>
                           <div className="mt-1.5 flex items-center gap-1 text-xs tabular-nums text-gray-500 dark:text-ink-400">

@@ -9,7 +9,7 @@ import {
   updateTeamProxy,
   type Proxy,
 } from '../api/client';
-import { formatSeatTypeLabel, normalizeSeatType } from '../lib/seatType';
+import { SEAT_STYLE, formatSeatTypeLabel, normalizeSeatType } from '../lib/seatType';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { cn } from '../lib/utils';
@@ -207,9 +207,9 @@ export default function TeamSettingsDialog({
               onClick={() => setConfirmOpen(true)}
               className={cn(
                 'inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-                currentSeat === 'usage_based'
-                  ? 'border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 dark:border-purple-500/30 dark:bg-purple-500/10 dark:text-purple-300 dark:hover:bg-purple-500/20'
-                  : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20',
+                SEAT_STYLE[currentSeat].surface,
+                SEAT_STYLE[currentSeat].text,
+                'hover:brightness-95 dark:hover:brightness-125',
               )}
               aria-label={`默认邀请席位：${formatSeatTypeLabel(currentSeat)}，点击切换`}
               title="切换"

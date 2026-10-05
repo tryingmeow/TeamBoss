@@ -6,7 +6,7 @@ import { useKickPolicy } from '../hooks/useKickPolicy';
 import { useSettings } from '../hooks/useSettings';
 import { selectionToDuration } from '../lib/expiry';
 import { inviteMember, OverageConfirmationError } from '../api/client';
-import { SEAT_TYPE_OPTIONS } from '../lib/seatType';
+import { SEAT_STYLE, SEAT_TYPE_OPTIONS } from '../lib/seatType';
 import type { SeatType } from '../types';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
@@ -256,15 +256,13 @@ export default function AddMemberDialog({
                     onClick={() => setSeatType(value)}
                     aria-pressed={seatType === value}
                     className={cn(
-                      'h-8 whitespace-nowrap rounded-md text-sm font-medium transition-colors',
+                      'inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-medium transition-colors',
                       seatType === value
-                        ? cn(
-                          'bg-white shadow-sm dark:bg-ink-800',
-                          value === 'usage_based' ? 'text-purple-700 dark:text-purple-300' : 'text-blue-700 dark:text-blue-300',
-                        )
+                        ? cn('shadow-sm', SEAT_STYLE[value].pill)
                         : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
                     )}
                   >
+                    <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
                     {label}
                   </button>
                 ))}
