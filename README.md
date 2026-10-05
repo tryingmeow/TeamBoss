@@ -211,6 +211,7 @@ sudo systemctl start <服务名>
 | `AUTO_TEAM_DATA_VOLUME` | 存放数据库 / 会话 / 备份的 Docker 命名卷名 | `auto_team_data` |
 | `AUTO_TEAM_DATA_DIR` | 数据目录（裸机运行时用；镜像里已设成 `/app/data`） | `backend/data` |
 | `AUTO_TEAM_BACKEND_HOST` / `AUTO_TEAM_BACKEND_PORT` | 后端监听地址与端口（**裸机运行必需**；Docker 里固定走容器内 8000，不读这两个值） | `127.0.0.1` / `18087` |
+| `AUTO_TEAM_FRONTEND_PORT` / `AUTO_TEAM_FRONTEND_HOST` | `npm run dev` / `npm run demo` 的端口与绑定地址；Host 默认仅本机，设 `0.0.0.0` 才对外 | `5173` / `127.0.0.1` |
 | `AUTO_TEAM_VERSION` | 带管理员凭据（`X-API-Key`）请求 `/api/health` 时返回的版本号（匿名请求不返回）；不设时回退到 `git rev-parse --short HEAD`，再回退到 `unknown`（镜像里没有 `.git` 时建议显式设置） | 空 |
 | `VITE_API_BASE_URL` | 前端**构建期**变量，只影响本机 `npm run dev` / `npm run build`；Docker Compose 构建不读它（同源 `/api`，无需设置） | 空（`.env.example` 里给的是本机开发用的 `http://127.0.0.1:18087`） |
 
@@ -258,7 +259,7 @@ npm run dev                       # http://localhost:5173
 
 没有后端、也没有 ChatGPT 账号时，可以用 `npm run demo` 起一个离线演示：所有 `/api` 请求由前端内存里的虚构数据应答，任意密码都能登录，刷新即重置。
 
-`npm run dev` 起的 Vite 开发服务器会把 `/api` 请求代理到后端：目标地址优先取 `VITE_API_BASE_URL`，否则用 `http://AUTO_TEAM_BACKEND_HOST:AUTO_TEAM_BACKEND_PORT`（默认 `127.0.0.1:18087`），这些变量都从仓库根目录的 `.env` 读取。前端端口可用 `AUTO_TEAM_FRONTEND_PORT` 改。
+`npm run dev` 起的 Vite 开发服务器会把 `/api` 请求代理到后端：目标地址优先取 `VITE_API_BASE_URL`，否则用 `http://AUTO_TEAM_BACKEND_HOST:AUTO_TEAM_BACKEND_PORT`（默认 `127.0.0.1:18087`），这些变量都从仓库根目录的 `.env` 读取。前端端口可用 `AUTO_TEAM_FRONTEND_PORT` 改。开发服务器默认只绑定 `127.0.0.1`；确需从其他机器访问时设置 `AUTO_TEAM_FRONTEND_HOST`（例如 `0.0.0.0`），注意这会把开发服务器暴露出去。
 
 后端测试：**务必用 `AUTO_TEAM_DATA_DIR` 指向一个临时目录**，否则数据目录会回退到 `backend/data/`，在已部署的机器上那就是真实数据库。测试包自带保护（未设置该变量时会自动改用临时目录），但显式指定更稳妥：
 
