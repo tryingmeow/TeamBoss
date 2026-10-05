@@ -7,6 +7,7 @@ from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db, log_operation
 from ..member_cache_service import add_member_watch, fetch_and_cache_members
 from ..services.member_expiry import record_confirmed_invite, record_uncertain_invite
+from ..services.open_redemptions import find_open_redemption, open_redemption_detail
 from ..services.seat_capacity import (
     SeatCapacityFetchError,
     chatgpt_seat_capacity,
@@ -23,10 +24,11 @@ from ..services.subscription_status import subscription_status
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 EMAIL_ALREADY_IN_TEAM = "邮箱已在该 Team 中，未重复邀请"
-# _invite_to_team 返回的错误前缀：带这两个前缀、或等于 EMAIL_ALREADY_IN_TEAM 的结果
-# 都把这个邮箱绑定在当次的 Team 上，调用方不能再换 Team 拉，见 _bound_to_team_failure。
+# _invite_to_team 返回的错误前缀：带这些前缀、或等于 EMAIL_ALREADY_IN_TEAM 的结果
+# 都让这个邮箱就此终止，调用方不能再换 Team 拉，见 _bound_to_team_failure。
 MEMBER_LOOKUP_FAILED = "member_lookup_failed:"
 INVITE_RESULT_UNCERTAIN = "invite_result_uncertain:"
+OPEN_REDEMPTION = "open_redemption:"
 
 
 class NoGptSeatAvailable(Exception):
@@ -214,6 +216,25 @@ async def _invite_to_team(
 ) -> tuple[dict[str, Any] | None, str | None]:
     team_id = team["id"]
     async with team_invite_lock(team_id):
+        # 有对账日后还会给这个邮箱记账的未结兑换就跳过，什么都不写：对账确认那笔兑换
+        # 时会在这次写下的到期之上再累加一次兑换码时长（30 天码 + 批量 30 天 = 60 天）。
+        # 必须在锁内、任何上游请求之前查：兑换的邀请分支只在同一把 team_invite_lock
+        # 里把兑换落到这个 Team、发邀请、记账或锁成 uncertain，查过之后直到本次写完，
+        # 已有的兑换不会在这个 Team 上为这个邮箱记账。
+        open_redemption = await find_open_redemption(team_id, email)
+        if open_redemption is not None:
+            detail = open_redemption_detail(open_redemption, operation="batch_invite")
+            await log_operation(
+                team_id,
+                action,
+                email,
+                f"open_redemption token_use_id={open_redemption['token_use_id']} "
+                f"result={open_redemption['result']}",
+                "skipped",
+                detail,
+            )
+            return None, f"{OPEN_REDEMPTION}{detail}"
+
         # 缓存快照只用来提前跳过：缓存里"有"足以不发邀请。
         if _snapshot_contains_email(cached_snapshot, email):
             await log_operation(team_id, f"{action}_existing", email, EMAIL_ALREADY_IN_TEAM, "skipped")
@@ -317,6 +338,9 @@ def _bound_to_team_failure(error: str | None, team: dict[str, Any]) -> GptInvite
       一个席位、各有一条到期记录。
     * 该 Team 名单拉不到：无法排除他已在里面，同上，失败关闭。
     * 邀请结果不明确：邀请可能已经到了 OpenAI，只能留在原 Team 等对账。
+    * 邮箱有未结兑换：拒绝针对的是邮箱而不是这个 Team。兑换收尾时给它落定的 Team
+      记账，这时拉进同一个 Team 多记一次时长、拉进别的 Team 多占一个席位，换 Team
+      没有意义。原因文案由 open_redemption_detail 给出。
 
     没空位、上游明确拒绝等没有远端副作用、也不说明人在该 Team 的失败返回 None，
     调用方照常试下一个 Team。
@@ -325,6 +349,8 @@ def _bound_to_team_failure(error: str | None, team: dict[str, Any]) -> GptInvite
         return None
     team_id = team.get("id")
     label = team.get("name") or team_id
+    if error.startswith(OPEN_REDEMPTION):
+        return GptInviteFailed(error[len(OPEN_REDEMPTION):], team_id=team_id)
     if error == EMAIL_ALREADY_IN_TEAM:
         return GptInviteFailed(f"邮箱已在 Team {label} 中，未重复邀请", team_id=team_id)
     if error.startswith(MEMBER_LOOKUP_FAILED):

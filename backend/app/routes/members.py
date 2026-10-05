@@ -5,7 +5,7 @@ from urllib.parse import unquote
 from fastapi import APIRouter, HTTPException, status
 
 from ..chatgpt_limiter import run_chatgpt_call
-from ..database import get_db, log_operation
+from ..database import log_operation
 from ..member_cache_service import add_member_watch, fetch_and_cache_members, get_cached_members, update_cached_member_expiry
 from ..models import ChangeSeatRequest, ExtendExpiryRequest, InviteMemberRequest, SetExpiryRequest
 from ..services.member_expiry import (
@@ -21,6 +21,7 @@ from ..services.member_expiry import (
     record_uncertain_invite,
     upsert_member_expiry,
 )
+from ..services.open_redemptions import find_open_redemption, open_redemption_detail
 from ..services.seat_capacity import (
     SeatCapacityFetchError,
     fetch_live_chatgpt_seat_capacity,
@@ -158,58 +159,12 @@ _INVITE_EXISTING_MEMBER_DETAIL = (
 )
 _INVITE_LOOKUP_FAILED_DETAIL = "无法确认该邮箱是否已在此 Team（成员列表拉取失败），未发送邀请，请稍后重试"
 _INVITE_MEMBER_BUSY_DETAIL = "该邮箱的成员状态正在变更（续期、到期处理或巡逻进行中），未发送邀请，请稍后重试"
-_OPEN_REDEMPTION_UNCERTAIN_DETAIL = (
-    "该邮箱在此 Team 有一笔兑换的邀请结果仍在确认中（兑换记录 #{token_use_id}），{refused}。"
-    "请先在「兑换码 → 待确认的兑换」里核实收尾：确认成功会按兑换码补齐时长，确认失败会退码。"
-    "收尾后再{next_step}。"
-)
-_OPEN_REDEMPTION_PENDING_DETAIL = (
-    "该邮箱有一笔兑换正在处理（兑换记录 #{token_use_id}），{refused}。"
-    "请等它结束后刷新成员列表，再{next_step}；结果不明的兑换会转入「兑换码 → 待确认的兑换」。"
-)
-# (日志 action, 拒绝说明, 收尾后的下一步)，按管理员操作区分。
-_OPEN_REDEMPTION_REFUSALS = {
-    "invite": ("invite_member", "未发送邀请", "决定是否需要另行邀请"),
-    "set_expiry": ("set_expiry", "未修改到期时间", "调整到期时间"),
-    "extend_expiry": ("extend_expiry", "未续期", "决定是否需要续期"),
+# 被拒时记日志用的 action，按管理员操作区分；说明文案见 services/open_redemptions.py。
+_OPEN_REDEMPTION_LOG_ACTIONS = {
+    "invite": "invite_member",
+    "set_expiry": "set_expiry",
+    "extend_expiry": "extend_expiry",
 }
-
-# 对账任务日后还会给这个 (Team, 邮箱) 记账的未结兑换，见 _refuse_if_open_redemption。
-# 两条腿：
-# * 兑换本身（access_token_uses）：pending 不论在哪个 Team（还没落 Team 的 lookup、
-#   以及被上游拒绝后会换到下一个 Team 重试的邀请，都可能落到这个 Team），uncertain
-#   只看这个 Team（结果不明的邀请钉死在原 Team，不会再换）。
-# * 兜底行（pending_invite_reconciliations 里未结清、挂着兑换凭据的 barrier / extend /
-#   backfill 行）：调度器回填时按凭据认领兑换，凭据仍是 pending/uncertain 就会记账。
-#   这些行和凭据在正常流程里 Team、邮箱一致；单独查一遍，是为了不依赖这份一致性。
-_OPEN_REDEMPTION_SQL = """
-    SELECT atu.id AS token_use_id, atu.result AS result
-      FROM access_token_uses atu
-     WHERE lower(atu.email) = ?
-       AND (atu.result = 'pending' OR (atu.result = 'uncertain' AND atu.team_id = ?))
-    UNION
-    SELECT atu.id AS token_use_id, atu.result AS result
-      FROM pending_invite_reconciliations r
-      JOIN access_token_uses atu ON atu.id = r.token_use_id
-     WHERE r.team_id = ? AND r.resolved = 0 AND lower(r.email) = ?
-       AND atu.result IN ('pending', 'uncertain')
-    ORDER BY token_use_id
-    LIMIT 1
-"""
-
-
-async def _open_redemption(team_id: str, email: str) -> dict | None:
-    """这个 (Team, 邮箱) 上对账日后还会记账的未结兑换，没有则 None。只读。"""
-    normalized_email = (email or "").strip().lower()
-    if not normalized_email:
-        return None
-    async with get_db() as db:
-        cursor = await db.execute(
-            _OPEN_REDEMPTION_SQL,
-            (normalized_email, team_id, team_id, normalized_email),
-        )
-        row = await cursor.fetchone()
-    return dict(row) if row else None
 
 
 async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str = "invite") -> None:
@@ -235,20 +190,14 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
     续期在成员操作占用之内调用（兑换的续期分支拿同一个占用）；设置到期本来就不持锁，
     检查只挡住调用时已经存在的未结兑换。
     """
-    open_redemption = await _open_redemption(team_id, email)
+    open_redemption = await find_open_redemption(team_id, email)
     if open_redemption is None:
         return
     token_use_id = open_redemption["token_use_id"]
-    log_action, refused, next_step = _OPEN_REDEMPTION_REFUSALS[operation]
-    template = (
-        _OPEN_REDEMPTION_UNCERTAIN_DETAIL
-        if open_redemption["result"] == "uncertain"
-        else _OPEN_REDEMPTION_PENDING_DETAIL
-    )
-    detail = template.format(token_use_id=token_use_id, refused=refused, next_step=next_step)
+    detail = open_redemption_detail(open_redemption, operation=operation)
     await log_operation(
         team_id,
-        log_action,
+        _OPEN_REDEMPTION_LOG_ACTIONS[operation],
         email,
         f"open_redemption token_use_id={token_use_id} result={open_redemption['result']}",
         "skipped",

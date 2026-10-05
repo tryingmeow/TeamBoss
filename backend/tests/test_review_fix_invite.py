@@ -257,6 +257,7 @@ class GptBatchInviteStaleSnapshotTest(unittest.IsolatedAsyncioTestCase):
         fetch = AsyncMock(side_effect=fetch_error) if fetch_error else AsyncMock(return_value=live_snapshot)
         record = AsyncMock(return_value=None)
         with (
+            patch.object(gpt_invites, "find_open_redemption", new=AsyncMock(return_value=None)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=client)),
             patch.object(gpt_invites, "fetch_and_cache_members", new=fetch),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
@@ -564,6 +565,7 @@ class GptBatchInviteErroredEmailTest(unittest.IsolatedAsyncioTestCase):
         )
         record = AsyncMock(return_value=None)
         with (
+            patch.object(gpt_invites, "find_open_redemption", new=AsyncMock(return_value=None)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=client)),
             patch.object(gpt_invites, "fetch_and_cache_members",
                          new=AsyncMock(return_value={"members": [], "pending_invites": []})),
