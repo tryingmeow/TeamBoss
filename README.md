@@ -224,7 +224,7 @@ sudo systemctl start <服务名>
   - `POST /api/self-service/query` —— 请求体字段是 `query`，填**邮箱或兑换码**均可，返回成员状态；兑换历史要另外用 `token` 出示一张这个邮箱自己用过的码，否则恒为空数组
   - `POST /api/self-service/status` —— 凭邮箱查当前是否还在 Team 里（自带的自助页没有调用它，留给自建前端）
 
-  这三个接口按来源 IP 限流。挂在反代后面时务必配好 `AUTO_TEAM_TRUSTED_PROXIES`，否则所有访客会被算成同一个 IP。
+  这三个接口按来源 IP 限流。挂在反代后面时务必配好 `AUTO_TEAM_TRUSTED_PROXIES`，否则所有访客会被算成同一个 IP。有效兑换码的兑换尝试还另有上限（每张码每小时 6 次、全站每 10 分钟 30 次），超出时返回 429，码不消耗。
 
 ## 安全须知
 

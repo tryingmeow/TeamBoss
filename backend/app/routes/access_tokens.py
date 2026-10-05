@@ -10,7 +10,7 @@ from typing import Any, Callable, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from ..client_ip import RateLimiter as _RateLimiter, get_client_ip
+from ..client_ip import RateLimiter as _RateLimiter, get_client_ip, rate_limit_key
 from ..chatgpt_client import ChatGPTClient, mask_secrets
 from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db, log_operation
@@ -64,12 +64,65 @@ _limiter_query = _RateLimiter(max_requests=30, window_seconds=60)  # 查询：30
 _limiter_redeem = _RateLimiter(max_requests=10, window_seconds=60)  # 兑换：10请求/分钟
 
 
+class _RedeemLookupBudget:
+    """公开兑换接口里「会去上游实时拉成员列表」的尝试次数预算。
+
+    兑换以「团队不存在 / 需要选 Team / Owner / 永久成员 / 没有空位」等结尾时码会退回，
+    同一张有效未用的码因此可以无限重放；而每一次都要实时拉 Owner 账号下各 Team 的成员
+    列表（账号风控风险），还和同步、自动踢人抢同一个全局上游并发额度。这里给两层上限：
+
+    * 每张码：``per_code`` 次 / ``per_code_window`` 秒；
+    * 全站：``global_limit`` 次 / ``global_window`` 秒（攻击者手里码再多也有上限）。
+
+    只在码校验通过之后、占用之前计数（无效码根本不碰上游，按 IP 限流就够了）。先判断
+    两层是否都有余量，都有才同时记账——否则一张已被单码上限挡住的码还能继续消耗全站
+    额度，一张码就能把所有人的兑换堵死。码的消耗时机和规则完全不受影响。
+    """
+
+    def __init__(self, per_code: int, per_code_window: int, global_limit: int, global_window: int):
+        self.per_code = per_code
+        self.per_code_window = per_code_window
+        self.global_limit = global_limit
+        self.global_window = global_window
+        self._per_code_hits: dict[int, list[float]] = {}
+        self._global_hits: list[float] = []
+
+    def try_take(self, token_id: int, now: float) -> Optional[str]:
+        """有余量就记一次并返回 None；否则返回被哪一层挡住（"per_code" / "global"）。"""
+        self._global_hits = [ts for ts in self._global_hits if ts > now - self.global_window]
+        code_hits = [
+            ts for ts in self._per_code_hits.get(token_id, ()) if ts > now - self.per_code_window
+        ]
+        if len(code_hits) >= self.per_code:
+            self._per_code_hits[token_id] = code_hits
+            return "per_code"
+        if len(self._global_hits) >= self.global_limit:
+            if code_hits:
+                self._per_code_hits[token_id] = code_hits
+            else:
+                self._per_code_hits.pop(token_id, None)
+            return "global"
+        code_hits.append(now)
+        self._per_code_hits[token_id] = code_hits
+        self._global_hits.append(now)
+        if len(self._per_code_hits) > 10000:
+            cutoff = now - self.per_code_window
+            for key in [k for k, hits in self._per_code_hits.items() if not hits or hits[-1] <= cutoff]:
+                del self._per_code_hits[key]
+        return None
+
+
+# 每张码每小时 6 次：一人多 Team 的选择提示、选错/没空位后重试都够用；
+# 全站每 10 分钟 30 次：正常售卖远低于此，被挡的人码不消耗，稍后重试即可。
+_redeem_lookup_budget = _RedeemLookupBudget(
+    per_code=6, per_code_window=3600, global_limit=30, global_window=600
+)
 
 
 async def _check_rate_limit(request: Request, limiter: _RateLimiter) -> None:
-    """检查速率限制，超限时抛出 429 异常。"""
+    """检查速率限制，超限时抛出 429 异常。IPv6 按 /64 计数。"""
     client_ip = get_client_ip(request)
-    if not limiter.is_allowed(client_ip):
+    if not limiter.is_allowed(rate_limit_key(client_ip)):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="请求过于频繁，请稍后再试",
@@ -1558,6 +1611,27 @@ async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
     email = _normalize_email(req.email)
     token_row = await _load_token(req.token)
     token_id = int(token_row["id"])
+
+    # 走到这里的是一张有效未用的码，接下来就要实时查上游。先过尝试预算（见
+    # _RedeemLookupBudget）；被挡时什么都还没占用，码原样保留。
+    blocked = _redeem_lookup_budget.try_take(token_id, time.time())
+    if blocked is not None:
+        await log_operation(
+            None,
+            "self_service_redeem",
+            None,
+            f"reason=lookup_budget_{blocked}, token_id={token_id}",
+            "failed",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "这张兑换码短时间内尝试次数过多，请稍后再试。兑换码未使用。"
+                if blocked == "per_code"
+                else "当前兑换人数较多，请稍后再试。兑换码未使用。"
+            ),
+        )
+
     grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
     # 这只是这张码的"面额"（从现在起算的名义到期），仅用于失败记录/审计展示。
     # 真正落库的到期时间由 extend_member_expiry 按 max(现有到期, now) + 时长 算出来，

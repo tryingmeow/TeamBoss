@@ -186,6 +186,16 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self._env.start()
         await app_database.init_database()
+        # 每个测试的库都是新的，码的 id 会重复；尝试预算是进程级单例，必须每个测试一份。
+        budget = patch.object(
+            access_tokens,
+            "_redeem_lookup_budget",
+            new=access_tokens._RedeemLookupBudget(
+                per_code=6, per_code_window=3600, global_limit=30, global_window=600
+            ),
+        )
+        budget.start()
+        self.addCleanup(budget.stop)
 
     async def asyncTearDown(self):
         self._env.stop()
