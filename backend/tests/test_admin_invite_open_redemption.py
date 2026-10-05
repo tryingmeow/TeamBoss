@@ -323,6 +323,21 @@ class AdminInviteOpenRedemptionTest(_OpenRedemptionCase):
         conn.close()
         self.assertEqual((log["team_id"], log["result"]), (TEAM, "skipped"))
 
+    def test_uncertain_redemption_in_a_logged_out_team_says_how_to_settle_it(self):
+        token_use_id = self._open_uncertain(team_id=OTHER_TEAM)
+        conn = self._conn()
+        conn.execute("UPDATE teams SET status = 'token_expired' WHERE id = ?", (OTHER_TEAM,))
+        conn.commit()
+        conn.close()
+
+        _result, client, fetch, exc = self._admin_invite()
+
+        self._assert_refused_before_upstream(
+            client, fetch, exc, token_use_id=token_use_id, phrase="重新导入恢复登录"
+        )
+        self.assertIn(f"Team {OTHER_TEAM} 登录已失效", exc.detail)
+        self.assertIn("直接确认成功", exc.detail)
+
     def test_uncertain_redemption_in_a_deleted_team_does_not_block(self):
         """Team 删掉后对账拿不到它的凭据、再也确认不了那笔兑换，叠不出第二个席位；
         管理员也没法在那里核实退码，算上就让这个邮箱永远拉不进别的 Team。"""
@@ -493,6 +508,38 @@ class OpenRedemptionDetailTest(unittest.TestCase):
         unnamed = dict(self.UNCERTAIN, team_name=None)
         detail = open_redemptions.open_redemption_detail(unnamed, operation="batch_invite")
         self.assertIn(f"Team {OTHER_TEAM}", detail)
+
+    def test_uncertain_detail_names_the_team_the_email_must_show_up_in(self):
+        """管理员可能正在另一个 Team 的页面上：「出现在这个 Team」会被读成他眼前那个。"""
+        for operation in self.OPERATIONS:
+            with self.subTest(operation=operation):
+                detail = open_redemptions.open_redemption_detail(
+                    self.UNCERTAIN, operation=operation
+                )
+                self.assertIn("该邮箱出现在 Team Beta（含待接受邀请）后会自动确认", detail)
+                self.assertNotIn("这个 Team", detail)
+
+    def test_logged_out_team_points_to_reimport_or_confirm_success(self):
+        """原 Team 登录失效时自动确认等不来、确认失败被拒：说明要给出能走的路。"""
+        for label, state in (
+            ("session dead", {"team_status": "token_expired", "team_auth_state": "ok"}),
+            ("refresh rejected", {"team_status": "active", "team_auth_state": "rejected"}),
+        ):
+            with self.subTest(label):
+                detail = open_redemptions.open_redemption_detail(
+                    dict(self.UNCERTAIN, **state), operation="invite"
+                )
+                self.assertIn("Team Beta 登录已失效", detail)
+                self.assertIn("重新导入恢复登录", detail)
+                self.assertIn("直接确认成功", detail)
+                self.assertNotIn("{", detail)
+
+        for state in ({}, {"team_status": "active", "team_auth_state": None}):
+            detail = open_redemptions.open_redemption_detail(
+                dict(self.UNCERTAIN, **state), operation="invite"
+            )
+            self.assertNotIn("登录已失效", detail)
+            self.assertNotIn("{", detail)
 
     def test_pending_detail_quotes_the_reconciler_timings(self):
         # 说明里的分钟数和对账任务用的是同一组常量。

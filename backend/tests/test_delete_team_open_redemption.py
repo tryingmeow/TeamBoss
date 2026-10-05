@@ -205,5 +205,41 @@ class SettleThenDeleteTest(_DeleteTeamCase):
         self.assertFalse(self._team_exists(TEAM))
 
 
+class LoggedOutTeamTest(_DeleteTeamCase):
+    """Team T's login is dead (token_expired): 确认失败 cannot verify absence and
+    is refused, and the reconciler waits. The refusal says how to get out, and
+    确认成功 still works, so the admin is not stuck."""
+
+    def _log_out(self):
+        conn = self._conn()
+        conn.execute("UPDATE teams SET status = 'token_expired' WHERE id = ?", (TEAM,))
+        conn.commit()
+        conn.close()
+
+    def test_delete_refusal_on_a_logged_out_team_offers_reimport_or_confirmation(self):
+        token_use_id = self._uncertain_invite()
+        self._log_out()
+
+        detail = self._delete_refused()
+
+        self.assertIn(f"#{token_use_id}", detail)
+        self.assertIn("Team T 登录已失效", detail)
+        self.assertIn("重新导入恢复登录", detail)
+        self.assertIn("直接确认成功", detail)
+
+        # 确认失败 needs the live list of T and is refused while T is logged out.
+        with self.assertRaises(HTTPException) as caught:
+            self._admin_release(token_use_id)
+        self.assertEqual(caught.exception.status_code, 409)
+
+        self.assertEqual(self._admin_confirm(token_use_id)["outcome"], "success")
+        self.assertEqual(self._delete(), {"status": "ok"})
+
+    def test_active_team_refusal_has_no_login_clause(self):
+        self._uncertain_invite()
+
+        self.assertNotIn("登录已失效", self._delete_refused())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,11 @@ from fastapi import APIRouter, HTTPException, Query
 from ..chatgpt_limiter import refresh_team_auth, run_chatgpt_call
 from ..database import get_db, log_operation, get_sessions_dir
 from ..models import DefaultSeatTypeRequest, TeamProxyUpdate, TeamRemarkUpdate, TeamSession, TeamResponse
-from ..services.open_redemptions import delete_team_refusal_detail, find_open_redemptions_in_team
+from ..services.open_redemptions import (
+    delete_team_refusal_detail,
+    find_open_redemptions_in_team,
+    team_login_lost,
+)
 from ..services.pricing import discounted_monthly_total
 from ..services.subscription_status import subscription_status_display
 from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
@@ -318,7 +322,9 @@ async def delete_team(team_id: str):
     async with get_db() as db:
         # 先拿写锁再查未结兑换：查完到删除之间，不会有兑换落到这个 Team 上而没被看到。
         await db.execute("BEGIN IMMEDIATE")
-        cursor = await db.execute("SELECT id, name FROM teams WHERE id = ?", (team_id,))
+        cursor = await db.execute(
+            "SELECT id, name, status, auth_state FROM teams WHERE id = ?", (team_id,)
+        )
         row = await cursor.fetchone()
         if not row:
             await db.rollback()
@@ -331,7 +337,11 @@ async def delete_team(team_id: str):
             await db.rollback()
             raise HTTPException(
                 status_code=409,
-                detail=delete_team_refusal_detail(row["name"] or team_id, open_redemptions),
+                detail=delete_team_refusal_detail(
+                    row["name"] or team_id,
+                    open_redemptions,
+                    login_lost=team_login_lost(row["status"], row["auth_state"]),
+                ),
             )
 
         expiry_cursor = await db.execute(

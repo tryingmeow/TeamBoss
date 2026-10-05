@@ -38,7 +38,8 @@ STALE_LOCAL_REDEMPTION_AFTER_SECONDS = 30 * 60
 #   这些行和凭据在正常流程里 Team、邮箱一致；单独查一遍，是为了不依赖这份一致性。
 _OPEN_REDEMPTION_SQL = """
     SELECT atu.id AS token_use_id, atu.result AS result, atu.action AS action,
-           atu.team_id AS team_id, t.name AS team_name, atu.created_at AS created_at
+           atu.team_id AS team_id, t.name AS team_name, atu.created_at AS created_at,
+           t.status AS team_status, t.auth_state AS team_auth_state
       FROM access_token_uses atu
       LEFT JOIN teams t ON t.id = atu.team_id
      WHERE lower(atu.email) = ?
@@ -47,7 +48,8 @@ _OPEN_REDEMPTION_SQL = """
                 AND (atu.team_id = ? OR (? AND t.id IS NOT NULL))))
     UNION
     SELECT atu.id AS token_use_id, atu.result AS result, atu.action AS action,
-           atu.team_id AS team_id, t.name AS team_name, atu.created_at AS created_at
+           atu.team_id AS team_id, t.name AS team_name, atu.created_at AS created_at,
+           t.status AS team_status, t.auth_state AS team_auth_state
       FROM pending_invite_reconciliations r
       JOIN access_token_uses atu ON atu.id = r.token_use_id
       LEFT JOIN teams t ON t.id = atu.team_id
@@ -64,7 +66,8 @@ async def find_open_redemption(
     """对账日后还会给 ``team_id`` 上的这个邮箱记账的未结兑换，没有则 None。只读。
 
     返回 ``token_use_id``、``result``（'pending' / 'uncertain'）、``action``、
-    ``team_id`` / ``team_name``（兑换落到的 Team，lookup 阶段为 None）、``created_at``。
+    ``team_id`` / ``team_name``（兑换落到的 Team，lookup 阶段为 None）、``created_at``，
+    以及那个 Team 的 ``team_status`` / ``team_auth_state``（见 ``team_login_lost``）。
     邮箱按去空白、小写比较，与兑换码入口一致。
     """
     normalized_email = (email or "").strip().lower()
@@ -97,8 +100,16 @@ _REDEEM_AGAIN = (
 )
 _UNCERTAIN_DETAIL = (
     "该邮箱在 Team {team_label} 有一笔兑换的邀请结果待确认（兑换记录 #{token_use_id}），{refused}。"
-    "该邮箱出现在这个 Team（含待接受邀请）后会自动确认，也可在「兑换码 → 待确认的兑换」里核实收尾。"
+    "该邮箱出现在 Team {team_label}（含待接受邀请）后会自动确认，也可在「兑换码 → 待确认的兑换」里核实收尾。"
+    "{login_lost}"
     "确认成功则兑换码时长已记过一次；确认失败会退码，" + _REDEEM_AGAIN
+)
+# 原 Team 登录失效时，自动确认和「确认失败」都要现拉那个 Team 的名单，拉不到就一直
+# 等着（确认失败被拒，见 access_tokens.resolve_pending_confirmation）。「确认成功」
+# 不需要名单，所以出口是恢复登录或直接确认成功。
+_LOGIN_LOST = (
+    "Team {team_label} 登录已失效：请重新导入恢复登录（自动确认和确认失败都要等它恢复），"
+    "或确定人已在里面时直接确认成功。"
 )
 _PENDING_DETAIL = (
     "该邮箱有一笔兑换正在处理（兑换记录 #{token_use_id}），{refused}。"
@@ -139,18 +150,31 @@ def _minutes(seconds: int) -> int:
     return max(1, -(-int(seconds) // 60))
 
 
+def team_login_lost(team_status: Optional[str], team_auth_state: Optional[str]) -> bool:
+    """Team 的登录已失效：session 已死（status='token_expired'），或刷新被上游明确
+    拒绝（auth_state='rejected'）。两种情况下现拉名单都会失败，管理员能做的是重新导入。"""
+    return team_status == "token_expired" or team_auth_state == "rejected"
+
+
 def open_redemption_detail(open_redemption: dict[str, Any], *, operation: str) -> str:
     """管理员因 ``open_redemption`` 被拒时看到的说明（中文，直接展示在后台）。
 
     ``operation``：``invite`` / ``batch_invite`` / ``set_expiry`` / ``extend_expiry``。
     uncertain 点名兑换所在的 Team：邀请看所有 Team 的 uncertain，它可能不是管理员
-    正在操作的那个 Team。
+    正在操作的那个 Team。那个 Team 登录失效时补一句出口（见 ``_LOGIN_LOST``）。
     """
     template = _UNCERTAIN_DETAIL if open_redemption["result"] == "uncertain" else _PENDING_DETAIL
+    team_label = open_redemption.get("team_name") or open_redemption.get("team_id") or ""
+    login_lost = ""
+    if team_login_lost(
+        open_redemption.get("team_status"), open_redemption.get("team_auth_state")
+    ):
+        login_lost = _LOGIN_LOST.format(team_label=team_label)
     return template.format(
         token_use_id=open_redemption["token_use_id"],
-        team_label=open_redemption.get("team_name") or open_redemption.get("team_id") or "",
+        team_label=team_label,
         refused=_REFUSALS[operation],
+        login_lost=login_lost,
         invite_minutes=_minutes(INTERRUPTED_INVITE_AFTER_SECONDS),
         stale_minutes=_minutes(STALE_LOCAL_REDEMPTION_AFTER_SECONDS),
     )
@@ -211,9 +235,11 @@ async def find_open_redemptions_in_team(db, team_id: str) -> list[dict[str, Any]
     return [dict(row) for row in await cursor.fetchall()]
 
 
-def delete_team_refusal_detail(team_label: str, open_redemptions: list[dict[str, Any]]) -> str:
+def delete_team_refusal_detail(
+    team_label: str, open_redemptions: list[dict[str, Any]], *, login_lost: bool = False
+) -> str:
     """因 ``open_redemptions``（``find_open_redemptions_in_team`` 的结果）拒绝删除
-    Team 时，管理员看到的说明。"""
+    Team 时，管理员看到的说明。``login_lost``：这个 Team 登录已失效（``team_login_lost``）。"""
     ids = "、".join(
         f"#{item['token_use_id']}" for item in open_redemptions[:_DELETE_TEAM_LISTED_IDS]
     )
@@ -223,6 +249,8 @@ def delete_team_refusal_detail(team_label: str, open_redemptions: list[dict[str,
     parts = [_DELETE_TEAM_DETAIL.format(team_label=team_label, ids=ids)]
     if "uncertain" in results:
         parts.append(_DELETE_TEAM_UNCERTAIN)
+        if login_lost:
+            parts.append(_LOGIN_LOST.format(team_label=team_label))
     if "pending" in results:
         parts.append(
             _DELETE_TEAM_PENDING.format(invite_minutes=_minutes(INTERRUPTED_INVITE_AFTER_SECONDS))
