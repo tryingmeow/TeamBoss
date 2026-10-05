@@ -341,7 +341,7 @@ class PatrolGrandfatherOnceTest(_Base):
 
         return patrol.run_patrol(dry_run=False, allow_team_ids=[TEAM_ID])
 
-    def test_token_expired_recovery_keeps_detected_and_backfills_only_rowless(self):
+    def test_token_expired_recovery_keeps_detected_and_does_not_backfill(self):
         result = self._recover_from_token_expired()
 
         self.assertEqual(result["kicked"], 0)
@@ -349,15 +349,15 @@ class PatrolGrandfatherOnceTest(_Base):
         init_logs = self._logs("patrol_team_initialize")
         self.assertEqual(len(init_logs), 1)
         self.assertIn("grandfathered=0", init_logs[0]["detail"])
-        self.assertIn("backfilled=1", init_logs[0]["detail"])
+        self.assertIn("backfilled=0", init_logs[0]["detail"])
         self.assertIn("detected_kept=1", init_logs[0]["detail"])
+        # rowless 没有记录：自动重建不给它补 system 行，留给下一轮同步按 detected 建档。
         self.assertEqual(
             self._sources(TEAM_ID),
             {
                 "original@x.com": "system",
                 "untracked@x.com": "system",
                 "stranger@x.com": "detected",
-                "rowless@x.com": "system",
             },
         )
         self.assertEqual(self._dry_run_candidates(), ["stranger@x.com"])

@@ -200,16 +200,17 @@ def _protect_team_snapshot_sync(
 ) -> tuple[int, int, int]:
     """为一个 Team 建立巡逻基线（成员快照必须完整），返回 (grandfathered, backfilled, detected_kept)。
 
-    grandfather = 把该 Team 未踢的 detected 行转成 system（受保护）。是否做取决于谁在建基线：
+    保护当前成员 = grandfather（把该 Team 未踢的 detected 行转成 system）+ backfill
+    （快照里完全没有记录的成员/邀请补一条 system 行）。是否做取决于谁在建基线：
     - protect_detected=True：管理员显式开启自动踢人（activate_patrol_sync，网页和
       Telegram /patrol on 都走这里）。按开启时的承诺保护当前全部成员，每次开启都做。
     - protect_detected=False：巡逻自动建基线（run_patrol 给新 Team、token_expired
       恢复或重新导入后丢了基线的 Team 初始化）。只有该 Team 第一次建基线时才做——
       sync 不管巡逻开没开都会给未知成员建 detected 行，第一次纳入时他们就是现有成员。
-      之后的自动重建一律保持 detected：没人确认过这些人，不能静默把他们洗白成永久成员
-      （detected + NULL 到期 = 未授权；system + NULL 到期 = 永久）。人数作为
-      detected_kept 返回并记进日志。
-    无论哪种，完全没有记录的成员/邀请都补一条 system 行（backfill）。
+      之后的自动重建两样都不做：没人确认过这些人，不能静默把他们洗白成永久成员
+      （detected + NULL 到期 = 未授权；system + NULL 到期 = 永久）。已有的 detected 行
+      保持 detected，人数作为 detected_kept 返回并记进日志；没有记录的人（快照比同步
+      建档新，例如管理端手动刷新写的快照）保持无记录，下一轮同步按 detected 建档。
     teams.patrol_grandfathered_at 记录第一次 grandfather 的时间，非空 = 已经做过。标记跟着
     teams 行走：token_expired 和重新导入只 UPDATE 这一行，标记保留；删除 Team 会删掉整行，
     重新添加的 Team 视为第一次。
@@ -237,8 +238,12 @@ def _protect_team_snapshot_sync(
     if not isinstance(pending, list):
         raise PatrolActivationError(f"{team_id} 邀请快照损坏")
 
+    # 自动重建基线（已 grandfather 过的 Team）既不转 detected 也不补 system 行。补行同样是
+    # 永久保护：同步看到已有记录就不会再把这个人建成 detected，巡逻永远碰不到他。
+    protect_current = protect_detected or first_baseline
+
     grandfathered = 0
-    if protect_detected or first_baseline:
+    if protect_current:
         cursor = conn.execute(
             "UPDATE member_expiry SET source = 'system' "
             "WHERE team_id = ? AND source = 'detected' AND kicked = 0",
@@ -251,37 +256,38 @@ def _protect_team_snapshot_sync(
             (now, team_id),
         )
 
-    tracked_rows = conn.execute(
-        "SELECT user_id, email FROM member_expiry WHERE team_id = ? AND kicked = 0",
-        (team_id,),
-    ).fetchall()
-    tracked_ids = {row["user_id"] for row in tracked_rows if row["user_id"]}
-    tracked_emails = {
-        row["email"].lower() for row in tracked_rows if row["email"]
-    }
-
     backfilled = 0
-    for item in members + pending:
-        if not isinstance(item, dict) or item.get("is_owner"):
-            continue
-        user_id = item.get("id") or item.get("user_id") or ""
-        email = (item.get("email") or "").strip().lower()
-        if user_id in tracked_ids or (email and email in tracked_emails):
-            continue
-        if not user_id and not email:
-            continue
-        conn.execute(
-            """INSERT INTO member_expiry
-               (team_id, user_id, email, expires_at, auto_kick, kicked,
-                first_seen_at, source, created_at)
-               VALUES (?, ?, ?, NULL, 0, 0, ?, 'system', ?)""",
-            (team_id, user_id, email, now, now),
-        )
-        backfilled += 1
-        if user_id:
-            tracked_ids.add(user_id)
-        if email:
-            tracked_emails.add(email)
+    if protect_current:
+        tracked_rows = conn.execute(
+            "SELECT user_id, email FROM member_expiry WHERE team_id = ? AND kicked = 0",
+            (team_id,),
+        ).fetchall()
+        tracked_ids = {row["user_id"] for row in tracked_rows if row["user_id"]}
+        tracked_emails = {
+            row["email"].lower() for row in tracked_rows if row["email"]
+        }
+
+        for item in members + pending:
+            if not isinstance(item, dict) or item.get("is_owner"):
+                continue
+            user_id = item.get("id") or item.get("user_id") or ""
+            email = (item.get("email") or "").strip().lower()
+            if user_id in tracked_ids or (email and email in tracked_emails):
+                continue
+            if not user_id and not email:
+                continue
+            conn.execute(
+                """INSERT INTO member_expiry
+                   (team_id, user_id, email, expires_at, auto_kick, kicked,
+                    first_seen_at, source, created_at)
+                   VALUES (?, ?, ?, NULL, 0, 0, ?, 'system', ?)""",
+                (team_id, user_id, email, now, now),
+            )
+            backfilled += 1
+            if user_id:
+                tracked_ids.add(user_id)
+            if email:
+                tracked_emails.add(email)
 
     source_rows = conn.execute(
         "SELECT user_id, email, source, first_seen_at, expires_at "
@@ -1261,7 +1267,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
             # 巡逻已开启后新增/首次启用的 Team 必须单独建立基线。建立基线的这一轮
             # 永远不处理候选；快照不完整则继续跳过，宁可漏踢也不误踢。这是自动路径
             # （包括 token_expired 恢复、重新导入后的重建），不是管理员确认：只有从未
-            # 建过基线的 Team 才保护现有 detected 成员，见 _protect_team_snapshot_sync。
+            # 建过基线的 Team 才保护现有成员，见 _protect_team_snapshot_sync。
             if kick_enabled and baseline_ready and team_id not in initialized_team_ids:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
