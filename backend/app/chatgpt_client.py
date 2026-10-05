@@ -229,6 +229,69 @@ def summarize_session_refresh(
     return diag, sc_session
 
 
+_MISSING = object()
+_INVITE_ERROR_MAX_LEN = 300
+
+
+def _invite_entry_email(entry) -> str | None:
+    """邀请响应列表里一项的邮箱：字符串本身，或对象的 email_address / email。"""
+    if isinstance(entry, str):
+        value = entry
+    elif isinstance(entry, dict):
+        value = entry.get("email_address", entry.get("email"))
+    else:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().lower()
+
+
+def classify_invite_errored_emails(body: dict, email: str) -> tuple[str, str | None]:
+    """按 2xx 邀请响应体里的 ``errored_emails`` 给这次邀请定性。
+
+    返回 ``(mutation_status, error)``；``error`` 为 None 表示不需要补 error 字段。
+
+    上游对逐个邮箱的失败不走 4xx：整个请求照样 2xx，失败的邮箱列在
+    ``errored_emails`` 里（ChatGPT 管理页读的形状是 ``account_invites``、
+    ``errored_emails: [{email_address, error}]``、``already_member_emails``）。
+    只看状态码会把"什么都没发出去"当成 confirmed：兑换码被消耗、人却没进 Team。
+
+    * 字段缺失或为空列表 → ``confirmed``，与原先一致。
+    * 本次邮箱（大小写不敏感）被明确列出，所有条目都能读出邮箱且都是它，并且
+      ``account_invites`` / ``already_member_emails`` 都是缺失或空列表 →
+      ``rejected``：上游明确说这个邮箱没有邀请成功，可以退码、换下一个 Team。
+    * 其余任何对不上的情况（不是列表、条目读不出邮箱、出现别的邮箱、本次邮箱
+      同时出现在成功列表里……）→ ``uncertain``：不能证明没有副作用，也不能当成
+      成功，交给调用方的不确定处理（锁码、立屏障、等对账）。
+    """
+    errored = body.get("errored_emails", _MISSING)
+    if errored is _MISSING or (isinstance(errored, list) and not errored):
+        return "confirmed", None
+    if not isinstance(errored, list):
+        return "uncertain", "邀请结果不明确：响应中的 errored_emails 不是列表"
+
+    target = (email or "").strip().lower()
+    reasons: list[str] = []
+    for entry in errored:
+        entry_email = _invite_entry_email(entry)
+        if entry_email is None:
+            return "uncertain", "邀请结果不明确：errored_emails 中有无法识别邮箱的条目"
+        if entry_email != target:
+            return "uncertain", "邀请结果不明确：errored_emails 中出现了非本次邀请的邮箱"
+        if isinstance(entry, dict) and entry.get("error") not in (None, ""):
+            reasons.append(str(entry.get("error")))
+
+    for key in ("account_invites", "already_member_emails"):
+        value = body.get(key, _MISSING)
+        if value is _MISSING or (isinstance(value, list) and not value):
+            continue
+        return "uncertain", f"邀请结果不明确：本次邮箱列在 errored_emails 中，但响应的 {key} 非空"
+
+    reason = "; ".join(reasons) or "未给出原因"
+    error = mask_secrets(f"OpenAI 拒绝邀请 {target}: {reason}")
+    return "rejected", error[:_INVITE_ERROR_MAX_LEN]
+
+
 def _json_body_or_none(resp):
     if resp is None:
         return None
@@ -395,15 +458,19 @@ class ChatGPTClient:
                 timeout=60
             )
             resp.raise_for_status()
-            # 任何 2xx 都代表服务端已经接受了变更。即使响应体为空或 JSON
-            # 损坏，也不能把它误判成失败后换另一个 Team 重试。
+            # 2xx 默认代表服务端已经接受了变更。即使响应体为空或 JSON 损坏，
+            # 也不能把它误判成失败后换另一个 Team 重试。唯一的例外是响应体里
+            # 的 errored_emails，见 classify_invite_errored_emails。
             try:
                 result = resp.json()
             except ValueError:
                 result = {}
             if not isinstance(result, dict):
                 result = {"response": result}
-            result["_mutation_status"] = "confirmed"
+            mutation_status, error = classify_invite_errored_emails(result, email)
+            if error is not None:
+                result["error"] = error
+            result["_mutation_status"] = mutation_status
             return result
         except Exception as e:
             result = self._error(e)
