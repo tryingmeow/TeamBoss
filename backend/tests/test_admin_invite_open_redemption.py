@@ -23,7 +23,7 @@ from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import database as app_database
-from app.models import InviteMemberRequest
+from app.models import ExtendExpiryRequest, InviteMemberRequest, SetExpiryRequest
 from app.routes import access_tokens, members
 from app.utils.durations import expiry_from_duration
 
@@ -49,7 +49,7 @@ async def _direct_call(func, *args, **kwargs):
     return func(*args, **kwargs)
 
 
-class AdminInviteOpenRedemptionTest(unittest.TestCase):
+class _OpenRedemptionCase(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -178,7 +178,8 @@ class AdminInviteOpenRedemptionTest(unittest.TestCase):
         fetch.assert_not_awaited()
         self.assertEqual(self._expiry_rows(), [])
 
-    # ── 用例 ──────────────────────────────────────────────────────────────
+
+class AdminInviteOpenRedemptionTest(_OpenRedemptionCase):
 
     def test_paid_days_are_credited_once_when_admin_reinvites_an_uncertain_redemption(self):
         token_use_id = self._open_uncertain()
@@ -334,6 +335,95 @@ class AdminInviteOpenRedemptionTest(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(client.invites, [(EMAIL, "default")])
 
+
+class AdminExpiryEditOpenRedemptionTest(_OpenRedemptionCase):
+    """「设置到期」「续期」写的是同一条到期记录，同样不能叠在未结兑换上。"""
+
+    USER_ID = "user-1"
+    MEMBER_SNAPSHOT = {
+        "members": [{"id": "user-1", "email": EMAIL}],
+        "pending_invites": [],
+    }
+
+    def _edit_expiry(self, operation):
+        patches = [
+            patch.object(members, "get_cached_members", new=AsyncMock(return_value=self.MEMBER_SNAPSHOT)),
+            patch.object(members, "get_team_client", new=AsyncMock(return_value=object())),
+            patch.object(members, "fetch_and_cache_members", new=AsyncMock(return_value=self.MEMBER_SNAPSHOT)),
+            patch.object(members, "update_cached_member_expiry", new=AsyncMock()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            if operation == "set_expiry":
+                call = members.set_expiry(TEAM, self.USER_ID, SetExpiryRequest(expires_in="30d", email=EMAIL))
+            else:
+                call = members.extend_expiry(
+                    TEAM,
+                    self.USER_ID,
+                    ExtendExpiryRequest(expires_in="30d", email=EMAIL, request_id=f"req-{uuid.uuid4().hex}"),
+                )
+            try:
+                return asyncio.run(call), None
+            except HTTPException as exc:
+                return None, exc
+        finally:
+            for p in patches:
+                p.stop()
+
+    def _assert_credited_once(self, operation):
+        token_use_id = self._open_uncertain()
+
+        # 那次邀请其实到了、人已经进 Team；管理员按 30 天设置 / 续期，之后对账确认兑换。
+        self._edit_expiry(operation)
+        self._reconcile(self.MEMBER_SNAPSHOT)
+
+        self.assertEqual(self._token_use(token_use_id)["result"], "success")
+        rows = [row for row in self._expiry_rows() if not row["kicked"]]
+        self.assertEqual(len(rows), 1)
+        expires_at = datetime.fromisoformat(rows[0]["expires_at"])
+        days = (expires_at - datetime.now(UTC)).total_seconds() / 86400
+        self.assertLess(days, 31, f"{operation}: 30 天码最终记成了 {days:.1f} 天")
+        self.assertGreater(days, 29)
+
+    def _assert_refused(self, operation):
+        token_use_id = self._open_uncertain()
+
+        result, exc = self._edit_expiry(operation)
+
+        self.assertIsNone(result)
+        self.assertIsNotNone(exc, "有未结兑换时管理员改到期必须被拒")
+        self.assertEqual(exc.status_code, 409)
+        self.assertIn(f"#{token_use_id}", exc.detail)
+        self.assertIn("待确认的兑换", exc.detail)
+        self.assertEqual(self._expiry_rows(), [])
+
+    def _assert_other_team_does_not_block(self, operation):
+        self._open_uncertain(team_id=OTHER_TEAM)
+
+        result, exc = self._edit_expiry(operation)
+
+        self.assertIsNone(exc)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(self._expiry_rows()), 1)
+
+    def test_set_expiry_does_not_stack_on_an_uncertain_redemption(self):
+        self._assert_credited_once("set_expiry")
+
+    def test_extend_expiry_does_not_stack_on_an_uncertain_redemption(self):
+        self._assert_credited_once("extend_expiry")
+
+    def test_set_expiry_is_refused_while_a_redemption_is_uncertain_in_this_team(self):
+        self._assert_refused("set_expiry")
+
+    def test_extend_expiry_is_refused_while_a_redemption_is_uncertain_in_this_team(self):
+        self._assert_refused("extend_expiry")
+
+    def test_set_expiry_ignores_an_uncertain_redemption_in_another_team(self):
+        self._assert_other_team_does_not_block("set_expiry")
+
+    def test_extend_expiry_ignores_an_uncertain_redemption_in_another_team(self):
+        self._assert_other_team_does_not_block("extend_expiry")
 
 if __name__ == "__main__":
     unittest.main()

@@ -158,15 +158,21 @@ _INVITE_EXISTING_MEMBER_DETAIL = (
 )
 _INVITE_LOOKUP_FAILED_DETAIL = "无法确认该邮箱是否已在此 Team（成员列表拉取失败），未发送邀请，请稍后重试"
 _INVITE_MEMBER_BUSY_DETAIL = "该邮箱的成员状态正在变更（续期、到期处理或巡逻进行中），未发送邀请，请稍后重试"
-_INVITE_OPEN_REDEMPTION_UNCERTAIN_DETAIL = (
-    "该邮箱在此 Team 有一笔兑换的邀请结果仍在确认中（兑换记录 #{token_use_id}），未发送邀请。"
+_OPEN_REDEMPTION_UNCERTAIN_DETAIL = (
+    "该邮箱在此 Team 有一笔兑换的邀请结果仍在确认中（兑换记录 #{token_use_id}），{refused}。"
     "请先在「兑换码 → 待确认的兑换」里核实收尾：确认成功会按兑换码补齐时长，确认失败会退码。"
-    "收尾后再决定是否需要另行邀请。"
+    "收尾后再{next_step}。"
 )
-_INVITE_OPEN_REDEMPTION_PENDING_DETAIL = (
-    "该邮箱有一笔兑换正在处理（兑换记录 #{token_use_id}），未发送邀请。"
-    "请等它结束后刷新成员列表，再决定是否需要邀请；结果不明的兑换会转入「兑换码 → 待确认的兑换」。"
+_OPEN_REDEMPTION_PENDING_DETAIL = (
+    "该邮箱有一笔兑换正在处理（兑换记录 #{token_use_id}），{refused}。"
+    "请等它结束后刷新成员列表，再{next_step}；结果不明的兑换会转入「兑换码 → 待确认的兑换」。"
 )
+# (日志 action, 拒绝说明, 收尾后的下一步)，按管理员操作区分。
+_OPEN_REDEMPTION_REFUSALS = {
+    "invite": ("invite_member", "未发送邀请", "决定是否需要另行邀请"),
+    "set_expiry": ("set_expiry", "未修改到期时间", "调整到期时间"),
+    "extend_expiry": ("extend_expiry", "未续期", "决定是否需要续期"),
+}
 
 # 对账任务日后还会给这个 (Team, 邮箱) 记账的未结兑换，见 _refuse_if_open_redemption。
 # 两条腿：
@@ -206,15 +212,17 @@ async def _open_redemption(team_id: str, email: str) -> dict | None:
     return dict(row) if row else None
 
 
-async def _refuse_if_open_redemption(team_id: str, email: str) -> None:
+async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str = "invite") -> None:
     """邮箱有未结兑换时 409，什么都不写、不碰上游。
 
     兑换邀请结果不明时码锁着、人可能已在 Team 里。管理员这时邀请或重发，会把这次
     填的有效期写进到期记录；之后对账确认那笔兑换，又在上面累加一次兑换码的时长：
     30 天码 + 管理员按 30 天补发 = 60 天。管理员唯一安全的出口是先给那笔兑换一个
     终态（「待确认的兑换」确认成功 / 确认失败退码），所以这里拒绝，不替他合并。
+    「设置到期」「续期」写的也是同一条到期记录，对账同样会在上面再加一次，所以
+    ``operation`` 为 ``set_expiry`` / ``extend_expiry`` 时走同一个检查。
 
-    必须在 team_invite_lock 和该邮箱的成员操作占用之内、发任何上游请求之前调用：
+    邀请必须在 team_invite_lock 和该邮箱的成员操作占用之内、发任何上游请求之前调用：
     * 兑换的邀请分支只在同一把 team_invite_lock 里把兑换落到这个 Team、发邀请、
       记账或锁成 uncertain；续期分支要拿同一个成员操作占用。所以检查之后直到本次
       写完到期，没有兑换能在这个 Team 上为这个邮箱新开一笔或记账。
@@ -223,20 +231,24 @@ async def _refuse_if_open_redemption(team_id: str, email: str) -> None:
     * 检查之后才发起的兑换，最早也要等本次写完到期才能在这个 Team 上记账，按累加
       语义加在管理员这次的记录之上，与"管理员先邀请、客户后兑换"的串行顺序结果
       相同：两笔都是真实授予，不是同一笔被记两次。
+
+    续期在成员操作占用之内调用（兑换的续期分支拿同一个占用）；设置到期本来就不持锁，
+    检查只挡住调用时已经存在的未结兑换。
     """
     open_redemption = await _open_redemption(team_id, email)
     if open_redemption is None:
         return
     token_use_id = open_redemption["token_use_id"]
+    log_action, refused, next_step = _OPEN_REDEMPTION_REFUSALS[operation]
     template = (
-        _INVITE_OPEN_REDEMPTION_UNCERTAIN_DETAIL
+        _OPEN_REDEMPTION_UNCERTAIN_DETAIL
         if open_redemption["result"] == "uncertain"
-        else _INVITE_OPEN_REDEMPTION_PENDING_DETAIL
+        else _OPEN_REDEMPTION_PENDING_DETAIL
     )
-    detail = template.format(token_use_id=token_use_id)
+    detail = template.format(token_use_id=token_use_id, refused=refused, next_step=next_step)
     await log_operation(
         team_id,
-        "invite_member",
+        log_action,
         email,
         f"open_redemption token_use_id={token_use_id} result={open_redemption['result']}",
         "skipped",
@@ -582,6 +594,8 @@ async def revoke_invite(team_id: str, email: str):
 async def set_expiry(team_id: str, user_id: str, req: SetExpiryRequest):
     expires_at, detail = _expiry_from_request(req)
     canonical_user_id, email = await _resolve_member_identity(team_id, user_id, req.email)
+    # 有对账日后还会记账的兑换就 409：否则对账会在这次设的到期上再加一次兑换码时长。
+    await _refuse_if_open_redemption(team_id, email, operation="set_expiry")
     expires_iso = await upsert_member_expiry(team_id, canonical_user_id, email, expires_at)
     await log_operation(team_id, "set_expiry", email, f"user_id={canonical_user_id}, {detail}", "success")
     await update_cached_member_expiry(
@@ -620,6 +634,8 @@ async def extend_expiry(team_id: str, user_id: str, req: ExtendExpiryRequest):
         canonical_user_id, canonical_email = await _resolve_member_identity(
             team_id, user_id, req.email, refresh=True
         )
+        # 有对账日后还会记账的兑换就 409：否则对账会在这次续的时长上再加一次兑换码时长。
+        await _refuse_if_open_redemption(team_id, canonical_email, operation="extend_expiry")
         detail = f"user_id={canonical_user_id}, expires_in={duration}, request_id={req.request_id}"
         try:
             expires_iso = await extend_member_expiry(
