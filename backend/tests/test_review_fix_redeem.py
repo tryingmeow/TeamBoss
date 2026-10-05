@@ -85,15 +85,16 @@ class _RedeemFlowTest(unittest.IsolatedAsyncioTestCase):
             return [dict(row) for row in await cursor.fetchall()]
 
     async def _team(self, team_id, *, status="active", auth_state=None,
-                    active_until=None, will_renew=1):
+                    active_until=None, will_renew=1, seats=5):
+        # load_active_teams 按空位多少排序：seats 越大越先被选去发邀请。
         await self._exec(
             """INSERT INTO teams
                (id, name, status, auth_state, access_token, device_id,
                 seats_entitled, chatgpt_count, active_until, will_renew,
                 created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 5, 0, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)""",
             (team_id, f"Team {team_id}", status, auth_state, f"tok-{team_id}",
-             f"dev-{team_id}", active_until, will_renew, CREATED, CREATED),
+             f"dev-{team_id}", seats, active_until, will_renew, CREATED, CREATED),
         )
 
     async def _expiry(self, team_id, *, source="self_service", expires_at=FUTURE,
@@ -213,6 +214,80 @@ class UnavailableTeamMembershipBlocksRedemptionTest(_RedeemFlowTest):
 
         result = await self._redeem("atm_inactive_gone")
         self.assertEqual((result["status"], result["team_id"]), ("ok", "team-a"))
+
+
+# ── 缺口 10：新邀请不能发到订阅已到期 / 登录被拒的 Team ─────────────────────
+
+LAPSED = "2026-01-01T00:00:00+00:00"
+
+
+class RedemptionInviteSkipsUnusableTeamsTest(_RedeemFlowTest):
+    async def test_new_seat_is_not_sold_in_a_team_whose_subscription_lapsed(self):
+        await self._team("team-lapsed", active_until=LAPSED, will_renew=0, seats=50)
+        await self._team("team-b")
+        await self._token("atm_lapsed_skip")
+
+        result = await self._redeem("atm_lapsed_skip")
+
+        self.assertEqual((result["status"], result["team_id"]), ("ok", "team-b"))
+        self.assertEqual(self.invites, ["team-b"])
+
+    async def test_only_lapsed_teams_left_means_no_seat_and_the_code_is_kept(self):
+        await self._team("team-lapsed", active_until=LAPSED, will_renew=0)
+        token_id = await self._token("atm_lapsed_only")
+
+        with self.assertRaises(HTTPException) as cm:
+            await self._redeem("atm_lapsed_only")
+
+        self.assertEqual(cm.exception.status_code, 409)
+        self.assertEqual(self.invites, [])
+        self.assertEqual(await self._used_count(token_id), 0)
+
+    async def test_members_of_a_lapsed_team_are_still_found_and_renewed_there(self):
+        # 只过滤"去哪发新邀请"；找人和续期照旧覆盖这个 Team，不会给他另开席位。
+        await self._team("team-lapsed", active_until=LAPSED, will_renew=0)
+        await self._team("team-b")
+        await self._expiry("team-lapsed", expires_at="2026-12-01T00:00:00+00:00")
+        self.live["team-lapsed"] = {
+            "members": [{"email": EMAIL, "id": "u-1", "is_owner": False,
+                         "expires_at": "2026-12-01T00:00:00+00:00", "source": "self_service"}],
+            "pending_invites": [],
+        }
+        await self._token("atm_lapsed_renew")
+
+        result = await self._redeem("atm_lapsed_renew")
+
+        self.assertEqual(
+            (result["status"], result["action"], result["team_id"]),
+            ("ok", "renewed_member", "team-lapsed"),
+        )
+        self.assertEqual(self.invites, [])
+
+    async def test_a_team_with_rejected_login_does_not_fail_every_redemption(self):
+        await self._team("team-rejected", auth_state="rejected", seats=50)
+        await self._team("team-b")
+        self.broken.add("team-rejected")
+        await self._token("atm_rejected_skip")
+
+        result = await self._redeem("atm_rejected_skip")
+
+        self.assertEqual((result["status"], result["team_id"]), ("ok", "team-b"))
+        self.assertEqual(self.invites, ["team-b"])
+
+    async def test_members_of_a_team_with_rejected_login_are_sent_to_the_admin(self):
+        await self._team("team-rejected", auth_state="rejected")
+        await self._team("team-b")
+        self.broken.add("team-rejected")
+        await self._expiry("team-rejected")
+        token_id = await self._token("atm_rejected_member")
+
+        with self.assertRaises(HTTPException) as cm:
+            await self._redeem("atm_rejected_member")
+
+        self.assertEqual(cm.exception.status_code, 409)
+        self.assertIn("联系管理员", cm.exception.detail)
+        self.assertEqual(self.invites, [])
+        self.assertEqual(await self._used_count(token_id), 0)
 
 
 if __name__ == "__main__":

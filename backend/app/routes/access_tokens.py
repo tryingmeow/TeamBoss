@@ -31,7 +31,11 @@ from ..services.seat_capacity import (
     fetch_live_chatgpt_seat_capacity,
     update_capacity_cache,
 )
-from ..services.team_clients import load_active_teams
+from ..services.team_clients import (
+    load_active_teams,
+    subscription_lapsed,
+    team_login_rejected,
+)
 from ..services.team_locks import (
     member_operation_claim,
     reserve_default_seat,
@@ -720,17 +724,22 @@ async def _find_all_memberships(
     return hits
 
 
-# 本次兑换无法实时核对成员名单的 Team：teams 表里还在、但不是 active。
-# load_active_teams 只取 status='active'，这些 Team 从不进入兑换的实时扫描。
-_UNAVAILABLE_TEAM_SQL = "COALESCE(t.status, '') != 'active'"
+# 本次兑换无法实时核对成员名单的 Team：teams 表里还在，但不是 active（load_active_teams
+# 不返回它），或者登录已被上游拒绝（每个实时请求都 401，_redeem_valid_token 把它从
+# 实时扫描里拿掉，见 team_login_rejected）。必须和 _redeem_valid_token 里实时扫描的
+# 那组 Team 恰好互补。
+_UNAVAILABLE_TEAM_SQL = (
+    "(COALESCE(t.status, '') != 'active' OR COALESCE(t.auth_state, '') = 'rejected')"
+)
 
 
 async def _memberships_in_unavailable_teams(email: str) -> list[str]:
     """本地记录显示这个邮箱身在其中、但本次兑换无法实时核对的 Team id 列表。
 
-    兑换只实时扫描 active Team。邮箱若身在一个非 active Team（例如 token_expired）
-    里，实时扫描看不到他：没指定 Team 时会给他在别的队另开一个席位，旧队的到期
-    照样在走；他若同时在一个 active Team，那个队会在没问过他的情况下被续期。
+    兑换只实时扫描 active 且登录正常的 Team。邮箱若身在一个非 active（例如
+    token_expired）或登录被拒的 Team 里，实时扫描看不到他：没指定 Team 时会给他
+    在别的队另开一个席位，旧队的到期照样在走；他若同时在一个可实时扫描的 Team，
+    那个队会在没问过他的情况下被续期。
     这两种都是替用户选了 Team，所以只要本地有任何迹象就拒绝、退码、请管理员处理。
 
     算作"在里面"的本地迹象（都只算 teams 表里仍存在的 Team）：
@@ -1813,7 +1822,10 @@ async def _redeem_valid_token(
     failure_recorded = False
 
     try:
-        teams = await load_active_teams()
+        # 登录已被上游拒绝的 Team 实时拉名单必然失败，留在扫描里只会让每一次兑换都
+        # 503（_find_all_memberships 是 fail-closed 的）。把它和非 active Team 同等
+        # 对待：不实时扫描、不发邀请，人若在里面由下面的本地记录检查拦下。
+        teams = [team for team in await load_active_teams() if not team_login_rejected(team)]
 
         # 先排除"人在一个本次无法实时核对的 Team 里"：下面的实时扫描只覆盖 teams，
         # 看不到他就会替他另开席位或续另一个队（见 _memberships_in_unavailable_teams）。
@@ -2018,10 +2030,12 @@ async def _redeem_valid_token(
 
         # 消耗标记不能等这个函数返回再打：邀请在函数内部就已经不可回滚了，
         # 所以通过 on_invite_confirmed 在那一刻同步标记（见该函数注释）。
+        # 新席位不发到订阅已到期的 Team（规则同管理员邀请）。只过滤这里：上面找人和
+        # 续期仍覆盖这些 Team，否则那里的成员会被当成"不在任何 Team"另开一个席位。
         joined = await _invite_to_available_team(
             email,
             grant_duration,
-            teams,
+            [team for team in teams if not subscription_lapsed(team)],
             token_use_id=token_use_id,
             on_invite_confirmed=consumption.confirm,
             on_invite_rejected=consumption.revert_for_rejected,

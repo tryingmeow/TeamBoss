@@ -2,6 +2,7 @@ from fastapi import HTTPException
 
 from ..chatgpt_client import ChatGPTClient
 from ..database import get_db
+from .subscription_status import subscription_status
 
 
 # auth_state='rejected' 时，同步/续期等必须实时访问上游的操作只会一直 401。
@@ -63,7 +64,8 @@ async def load_active_teams() -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT id, name, access_token, device_id, proxy_id,
-                      seats_in_use, seats_entitled, codex_count, chatgpt_count, created_at
+                      seats_in_use, seats_entitled, codex_count, chatgpt_count, created_at,
+                      active_until, will_renew, auth_state
                FROM teams
                WHERE status = 'active'
                ORDER BY (
@@ -76,3 +78,22 @@ async def load_active_teams() -> list[dict]:
         )
         rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+def team_login_rejected(team: dict) -> bool:
+    """这个 Team 的登录已被上游明确拒绝（``auth_state='rejected'``）。
+
+    这是"现在调用一定 401"的权威信号：只在刷新接口明确交不出新 token 时写入，换到新
+    token 或重新导入时清掉（见 chatgpt_limiter._mark_team_auth_rejected / team_service）。
+    status 刻意保持 'active'，所以 load_active_teams 仍会返回它。
+    """
+    return team.get("auth_state") == "rejected"
+
+
+def subscription_lapsed(team: dict) -> bool:
+    """订阅已到期，判定与管理员邀请一致（services/gpt_invites.py）。
+
+    用原始判定，不做展示层的 stale 区分：active_until 已过就算到期，哪怕快照是
+    陈旧的——发新邀请这种行为路径宁可错过一个 Team（fail-closed）。
+    """
+    return subscription_status(team.get("active_until"), bool(team.get("will_renew"))) == "expired"
