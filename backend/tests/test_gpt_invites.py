@@ -113,9 +113,14 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "_load_active_team_rows", new=AsyncMock(return_value=teams)),
             patch.object(gpt_invites, "_load_member_caches", new=AsyncMock(return_value=caches)),
             patch.object(gpt_invites, "reserved_default_seats", new=AsyncMock(return_value=0)),
+            patch.object(gpt_invites, "_team_with_unresolved_invite", new=AsyncMock(return_value=None)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=AsyncMock(return_value={"error": "invalid account"})),
+            patch.object(
+                gpt_invites,
+                "run_chatgpt_call",
+                new=AsyncMock(return_value={"error": "invalid account", "_mutation_status": "rejected"}),
+            ),
             patch.object(
                 gpt_invites,
                 "fetch_and_cache_members",
@@ -142,6 +147,7 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "_load_active_team_rows", new=AsyncMock(return_value=teams)),
             patch.object(gpt_invites, "_load_member_caches", new=AsyncMock(return_value=caches)),
             patch.object(gpt_invites, "reserved_default_seats", new=AsyncMock(return_value=0)),
+            patch.object(gpt_invites, "_team_with_unresolved_invite", new=AsyncMock(return_value=None)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
             patch.object(
@@ -177,6 +183,7 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "_load_active_team_rows", new=AsyncMock(return_value=teams)),
             patch.object(gpt_invites, "_load_member_caches", new=AsyncMock(return_value=caches)),
             patch.object(gpt_invites, "reserved_default_seats", new=AsyncMock(return_value=0)),
+            patch.object(gpt_invites, "_team_with_unresolved_invite", new=AsyncMock(return_value=None)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(False, "no_gpt_seat: full"))),
             patch.object(

@@ -240,16 +240,29 @@ async def _invite_to_team(
                 return None, reason
 
         result = await run_chatgpt_call(client.invite_member, email, "default")
+        # 成败只看 ChatGPTClient 给的定性 _mutation_status，不看有没有 error 键：
+        # confirmed 的 2xx 响应体里可能带着 "error": null 之类的字段，按键判失败会让
+        # 调用方去下一个 Team 再拉一次，同一个人占两个席位。只有 rejected 是"上游明确
+        # 没建邀请"、可以换 Team；没有定性的结果（不是 ChatGPTClient 的返回形状）
+        # 和 uncertain 一样不能排除邀请已到 OpenAI，走同一条不明确分支。
         mutation_status = result.get("_mutation_status") if isinstance(result, dict) else None
-        if mutation_status == "uncertain":
+        upstream_error = result.get("error") if isinstance(result, dict) else None
+        if mutation_status == "rejected":
+            error = str(upstream_error or "OpenAI rejected the invite")
+            await log_operation(team_id, action, email, "seat_type=default", "failed", error)
+            return None, error
+        if mutation_status != "confirmed":
             try:
                 live_snapshot = await fetch_and_cache_members(team_id, client)
             except Exception:
                 live_snapshot = None
-            if _snapshot_contains_email(live_snapshot, email):
-                result = {"_mutation_status": "confirmed"}
-            else:
-                error = str(result.get("error") or "OpenAI invite result is uncertain")
+            if not _snapshot_contains_email(live_snapshot, email):
+                if upstream_error:
+                    error = str(upstream_error)
+                elif mutation_status == "uncertain":
+                    error = "OpenAI invite result is uncertain"
+                else:
+                    error = f"OpenAI invite result was not classified (_mutation_status={mutation_status!r})"
                 await record_uncertain_invite(
                     team_id,
                     "",
@@ -260,10 +273,6 @@ async def _invite_to_team(
                 )
                 await log_operation(team_id, action, email, "seat_type=default", "uncertain", error)
                 return None, f"{INVITE_RESULT_UNCERTAIN}{error}"
-        if "error" in result:
-            error = result["error"]
-            await log_operation(team_id, action, email, "seat_type=default", "failed", error)
-            return None, error
 
         # OpenAI 邀请已在上面成功，本地记录必须最终落地（否则下一轮同步会把
         # 系统自己拉的人误判成外部乱拉的人）——用 record_confirmed_invite 而不是
@@ -348,6 +357,35 @@ def _cached_team_holding(
     return None
 
 
+async def _team_with_unresolved_invite(email: str) -> dict[str, Any] | None:
+    """这个邮箱有未结清的邀请对账行（``pending_invite_reconciliations.resolved = 0``）
+    的 Team，没有返回 None。
+
+    结果不明确的邀请（本模块、后台单个拉人、自助兑换的屏障行）和"远端已确认、本地
+    落库失败"的兜底都写这张表：邀请可能已经到了那个 Team，换 Team 再拉就是一人两席。
+    行只在两处被结清：调度器同步在那个 Team 的完整现拉名单里看到这个邮箱（成员或
+    待接受邀请）；兑换屏障随那次兑换终态一起撤掉。邀请其实没送达的行不会自己结清，
+    出口是在原 Team 里单独拉一次（那条路径不受这里限制），下一轮同步看到人后结清。
+
+    已从系统删除的 Team 不算：删 Team 不撤这些行、之后也不再同步它，算上就会让这个
+    邮箱永远拉不进别的 Team。
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT r.team_id, t.name
+               FROM pending_invite_reconciliations r
+               JOIN teams t ON t.id = r.team_id
+               WHERE r.resolved = 0 AND lower(trim(r.email)) = ?
+               ORDER BY r.id DESC
+               LIMIT 1""",
+            ((email or "").strip().lower(),),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {"id": row["team_id"], "name": row["name"]}
+
+
 async def invite_gpt_member_any_team(
     email: str,
     expires_at: Optional[datetime],
@@ -365,6 +403,21 @@ async def invite_gpt_member_any_team(
     if holder is not None:
         await log_operation(holder["id"], f"{action}_existing", email, EMAIL_ALREADY_IN_TEAM, "skipped")
         raise _bound_to_team_failure(EMAIL_ALREADY_IN_TEAM, holder)
+
+    # 批量结果里"仅重试失败邮箱"会把上次结果不明确的邮箱原样再提交一遍。那次写下的
+    # 对账行还没结清时，邀请可能已在原 Team 生效，这里只能跳过、报给管理员，不能
+    # 按空位排序换一个 Team 再拉。
+    unresolved = await _team_with_unresolved_invite(email)
+    if unresolved is not None:
+        label = unresolved.get("name") or unresolved["id"]
+        reason = (
+            f"邮箱在 Team {label} 有一次结果未确认的邀请，等待对账，本次跳过、未换 Team 重新邀请。"
+            f"邀请若已送达，下一轮同步后会自动确认；确认没送达请在 Team {label} 内单独邀请"
+        )
+        await log_operation(
+            unresolved["id"], action, email, "pending_invite_reconciliation", "skipped", reason
+        )
+        raise GptInviteFailed(reason, team_id=unresolved["id"])
 
     candidates = await _build_gpt_invite_candidates(teams, caches, include_full=allow_overage)
 
