@@ -202,7 +202,9 @@ export default function AddMemberDialog({
         title={title}
         description={
           !teamId
-            ? '系统自动为每个邮箱挑选有空闲 ChatGPT 席位的 Team。'
+            ? settings.skip_overage_confirmation
+              ? '系统自动为每个邮箱挑选 Team，优先用有空闲 ChatGPT 席位的；空位不够时会直接超额加入已满的 Team（设置里已关闭超额确认），额外席位照常计费。'
+              : '系统自动为每个邮箱挑选 Team，优先用有空闲 ChatGPT 席位的；空位不够时会先问你是否超额加入已满的 Team。'
             : teamName && (
               <>
                 邀请加入 <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>
