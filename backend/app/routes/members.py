@@ -177,6 +177,13 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
     「设置到期」「续期」写的也是同一条到期记录，对账同样会在上面再加一次，所以
     ``operation`` 为 ``set_expiry`` / ``extend_expiry`` 时走同一个检查。
 
+    pending 的兑换不论落在哪个 Team 都拒（它还会换 Team）。uncertain 的兑换钉在原
+    Team，按操作区分：
+    * 邀请 / 重发看所有 Team：对账日后在原 Team 看见人就确认成功，管理员这时把人
+      邀进另一个 Team，客户就凭一张码占了两个席位。
+    * 设置到期 / 续期只看这个 Team：对账只给原 Team 的到期记录记账，别的 Team 的
+      uncertain 叠不到这条记录上。
+
     邀请必须在 team_invite_lock 和该邮箱的成员操作占用之内、发任何上游请求之前调用：
     * 兑换的邀请分支只在同一把 team_invite_lock 里把兑换落到这个 Team、发邀请、
       记账或锁成 uncertain；续期分支要拿同一个成员操作占用。所以检查之后直到本次
@@ -190,7 +197,9 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
     续期在成员操作占用之内调用（兑换的续期分支拿同一个占用）；设置到期本来就不持锁，
     检查只挡住调用时已经存在的未结兑换。
     """
-    open_redemption = await find_open_redemption(team_id, email)
+    open_redemption = await find_open_redemption(
+        team_id, email, uncertain_in_any_team=operation == "invite"
+    )
     if open_redemption is None:
         return
     token_use_id = open_redemption["token_use_id"]

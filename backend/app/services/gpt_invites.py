@@ -221,7 +221,13 @@ async def _invite_to_team(
         # 必须在锁内、任何上游请求之前查：兑换的邀请分支只在同一把 team_invite_lock
         # 里把兑换落到这个 Team、发邀请、记账或锁成 uncertain，查过之后直到本次写完，
         # 已有的兑换不会在这个 Team 上为这个邮箱记账。
-        open_redemption = await find_open_redemption(team_id, email)
+        open_redemption = await find_open_redemption(
+            team_id,
+            email,
+            # uncertain 的兑换钉在原 Team，对账确认后在那里占一个席位；原 Team 不是
+            # 这个 Team 时照样拉进来，一张码就占了两个席位。
+            uncertain_in_any_team=True,
+        )
         if open_redemption is not None:
             detail = open_redemption_detail(open_redemption, operation="batch_invite")
             await log_operation(

@@ -3,8 +3,11 @@
 一张 30 天码的邀请结果不明：兑换锁成 uncertain、钉在原 Team，码锁着。管理员这时
 对同一个邮箱在同一个 Team 邀请或重发 30 天，到期记成 now+30；之后对账确认那笔
 兑换，又在上面累加 30 天，客户拿到 60 天。现在管理员接口在 team_invite_lock 和
-成员操作占用之内、发任何上游请求之前，先查这个 (Team, 邮箱) 上对账日后还会记账
-的兑换，有就 409，什么都不写。
+成员操作占用之内、发任何上游请求之前，先查这个邮箱上对账日后还会记账的兑换，
+有就 409，什么都不写。
+
+结果不明的兑换钉在别的 Team 时，邀请同样要拒：对账日后在原 Team 看见人就确认，
+管理员若已把人邀进这个 Team，客户就凭一张码占了两个席位。
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -300,16 +303,39 @@ class AdminInviteOpenRedemptionTest(_OpenRedemptionCase):
             client, fetch, exc, token_use_id=token_use_id, phrase="待确认的兑换"
         )
 
-    def test_uncertain_redemption_in_another_team_does_not_block(self):
-        """钉在别的 Team 的 uncertain 只会记到那个 Team 的到期记录上，不会叠到这里。"""
+    def test_uncertain_redemption_in_another_team_blocks_the_invite(self):
+        """钉在别的 Team 的 uncertain 日后在那个 Team 确认：再邀进这里就是一张码两个席位。"""
+        token_use_id = self._open_uncertain(team_id=OTHER_TEAM)
+
+        _result, client, fetch, exc = self._admin_invite()
+
+        self._assert_refused_before_upstream(
+            client, fetch, exc, token_use_id=token_use_id, phrase="待确认的兑换"
+        )
+        self.assertIn(OTHER_TEAM, exc.detail, "说明里要点名兑换所在的 Team")
+        self.assertEqual(self._expiry_rows(OTHER_TEAM), [])
+        conn = self._conn()
+        log = conn.execute(
+            """SELECT team_id, result FROM operation_logs
+               WHERE action = 'invite_member' ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        conn.close()
+        self.assertEqual((log["team_id"], log["result"]), (TEAM, "skipped"))
+
+    def test_uncertain_redemption_in_a_deleted_team_does_not_block(self):
+        """Team 删掉后对账拿不到它的凭据、再也确认不了那笔兑换，叠不出第二个席位；
+        管理员也没法在那里核实退码，算上就让这个邮箱永远拉不进别的 Team。"""
         self._open_uncertain(team_id=OTHER_TEAM)
+        conn = self._conn()
+        conn.execute("DELETE FROM teams WHERE id = ?", (OTHER_TEAM,))
+        conn.commit()
+        conn.close()
 
         result, client, _fetch, exc = self._admin_invite()
 
         self.assertIsNone(exc)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(client.invites, [(EMAIL, "default")])
-        self.assertEqual(len(self._expiry_rows()), 1)
 
     def test_settled_redemptions_do_not_block(self):
         succeeded = self._open_uncertain()

@@ -14,8 +14,11 @@ from ..database import get_db
 
 # 两条腿：
 # * 兑换本身（access_token_uses）：pending 不论在哪个 Team（还没落 Team 的 lookup、
-#   以及被上游拒绝后会换到下一个 Team 重试的邀请，都可能落到这个 Team），uncertain
-#   只看这个 Team（结果不明的邀请钉死在原 Team，不会再换）。
+#   以及被上游拒绝后会换到下一个 Team 重试的邀请，都可能落到这个 Team）。uncertain
+#   的邀请钉死在原 Team、不会再换，对账确认时只给原 Team 记账；``uncertain_in_any_team``
+#   为假时只看这个 Team，为真时看所有 Team，但不算已从系统删除的 Team：对账要拿那个
+#   Team 的凭据现拉名单才能确认，删掉之后它再也确认不了，管理员也无法在那里核实退码，
+#   算上只会让这个邮箱永远拉不进别的 Team。
 # * 兜底行（pending_invite_reconciliations 里未结清、挂着兑换凭据的 barrier / extend /
 #   backfill 行）：调度器回填时按凭据认领兑换，凭据仍是 pending/uncertain 就会记账。
 #   这些行和凭据在正常流程里 Team、邮箱一致；单独查一遍，是为了不依赖这份一致性。
@@ -26,7 +29,8 @@ _OPEN_REDEMPTION_SQL = """
       LEFT JOIN teams t ON t.id = atu.team_id
      WHERE lower(atu.email) = ?
        AND (atu.result = 'pending'
-            OR (atu.result = 'uncertain' AND atu.team_id = ?))
+            OR (atu.result = 'uncertain'
+                AND (atu.team_id = ? OR (? AND t.id IS NOT NULL))))
     UNION
     SELECT atu.id AS token_use_id, atu.result AS result, atu.action AS action,
            atu.team_id AS team_id, t.name AS team_name, atu.created_at AS created_at
@@ -40,7 +44,9 @@ _OPEN_REDEMPTION_SQL = """
 """
 
 
-async def find_open_redemption(team_id: str, email: str) -> Optional[dict[str, Any]]:
+async def find_open_redemption(
+    team_id: str, email: str, *, uncertain_in_any_team: bool = False
+) -> Optional[dict[str, Any]]:
     """对账日后还会给 ``team_id`` 上的这个邮箱记账的未结兑换，没有则 None。只读。
 
     返回 ``token_use_id``、``result``（'pending' / 'uncertain'）、``action``、
@@ -53,7 +59,13 @@ async def find_open_redemption(team_id: str, email: str) -> Optional[dict[str, A
     async with get_db() as db:
         cursor = await db.execute(
             _OPEN_REDEMPTION_SQL,
-            (normalized_email, team_id, team_id, normalized_email),
+            (
+                normalized_email,
+                team_id,
+                1 if uncertain_in_any_team else 0,
+                team_id,
+                normalized_email,
+            ),
         )
         row = await cursor.fetchone()
     return dict(row) if row else None
