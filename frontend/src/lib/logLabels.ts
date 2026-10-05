@@ -170,6 +170,52 @@ export function teamStatusLabel(status: string | null | undefined): string {
   return TEAM_STATUS_LABELS[status] ?? status;
 }
 
+// ── search ──────────────────────────────────────────────────────────────────────
+
+// The console words the same act differently in different places (移除成员 button, 移出 in
+// patrol labels, 踢出 in 用户管理; 撤销邀请 button vs 撤回邀请 log label). A search for one
+// must find the others, or an admin auditing removals can miss some of them.
+const SEARCH_SYNONYMS: string[][] = [
+  ['移出', '移除', '踢出', '踢'],
+  ['撤回', '撤销'],
+];
+
+function searchVariants(needle: string): string[] {
+  const variants = new Set([needle]);
+  for (const group of SEARCH_SYNONYMS) {
+    const word = group.find((w) => needle.includes(w));
+    if (word) for (const other of group) variants.add(needle.replace(word, other));
+  }
+  return [...variants];
+}
+
+function codesWithLabel(labels: Record<string, string>, needle: string): string[] {
+  const variants = searchVariants(needle);
+  return Object.entries(labels)
+    // A code that itself contains the text is already found by the plain text search.
+    .filter(([code, label]) => {
+      const text = label.toLowerCase();
+      return variants.some((v) => text.includes(v)) && !code.toLowerCase().includes(needle);
+    })
+    .map(([code]) => code);
+}
+
+/**
+ * The backend's log search matches stored codes, not the labels shown here, so a search for
+ * a visible label ("移出") finds nothing on its own. These are the codes whose label contains
+ * the search text: `actions` for an exact `action` filter, `values` (trigger and result
+ * codes) for a plain text search.
+ */
+export function logCodesMatchingLabel(text: string): { actions: string[]; values: string[] } {
+  const needle = text.trim().toLowerCase();
+  if (!needle) return { actions: [], values: [] };
+  const resultLabels = Object.fromEntries(Object.entries(RESULT_META).map(([code, meta]) => [code, meta.label]));
+  return {
+    actions: codesWithLabel(ACTION_LABELS, needle),
+    values: [...new Set([...codesWithLabel(TRIGGER_LABELS, needle), ...codesWithLabel(resultLabels, needle)])],
+  };
+}
+
 // ── detail ──────────────────────────────────────────────────────────────────────
 
 const BOOL: Record<string, string> = { true: '是', false: '否', '1': '是', '0': '否' };

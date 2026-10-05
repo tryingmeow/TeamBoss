@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { fetchLogs as fetchLogsApi, type OperationLog } from '../../api/client';
+import type { OperationLog } from '../../api/client';
 import { ChevronLeft, ChevronRight, Download, Search } from 'lucide-react';
 import { formatDateSafe } from '../../lib/formatDate';
 import {
@@ -10,13 +10,13 @@ import {
   logTriggerLabel,
   teamStatusLabel,
 } from '../../lib/logLabels';
+import { collectLogs, searchLogsPage } from '../../lib/logSearch';
 import { cn } from '../../lib/utils';
 import PageShell from '../../components/PageShell';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 
-const EXPORT_PER_PAGE = 50;
-const EXPORT_MAX_PAGES = 20;
-const EXPORT_MAX_ROWS = EXPORT_PER_PAGE * EXPORT_MAX_PAGES;
+const PER_PAGE = 50;
+const EXPORT_MAX_ROWS = 1000;
 
 function csvField(value: string | number | null | undefined): string {
   const s = value === null || value === undefined ? '' : String(value);
@@ -28,6 +28,7 @@ function logToCsvRow(log: OperationLog): string {
     csvField(log.created_at ? formatDateSafe(log.created_at, 'yyyy-MM-dd HH:mm:ss', '-') : '-'),
     csvField(logResultMeta(log.result).label),
     csvField(logActionLabel(log.action)),
+    csvField(log.action),
     csvField(log.team_name),
     csvField(log.team_id),
     csvField(log.team_owner_email),
@@ -88,11 +89,12 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     setLoading(true);
     setLogs([]);
     setLoadError('');
-    fetchLogsApi({ page, per_page: 50, q: debouncedSearch, scope })
+    // Matches the visible labels too: "移出" also finds every action labelled 移出.
+    searchLogsPage({ scope, search: debouncedSearch }, page, PER_PAGE)
       .then(res => {
         if (cancelled) return;
         setLogs(res.logs);
-        setTotalPages(Math.max(1, res.total_pages || 1));
+        setTotalPages(res.totalPages);
       })
       .catch(error => {
         if (!cancelled) setLoadError(error instanceof Error ? error.message : '加载失败');
@@ -113,19 +115,10 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     setExporting(true);
     setExportMessage(null);
     try {
-      const first = await fetchLogsApi({ page: 1, per_page: EXPORT_PER_PAGE, q: debouncedSearch, scope });
-      const allLogs: OperationLog[] = [...first.logs];
-      const totalPagesForExport = Math.max(1, first.total_pages || 1);
-      const pagesToFetch = Math.min(totalPagesForExport, EXPORT_MAX_PAGES);
-      const truncated = totalPagesForExport > EXPORT_MAX_PAGES;
-
-      for (let p = 2; p <= pagesToFetch; p++) {
-        const res = await fetchLogsApi({ page: p, per_page: EXPORT_PER_PAGE, q: debouncedSearch, scope });
-        allLogs.push(...res.logs);
-      }
-
-      const rows = allLogs.slice(0, EXPORT_MAX_ROWS);
-      const header = ['时间', '状态', '操作', 'Team', 'Team ID', 'Team 负责人', '目标', '触发方', '详情', '错误信息']
+      // Same matching as the list (labels included), so the file holds what the page shows.
+      const { logs: rows, total } = await collectLogs({ scope, search: debouncedSearch }, EXPORT_MAX_ROWS);
+      const truncated = total > rows.length;
+      const header = ['时间', '状态', '操作', '操作代码', 'Team', 'Team ID', 'Team 负责人', '目标', '触发方', '详情', '错误信息']
         .map(csvField)
         .join(',');
       const csvBody = [header, ...rows.map(logToCsvRow)].join('\r\n');
