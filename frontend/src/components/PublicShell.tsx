@@ -19,8 +19,8 @@ const WIDTHS = {
 
 /**
  * Frame for screens a visitor sees without signing in: the self-service page, the terms
- * and the admin login. Brand on the left, theme switch on the right, content centred.
- * On phones the content starts near the top so the keyboard does not cover the form.
+ * and the admin login. Brand on the left, theme switch on the right, content in a centred
+ * column that starts near the top, so results appearing below a form never shift it.
  */
 export default function PublicShell({ title, children, width = 'md' }: PublicShellProps) {
   useEffect(() => {
@@ -36,7 +36,7 @@ export default function PublicShell({ title, children, width = 'md' }: PublicShe
         </div>
         <ThemeToggle />
       </header>
-      <main className="flex flex-1 justify-center px-4 pb-12 pt-2 sm:items-center sm:pb-20 sm:pt-0">
+      <main className="flex flex-1 justify-center px-4 pb-12 pt-2 sm:pb-20 sm:pt-[10vh]">
         <div className={`w-full ${WIDTHS[width]}`}>{children}</div>
       </main>
     </div>

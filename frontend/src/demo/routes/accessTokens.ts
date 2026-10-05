@@ -292,7 +292,7 @@ function redeem(ctx: DemoContext): DemoResponse {
     });
     const result: RedeemAccessTokenResult = {
       status: 'team_selection_required', action: null, team_id: null, team_name: null, email, expires_at: null,
-      message: '该邮箱同时在多个车队中，请选择要续期的车队后再提交。兑换码未使用。',
+      message: '该邮箱同时在多个 Team 中，请选择要续期的 Team 后再提交。兑换码未使用。',
       choices,
     };
     return ok(result);
@@ -302,7 +302,7 @@ function redeem(ctx: DemoContext): DemoResponse {
   const chosenReal = teamId ? memberships.find((m) => m.record.team.id === teamId) : memberships.find((m) => toChoice(m).renewable) ?? memberships[0];
   if (teamId && !chosenReal) {
     const synthetic = syntheticChoices(db).find((c) => c.team_id === teamId);
-    if (!synthetic || realChoices.length > 1) return fail(409, '所选车队已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。');
+    if (!synthetic || realChoices.length > 1) return fail(409, '所选 Team 已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。');
     if (!synthetic.renewable) return fail(409, '该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。');
     const base = synthetic.expires_at ? Math.max(Date.parse(synthetic.expires_at), Date.now()) : Date.now();
     const expiresAt = grantMs === null ? null : isoAt(base + grantMs);

@@ -1,4 +1,4 @@
-import { FormEvent, Fragment, useMemo, useState } from 'react';
+import { type FormEvent, type ReactNode, useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -7,11 +7,11 @@ import {
   History,
   KeyRound,
   Loader2,
-  Mail,
   Search,
   UserCheck,
   UserX,
   Users,
+  type LucideIcon,
 } from 'lucide-react';
 import {
   queryMembershipStatus,
@@ -21,9 +21,32 @@ import {
   type RedeemAccessTokenResult,
   type RedeemTeamChoice,
   type RedemptionHistoryItem,
+  type TokenQueryInfo,
 } from '../api/client';
+import { cn } from '../lib/utils';
+import PublicShell from './PublicShell';
+import { BUTTON, CARD, INPUT, PILL, TONE } from './ui';
 
 type Tab = 'redeem' | 'query';
+type PanelTone = 'success' | 'warning' | 'info' | 'neutral';
+
+const PANEL: Record<PanelTone, string> = {
+  success: 'border-emerald-200 bg-emerald-50/60 dark:border-emerald-500/25 dark:bg-emerald-500/[0.07]',
+  warning: 'border-amber-200 bg-amber-50/60 dark:border-amber-500/25 dark:bg-amber-500/[0.07]',
+  info: 'border-blue-200 bg-blue-50/60 dark:border-blue-500/25 dark:bg-blue-500/[0.07]',
+  neutral: 'border-gray-200 bg-gray-50 dark:border-ink-800 dark:bg-ink-950',
+};
+
+const PANEL_ICON: Record<PanelTone, string> = {
+  success: 'text-emerald-600 dark:text-emerald-400',
+  warning: 'text-amber-600 dark:text-amber-400',
+  info: 'text-blue-600 dark:text-blue-400',
+  neutral: 'text-gray-500 dark:text-ink-400',
+};
+
+const FIELD_LABEL = 'mb-1.5 flex items-baseline gap-1.5 text-sm font-medium text-gray-700 dark:text-gray-300';
+// 16px on phones keeps iOS Safari from zooming in when the field gets focus.
+const FIELD_INPUT = cn(INPUT, 'py-2.5 text-base sm:text-sm');
 
 function choiceExpiryText(choice: RedeemTeamChoice): string {
   // expires_at 为空有两种完全不同的含义，绝不能都写成"永不过期"：
@@ -40,7 +63,7 @@ function choiceBlockedText(choice: RedeemTeamChoice): string | null {
   if (choice.renewable !== false) return null;
   if (choice.blocked_reason === 'owner_email') return 'Owner 邮箱不支持自助续期';
   if (choice.blocked_reason === 'permanent_membership') return '永久有效，无需续期';
-  return '该车队暂不支持续期';
+  return '该 Team 暂不支持续期';
 }
 
 function formatExpiresAt(value: string | null): string {
@@ -52,6 +75,15 @@ function formatExpiresAt(value: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function grantLabel(value: string | null | undefined): string {
+  if (!value) return '—';
+  if (value === 'never') return '永久';
+  const match = /^(\d+)([dhm])$/.exec(value);
+  if (!match) return value;
+  const unit = { d: '天', h: '小时', m: '分钟' }[match[2] as 'd' | 'h' | 'm'];
+  return `${match[1]} ${unit}`;
 }
 
 function actionLabel(action: Exclude<RedeemAccessTokenResult['action'], null>): string {
@@ -69,36 +101,86 @@ function historyActionLabel(action: string): string {
     redeem_aborted: '兑换中断',
     renew_owner_rejected: 'Owner 拒绝',
     renew_permanent_rejected: '永久有效拒绝',
-    renew_multi_team_prompt: '待选择车队',
-    renew_team_choice_invalid: '车队选择已失效',
+    renew_multi_team_prompt: '待选择 Team',
+    renew_team_choice_invalid: 'Team 选择已失效',
     none: '无可用 Team',
   };
   return labels[action] ?? action;
 }
 
-function statusMeta(status: MembershipInfo['status']) {
-  if (status === 'joined') {
-    return {
-      title: '已加入',
-      icon: UserCheck,
-      className: 'border-green-200 dark:border-green-800/50 bg-green-50 dark:bg-green-950/30 text-green-800 dark:text-green-200',
-      mutedClassName: 'text-green-700/70 dark:text-green-300/70',
-    };
-  }
-  if (status === 'pending') {
-    return {
-      title: '待接受',
-      icon: Clock3,
-      className: 'border-yellow-200 dark:border-yellow-800/50 bg-yellow-50 dark:bg-yellow-950/30 text-yellow-800 dark:text-yellow-200',
-      mutedClassName: 'text-yellow-700/70 dark:text-yellow-300/70',
-    };
-  }
-  return {
-    title: '未找到',
-    icon: UserX,
-    className: 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 text-gray-700 dark:text-gray-300',
-    mutedClassName: 'text-gray-500 dark:text-gray-500',
-  };
+function historyResult(result: string): { label: string; tone: keyof typeof TONE } {
+  if (result === 'success') return { label: '成功', tone: 'success' };
+  if (result === 'notice') return { label: '提示', tone: 'neutral' };
+  return { label: '失败', tone: 'danger' };
+}
+
+function tokenStatusTone(status: TokenQueryInfo['token_status']): keyof typeof TONE {
+  if (status === 'unused') return 'success';
+  if (status === 'used') return 'info';
+  if (status === 'pending_confirmation') return 'warning';
+  return 'danger';
+}
+
+function emailStatusTone(status: string | undefined): keyof typeof TONE {
+  if (status === 'joined') return 'success';
+  if (status === 'pending') return 'warning';
+  return 'neutral';
+}
+
+function statusMeta(status: MembershipInfo['status']): { title: string; icon: LucideIcon; tone: PanelTone } {
+  if (status === 'joined') return { title: '已加入', icon: UserCheck, tone: 'success' };
+  if (status === 'pending') return { title: '待接受', icon: Clock3, tone: 'warning' };
+  return { title: '未找到', icon: UserX, tone: 'neutral' };
+}
+
+/** Lets a long address break before the "@" first, and anywhere only if it still does not fit. */
+function EmailText({ email }: { email: string }) {
+  const at = email.indexOf('@');
+  if (at <= 0) return <>{email}</>;
+  return (
+    <>
+      {email.slice(0, at)}
+      <wbr />
+      {email.slice(at)}
+    </>
+  );
+}
+
+function ResultPanel({
+  tone,
+  icon: Icon,
+  title,
+  children,
+}: {
+  tone: PanelTone;
+  icon: LucideIcon;
+  title: string;
+  children?: ReactNode;
+}) {
+  return (
+    <section className={cn('rounded-lg border p-4', PANEL[tone])}>
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-900 dark:text-gray-100">
+        <Icon size={16} className={cn('shrink-0', PANEL_ICON[tone])} />
+        {title}
+      </h2>
+      {children && <div className="mt-3">{children}</div>}
+    </section>
+  );
+}
+
+function Details({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <dl className={cn('grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm', className)}>{children}</dl>
+  );
+}
+
+function Detail({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="whitespace-nowrap text-gray-500 dark:text-ink-400">{label}</dt>
+      <dd className={cn('min-w-0 text-gray-900 [overflow-wrap:anywhere] dark:text-gray-100', className)}>{children}</dd>
+    </>
+  );
 }
 
 export default function JoinPage() {
@@ -139,7 +221,7 @@ export default function JoinPage() {
     setStatusResult(null);
 
     if (!submitEmail || !submitToken) {
-      setError('请输入邮箱和 Token');
+      setError('请输入邮箱和兑换码');
       return;
     }
 
@@ -175,7 +257,7 @@ export default function JoinPage() {
     setStatusResult(null);
 
     if (!email.trim()) {
-      setError('请输入邮箱或 Token');
+      setError('请输入邮箱或兑换码');
       return;
     }
 
@@ -198,332 +280,294 @@ export default function JoinPage() {
 
   const loading = redeemLoading || queryLoading;
   const status = statusResult && statusResult.query_type === 'email' ? statusMeta(statusResult.membership.status) : null;
-  const StatusIcon = status?.icon;
+  const hasResult = Boolean(redeemResult || statusResult);
+
+  const tabClass = (active: boolean) =>
+    cn(
+      'h-9 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50',
+      active
+        ? 'bg-white text-blue-600 shadow-sm dark:bg-ink-800 dark:text-blue-400'
+        : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100'
+    );
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-[#0f1117] flex items-center justify-center px-4 py-10 transition-colors">
-      <div className="w-full max-w-md">
-        <div className="mb-6 flex items-center justify-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-blue-600/10 flex items-center justify-center">
-            <Users size={22} className="text-blue-600 dark:text-blue-500" />
-          </div>
-          <div>
-            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Team Access</h1>
-          </div>
+    <PublicShell title="Team 自助服务">
+      <div className={cn(CARD, 'p-5 shadow-sm sm:p-7')}>
+        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Team 自助服务</h1>
+        <p className="mt-1 text-pretty text-sm text-gray-500 dark:text-ink-400">
+          用兑换码加入或续期 Team，也能查询成员状态。
+        </p>
+
+        <div role="tablist" aria-label="操作" className="mt-5 grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'redeem'}
+            onClick={() => switchTab('redeem')}
+            className={tabClass(tab === 'redeem')}
+          >
+            加入 / 续期
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'query'}
+            onClick={() => switchTab('query')}
+            className={tabClass(tab === 'query')}
+          >
+            查询
+          </button>
         </div>
 
-        <div className="bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] rounded-2xl shadow-xl overflow-hidden">
-          <div className="grid grid-cols-2 p-1.5 gap-1.5 bg-gray-100 dark:bg-[#0f1117]">
-            <button
-              type="button"
-              onClick={() => switchTab('redeem')}
-              className={`py-2 rounded-xl text-sm font-semibold transition-all ${
-                tab === 'redeem'
-                  ? 'bg-white dark:bg-[#1a1d27] text-blue-600 dark:text-blue-400 shadow-sm'
-                  : 'text-gray-500 dark:text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'
-              }`}
-            >
-              加入 / 续期
-            </button>
-            <button
-              type="button"
-              onClick={() => switchTab('query')}
-              className={`py-2 rounded-xl text-sm font-semibold transition-all ${
-                tab === 'query'
-                  ? 'bg-white dark:bg-[#1a1d27] text-blue-600 dark:text-blue-400 shadow-sm'
-                  : 'text-gray-500 dark:text-gray-500 hover:text-gray-900 dark:hover:text-gray-300'
-              }`}
-            >
-              查询
-            </button>
-          </div>
+        <form onSubmit={tab === 'redeem' ? handleRedeem : handleQuery} className="mt-5 space-y-4">
+          <label className="block">
+            <span className={FIELD_LABEL}>{tab === 'redeem' ? '邮箱' : '邮箱或兑换码'}</span>
+            <input
+              type="text"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder={tab === 'redeem' ? 'name@example.com' : 'name@example.com 或 atm_...'}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              inputMode={tab === 'redeem' ? 'email' : 'text'}
+              className={FIELD_INPUT}
+            />
+          </label>
 
-          <form onSubmit={tab === 'redeem' ? handleRedeem : handleQuery} className="p-6 space-y-4">
-            <label className="block">
-              <span className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                <Mail size={15} />
-                邮箱或 Token
+          <label className="block">
+            <span className={FIELD_LABEL}>
+              兑换码
+              {tab === 'query' && (
+                <span className="text-xs font-normal text-gray-400 dark:text-ink-500">可选</span>
+              )}
+            </span>
+            <input
+              type="text"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              placeholder="atm_..."
+              autoComplete="one-time-code"
+              autoCapitalize="none"
+              spellCheck={false}
+              className={cn(FIELD_INPUT, 'font-mono')}
+            />
+            {tab === 'query' && (
+              <span className="mt-1.5 block text-xs text-gray-500 dark:text-ink-400">
+                查询邮箱时填上本人用过的兑换码，可同时查看兑换记录。
               </span>
-              <input
-                type="text"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="user@example.com 或 atm_..."
-                autoComplete="off"
-                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-xl text-sm text-gray-900 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all"
-              />
-            </label>
-
-            <label className="block">
-              <span className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                <KeyRound size={15} />
-                Token
-                {tab === 'query' && (
-                  <span className="font-normal text-xs text-gray-400 dark:text-gray-500">
-                    （可选）
-                  </span>
-                )}
-              </span>
-              <input
-                type="text"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder="atm_..."
-                autoComplete="one-time-code"
-                className="w-full px-3 py-2.5 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-xl text-sm text-gray-900 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all font-mono"
-              />
-            </label>
-
-            {error && (
-              <div className="flex items-start gap-2 rounded-xl border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 px-3 py-2 text-sm text-red-700 dark:text-red-300">
-                <AlertCircle size={16} className="mt-0.5 shrink-0" />
-                <span>{error}</span>
-              </div>
             )}
+          </label>
 
-            {redeemResult?.status === 'team_selection_required' && (
-              <div className="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-800 dark:text-blue-200 space-y-2">
-                <div className="flex items-center gap-2 font-semibold">
-                  <Users size={16} />
-                  请选择要续期的车队
-                </div>
-                <p className="text-xs text-blue-700/80 dark:text-blue-300/80">
-                  {redeemResult.message}
-                </p>
-                <div className="space-y-1.5 pt-0.5">
-                  {redeemResult.choices.map((choice: RedeemTeamChoice) => {
-                    const blocked = choiceBlockedText(choice);
-                    return (
-                      <button
-                        key={choice.team_id}
-                        type="button"
-                        disabled={redeemLoading || Boolean(blocked)}
-                        onClick={() => submitRedeem(choice.team_id)}
-                        title={blocked ?? undefined}
-                        className="w-full flex items-center justify-between gap-2 rounded-lg border border-blue-200 dark:border-blue-800/50 bg-white/70 dark:bg-[#0f1117]/70 px-3 py-2 text-left transition-colors hover:border-blue-400 hover:bg-white dark:hover:bg-[#0f1117] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-blue-200 dark:disabled:hover:border-blue-800/50"
-                      >
-                        <span className="min-w-0">
-                          <span className="block font-medium truncate">{choice.team_name ?? choice.team_id}</span>
-                          <span className="block text-xs text-blue-700/70 dark:text-blue-300/70">
-                            {choice.status === 'pending' ? '待接受 · ' : ''}
-                            {choiceExpiryText(choice)}
-                          </span>
-                          {blocked && (
-                            <span className="block text-xs text-gray-500 dark:text-gray-400">{blocked}</span>
+          {error && (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 dark:border-red-500/25 dark:bg-red-500/10 dark:text-red-300"
+            >
+              <AlertCircle size={16} className="mt-0.5 shrink-0" />
+              <span className="min-w-0 [overflow-wrap:anywhere]">{error}</span>
+            </div>
+          )}
+
+          <button type="submit" disabled={loading} className={cn(BUTTON.primary, 'w-full py-2.5')}>
+            {loading ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : tab === 'query' ? (
+              <Search size={16} />
+            ) : (
+              <ArrowRight size={16} />
+            )}
+            {loading ? '处理中…' : tab === 'query' ? '查询' : '兑换'}
+          </button>
+        </form>
+
+        <div aria-live="polite" className={cn('space-y-3', hasResult && 'mt-5')}>
+          {redeemResult?.status === 'team_selection_required' && (
+            <ResultPanel tone="info" icon={Users} title="请选择要续期的 Team">
+              <p className="text-sm text-gray-600 dark:text-ink-300">{redeemResult.message}</p>
+              <div className="mt-3 space-y-2">
+                {redeemResult.choices.map((choice: RedeemTeamChoice) => {
+                  const blocked = choiceBlockedText(choice);
+                  return (
+                    <button
+                      key={choice.team_id}
+                      type="button"
+                      disabled={redeemLoading || Boolean(blocked)}
+                      onClick={() => submitRedeem(choice.team_id)}
+                      title={blocked ?? undefined}
+                      className={cn(
+                        'flex min-h-11 w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors disabled:cursor-not-allowed',
+                        blocked
+                          ? 'border-gray-200 bg-gray-50 dark:border-ink-800 dark:bg-ink-950'
+                          : 'border-gray-200 bg-white hover:border-blue-400 disabled:opacity-60 disabled:hover:border-gray-200 dark:border-ink-800 dark:bg-ink-900 dark:hover:border-blue-500/60 dark:disabled:hover:border-ink-800'
+                      )}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span
+                          className={cn(
+                            'block text-sm font-medium [overflow-wrap:anywhere]',
+                            blocked ? 'text-gray-500 dark:text-ink-400' : 'text-gray-900 dark:text-gray-100'
                           )}
+                        >
+                          {choice.team_name ?? choice.team_id}
                         </span>
-                        {pendingTeamId === choice.team_id ? (
-                          <Loader2 size={15} className="shrink-0 animate-spin opacity-60" />
-                        ) : (
-                          !blocked && <ArrowRight size={15} className="shrink-0 opacity-60" />
+                        <span className="mt-0.5 block text-xs text-gray-500 dark:text-ink-400">
+                          {choice.status === 'pending' ? '待接受 · ' : ''}
+                          {choiceExpiryText(choice)}
+                        </span>
+                        {blocked && choice.expiry_state !== 'permanent' && (
+                          <span className="mt-0.5 block text-xs text-amber-700 dark:text-amber-300">{blocked}</span>
                         )}
-                      </button>
-                    );
-                  })}
-                </div>
-                {redeemResult.choices.some((choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged') && (
-                  <p className="text-xs text-blue-700/80 dark:text-blue-300/80">
-                    续期未管理车队将自动设定到期时间，到期后自动移出。
-                  </p>
-                )}
+                      </span>
+                      {pendingTeamId === choice.team_id ? (
+                        <Loader2 size={16} className="shrink-0 animate-spin text-blue-600 dark:text-blue-400" />
+                      ) : (
+                        !blocked && <ArrowRight size={16} className="shrink-0 text-blue-600 dark:text-blue-400" />
+                      )}
+                    </button>
+                  );
+                })}
               </div>
-            )}
-
-            {redeemResult?.status === 'pending_confirmation' && (
-              <div className="rounded-xl border border-yellow-200 dark:border-yellow-800/50 bg-yellow-50 dark:bg-yellow-950/30 p-3 text-sm text-yellow-800 dark:text-yellow-200 space-y-2">
-                <div className="flex items-center gap-2 font-semibold">
-                  <Clock3 size={16} />
-                  结果确认中
-                </div>
-                <p className="text-xs text-yellow-700/80 dark:text-yellow-300/80">
-                  {redeemResult.message}
+              {redeemResult.choices.some((choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged') && (
+                <p className="mt-3 text-xs text-gray-500 dark:text-ink-400">
+                  续期「未纳入到期管理」的 Team 会自动设定到期时间，到期后自动移出。
                 </p>
-              </div>
-            )}
+              )}
+            </ResultPanel>
+          )}
 
-            {redeemResult?.status === 'ok' && (
-              <div className="rounded-xl border border-green-200 dark:border-green-800/50 bg-green-50 dark:bg-green-950/30 p-3 text-sm text-green-800 dark:text-green-200 space-y-2">
-                <div className="flex items-center gap-2 font-semibold">
-                  <CheckCircle2 size={16} />
-                  {actionLabel(redeemResult.action)}
-                </div>
-                <div className="grid grid-cols-[68px_1fr] gap-y-1 text-xs">
-                  <span className="text-green-700/70 dark:text-green-300/70">Team</span>
-                  <span className="font-medium">{redeemResult.team_name}</span>
-                  <span className="text-green-700/70 dark:text-green-300/70">邮箱</span>
-                  <span className="font-medium">{redeemResult.email}</span>
-                  <span className="text-green-700/70 dark:text-green-300/70">到期</span>
-                  <span className="font-medium">{formatExpiresAt(redeemResult.expires_at)}</span>
-                </div>
-              </div>
-            )}
+          {redeemResult?.status === 'pending_confirmation' && (
+            <ResultPanel tone="warning" icon={Clock3} title="结果确认中">
+              <p className="text-sm text-gray-600 dark:text-ink-300">{redeemResult.message}</p>
+            </ResultPanel>
+          )}
 
-            {statusResult && statusResult.query_type === 'token' && (
-              <div className="rounded-xl border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-950/30 p-3 text-sm text-blue-800 dark:text-blue-200 space-y-2">
-                <div className="flex items-center gap-2 font-semibold">
-                  <KeyRound size={16} />
-                  Token 查询结果
-                </div>
-                <div className="grid grid-cols-[68px_1fr] gap-y-1 text-xs">
-                  <span className="text-blue-700/70 dark:text-blue-300/70">状态</span>
-                  <span className="font-medium">{statusResult.token.token_status_label}</span>
-                  
-                  {statusResult.token.token_status === 'unused' ? (
+          {redeemResult?.status === 'ok' && (
+            <ResultPanel tone="success" icon={CheckCircle2} title={actionLabel(redeemResult.action)}>
+              <Details>
+                <Detail label="Team">{redeemResult.team_name}</Detail>
+                <Detail label="邮箱">
+                  <EmailText email={redeemResult.email} />
+                </Detail>
+                <Detail label="到期">{formatExpiresAt(redeemResult.expires_at)}</Detail>
+              </Details>
+              {redeemResult.action !== 'renewed_member' && (
+                <p className="mt-3 text-xs text-gray-500 dark:text-ink-400">请到邮箱查收 ChatGPT 的邀请邮件并接受邀请。</p>
+              )}
+            </ResultPanel>
+          )}
+
+          {statusResult?.query_type === 'token' && (
+            <ResultPanel tone="info" icon={KeyRound} title="兑换码查询结果">
+              <Details>
+                <Detail label="状态">
+                  <span className={cn(PILL, TONE[tokenStatusTone(statusResult.token.token_status)])}>
+                    {statusResult.token.token_status_label}
+                  </span>
+                </Detail>
+                {statusResult.token.token_status === 'unused' ? (
+                  <>
+                    <Detail label="可用时长">{grantLabel(statusResult.token.grant_expires_in)}</Detail>
+                    <Detail label="兑换期限">{formatExpiresAt(statusResult.token.token_expires_at ?? null)}</Detail>
+                  </>
+                ) : statusResult.usage ? (
+                  <>
+                    <Detail label="兑换邮箱">
+                      <EmailText email={statusResult.usage.email} />
+                    </Detail>
+                    {statusResult.usage.team_name && <Detail label="Team">{statusResult.usage.team_name}</Detail>}
+                    <Detail label="邮箱状态">
+                      <span className={cn(PILL, TONE[emailStatusTone(statusResult.usage.email_status)])}>
+                        {statusResult.usage.email_status_label}
+                      </span>
+                    </Detail>
+                    <Detail label="兑换时间">{formatExpiresAt(statusResult.usage.used_at)}</Detail>
+                    {statusResult.usage.expires_at && (
+                      <Detail label="到期">{formatExpiresAt(statusResult.usage.expires_at)}</Detail>
+                    )}
+                  </>
+                ) : null}
+              </Details>
+            </ResultPanel>
+          )}
+
+          {statusResult?.query_type === 'email' && status && (
+            <>
+              <ResultPanel tone={status.tone} icon={status.icon} title={status.title}>
+                <Details>
+                  <Detail label="邮箱">
+                    <EmailText email={statusResult.membership.email} />
+                  </Detail>
+                  {(statusResult.membership.memberships?.length ?? 0) > 1 ? (
+                    statusResult.membership.memberships.map((entry) => (
+                      <Detail key={entry.team_id ?? entry.team_name ?? ''} label="Team">
+                        <span className="block font-medium">{entry.team_name}</span>
+                        <span className="block text-xs text-gray-500 dark:text-ink-400">
+                          {entry.status === 'pending' ? '待接受 · ' : ''}
+                          {entry.expires_at ? `到期 ${formatExpiresAt(entry.expires_at)}` : '永不过期'}
+                        </span>
+                      </Detail>
+                    ))
+                  ) : (
                     <>
-                      <span className="text-blue-700/70 dark:text-blue-300/70">时长</span>
-                      <span className="font-medium">{statusResult.token.grant_expires_in}</span>
-                      <span className="text-blue-700/70 dark:text-blue-300/70">Token过期</span>
-                      <span className="font-medium">{formatExpiresAt(statusResult.token.token_expires_at ?? null)}</span>
-                    </>
-                  ) : statusResult.usage ? (
-                    <>
-                      <span className="text-blue-700/70 dark:text-blue-300/70">目标邮箱</span>
-                      <span className="font-medium">{statusResult.usage.email}</span>
-                      <span className="text-blue-700/70 dark:text-blue-300/70">邮箱状态</span>
-                      <span className="font-medium text-emerald-600 dark:text-emerald-400">{statusResult.usage.email_status_label}</span>
-                      <span className="text-blue-700/70 dark:text-blue-300/70">使用时间</span>
-                      <span className="font-medium">{formatExpiresAt(statusResult.usage.used_at)}</span>
-                      {statusResult.usage.expires_at && (
-                        <>
-                          <span className="text-blue-700/70 dark:text-blue-300/70">到期时间</span>
-                          <span className="font-medium">{formatExpiresAt(statusResult.usage.expires_at)}</span>
-                        </>
+                      {statusResult.membership.team_name && (
+                        <Detail label="Team">{statusResult.membership.team_name}</Detail>
+                      )}
+                      {statusResult.membership.status !== 'absent' && (
+                        <Detail label="到期">{formatExpiresAt(statusResult.membership.expires_at)}</Detail>
                       )}
                     </>
-                  ) : null}
-                </div>
-              </div>
-            )}
+                  )}
+                </Details>
+              </ResultPanel>
 
-            {statusResult && statusResult.query_type === 'email' && status && StatusIcon && (
-              <>
-                <div className={`rounded-xl border p-3 text-sm space-y-2 ${status.className}`}>
-                  <div className="flex items-center gap-2 font-semibold">
-                    <StatusIcon size={16} />
-                    {status.title}
-                  </div>
-                  <div className="grid grid-cols-[68px_1fr] gap-y-1 text-xs">
-                    <span className={status.mutedClassName}>邮箱</span>
-                    <span className="font-medium">{statusResult.membership.email}</span>
-                    {(statusResult.membership.memberships?.length ?? 0) > 1 ? (
-                      statusResult.membership.memberships.map(entry => (
-                        <Fragment key={entry.team_id ?? entry.team_name ?? ''}>
-                          <span className={status.mutedClassName}>Team</span>
-                          <span className="font-medium">
-                            {entry.team_name}
-                            <span className="ml-1.5 font-normal opacity-75">
-                              {entry.status === 'pending' ? '待接受 · ' : ''}
-                              到期 {formatExpiresAt(entry.expires_at)}
-                            </span>
-                          </span>
-                        </Fragment>
-                      ))
-                    ) : (
-                      <>
-                        {statusResult.membership.team_name && (
-                          <>
-                            <span className={status.mutedClassName}>Team</span>
-                            <span className="font-medium">{statusResult.membership.team_name}</span>
-                          </>
-                        )}
-                        {statusResult.membership.status !== 'absent' && (
-                          <>
-                            <span className={status.mutedClassName}>到期</span>
-                            <span className="font-medium">{formatExpiresAt(statusResult.membership.expires_at)}</span>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-gray-200 dark:border-[#2a2d3a] bg-gray-50 dark:bg-[#0f1117] p-3 text-sm space-y-2">
-                  <div className="flex items-center gap-2 font-semibold text-gray-800 dark:text-gray-200">
-                    <History size={16} />
-                    兑换历史
-                  </div>
-
-                  {statusResult.membership.redemption_history.length === 0 ? (
-                    <div className="text-xs text-gray-500 dark:text-gray-500 py-1">暂无兑换历史</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {statusResult.membership.redemption_history.map((item: RedemptionHistoryItem, index: number) => (
-                        <div
-                          key={`${item.created_at}-${index}`}
-                          className="rounded-lg bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] p-2"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-xs font-semibold text-gray-800 dark:text-gray-200">
+              <ResultPanel tone="neutral" icon={History} title="兑换记录">
+                {statusResult.membership.redemption_history.length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-ink-400">
+                    没有可显示的记录。填上本人用过的兑换码后再查询即可查看。
+                  </p>
+                ) : (
+                  <ol className="divide-y divide-gray-200 dark:divide-ink-800">
+                    {statusResult.membership.redemption_history.map((item: RedemptionHistoryItem, index: number) => {
+                      const result = historyResult(item.result);
+                      return (
+                        <li key={`${item.created_at}-${index}`} className="py-3 first:pt-0 last:pb-0">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100">
                               {historyActionLabel(item.action)}
                             </span>
-                            <span
-                              className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
-                                item.result === 'success'
-                                  ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
-                                  : item.result === 'notice'
-                                    ? 'bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-300'
-                                    : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
-                              }`}
-                            >
-                              {item.result === 'success' ? '成功' : item.result === 'notice' ? '提示' : '失败'}
-                            </span>
+                            <span className={cn(PILL, TONE[result.tone])}>{result.label}</span>
                           </div>
-                          <div className="mt-1 grid grid-cols-[52px_1fr] gap-y-0.5 text-[11px] text-gray-500 dark:text-gray-500">
-                            <span>时间</span>
-                            <span>{formatExpiresAt(item.created_at)}</span>
-                            {item.team_name && (
-                              <>
-                                <span>Team</span>
-                                <span>{item.team_name}</span>
-                              </>
-                            )}
+                          <Details className="mt-1.5 gap-y-1 text-xs">
+                            <Detail label="时间">{formatExpiresAt(item.created_at)}</Detail>
+                            {item.team_name && <Detail label="Team">{item.team_name}</Detail>}
                             {item.token_prefix && (
-                              <>
-                                <span>Token</span>
-                                <span className="font-mono">{item.token_prefix}...</span>
-                              </>
+                              <Detail label="兑换码" className="font-mono">
+                                {item.token_prefix}...
+                              </Detail>
                             )}
                             {/* 只有真正授出去的那次才有"到期"可言。失败/提示行里的
                                 到期是这张码的名义面额，显示出来等于给用户一个从
                                 未发生过的到期时间。成功且为空则是真的永久。 */}
                             {(item.result === 'success' || item.expires_at) && (
-                              <>
-                                <span>到期</span>
-                                <span>{formatExpiresAt(item.expires_at)}</span>
-                              </>
+                              <Detail label="到期">{formatExpiresAt(item.expires_at)}</Detail>
                             )}
                             {item.error_message && (
-                              <>
-                                <span>错误</span>
-                                <span className="text-red-500 dark:text-red-400">{item.error_message}</span>
-                              </>
+                              <Detail label="原因" className="text-red-600 dark:text-red-400">
+                                {item.error_message}
+                              </Detail>
                             )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-md shadow-blue-500/20 transition-all disabled:opacity-60"
-            >
-              {loading ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : tab === 'query' ? (
-                <Search size={16} />
-              ) : (
-                <ArrowRight size={16} />
-              )}
-              {loading ? '处理中...' : tab === 'query' ? '查询' : '确认'}
-            </button>
-          </form>
+                          </Details>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                )}
+              </ResultPanel>
+            </>
+          )}
         </div>
       </div>
-    </div>
+    </PublicShell>
   );
 }

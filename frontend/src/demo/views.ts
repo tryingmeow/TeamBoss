@@ -576,7 +576,7 @@ export function financeOverview(db: DemoDb): FinanceOverview {
       alerts.push({ type: 'token_expired', team_id: team.id, team_name: team.name, detail: 'Token 已过期，需要重新认证' });
     }
     if (team.subscription_status === 'expired') {
-      alerts.push({ type: 'subscription_expired', team_id: team.id, team_name: team.name, detail: '团队订阅已到期' });
+      alerts.push({ type: 'subscription_expired', team_id: team.id, team_name: team.name, detail: 'Team 订阅已到期' });
     }
     if (latest && (latest.reconciliation === 'over' || latest.reconciliation === 'under')) {
       const word = (latest.diff_native ?? 0) > 0 ? '多' : '少';

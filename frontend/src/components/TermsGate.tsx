@@ -1,5 +1,8 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
+import { cn } from '../lib/utils';
+import PublicShell from './PublicShell';
+import { BUTTON, CARD } from './ui';
 
 /**
  * 后台首次打开时的使用条款确认。
@@ -25,7 +28,7 @@ const TERMS: { title: string; body: string }[] = [
   },
   {
     title: '你要交出的是主账号的完整登录凭证',
-    body: '接入团队需要你提供 owner 账号的会话数据（access token + session cookie）。它以明文存放在这台服务器的数据卷里。任何拿到这台服务器、这个数据卷或它的备份的人，都能完全接管你的工作区。',
+    body: '接入 Team 需要你提供 owner 账号的会话数据（access token + session cookie）。它以明文存放在这台服务器的数据卷里。任何拿到这台服务器、这个数据卷或它的备份的人，都能完全接管你的工作区。',
   },
   {
     title: '账号有被限制或封禁的可能',
@@ -68,45 +71,41 @@ export default function TermsGate({ children }: TermsGateProps) {
   if (accepted) return <>{children}</>;
 
   return (
-    <div className="min-h-screen bg-[#0f1117] flex items-center justify-center px-4 py-8">
-      <div className="w-full max-w-2xl rounded-2xl bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] shadow-2xl overflow-hidden">
-        <div className="flex items-center gap-3 px-6 py-5 border-b border-gray-200 dark:border-[#2a2d3a]">
-          <div className="w-10 h-10 shrink-0 rounded-xl bg-amber-500/10 flex items-center justify-center">
-            <AlertTriangle size={20} className="text-amber-500" />
+    <PublicShell title="使用条款" width="xl">
+      <div className={cn(CARD, 'shadow-sm')}>
+        <div className="flex items-start gap-3 border-b border-gray-200 px-5 py-5 sm:px-7 dark:border-ink-800">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-50 dark:bg-amber-500/15">
+            <AlertTriangle size={20} className="text-amber-600 dark:text-amber-400" />
           </div>
-          <div>
-            <h1 className="text-lg font-bold text-gray-900 dark:text-gray-100">使用前请先读完</h1>
-            <p className="text-xs text-gray-500 dark:text-gray-400">
-              TeamBoss · 首次在这台设备上打开后台
+          <div className="min-w-0">
+            <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">使用前请先读完</h1>
+            <p className="mt-0.5 text-sm text-gray-500 dark:text-ink-400">
+              第一次在这台设备上打开管理后台，需要先确认以下内容。
             </p>
           </div>
         </div>
 
-        <div className="px-6 py-5 space-y-4 max-h-[55vh] overflow-y-auto">
+        <ol className="space-y-5 px-5 py-6 sm:px-7">
           {TERMS.map((term, index) => (
-            <div key={term.title} className="flex gap-3">
-              <span className="shrink-0 w-6 h-6 rounded-full bg-gray-100 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] flex items-center justify-center text-xs font-semibold text-gray-500 dark:text-gray-400">
+            <li key={term.title} className="flex gap-3">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600 dark:bg-ink-800 dark:text-ink-300">
                 {index + 1}
               </span>
-              <div>
-                <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
-                  {term.title}
-                </h2>
-                <p className="mt-1 text-sm leading-relaxed text-gray-600 dark:text-gray-400">
-                  {term.body}
-                </p>
+              <div className="min-w-0">
+                <h2 className="text-sm font-semibold leading-6 text-gray-900 dark:text-gray-100">{term.title}</h2>
+                <p className="mt-1 text-sm leading-relaxed text-gray-600 dark:text-ink-300">{term.body}</p>
               </div>
-            </div>
+            </li>
           ))}
-        </div>
+        </ol>
 
-        <div className="px-6 py-5 border-t border-gray-200 dark:border-[#2a2d3a] bg-gray-50 dark:bg-[#161923]">
-          <label className="flex items-start gap-3 cursor-pointer select-none">
+        <div className="sticky bottom-0 rounded-b-xl border-t border-gray-200 bg-gray-50 px-5 py-4 sm:px-7 sm:py-5 dark:border-ink-800 dark:bg-ink-925">
+          <label className="flex cursor-pointer select-none items-start gap-3 py-1">
             <input
               type="checkbox"
               checked={checked}
               onChange={(event) => setChecked(event.target.checked)}
-              className="mt-0.5 w-4 h-4 shrink-0 rounded border-gray-300 dark:border-[#2a2d3a] text-blue-600 focus:ring-2 focus:ring-blue-500/50"
+              className="mt-0.5 size-4 shrink-0 cursor-pointer accent-blue-600"
             />
             <span className="text-sm text-gray-700 dark:text-gray-300">
               我已读完以上全部内容，理解其中的风险，并自行承担后果。
@@ -117,15 +116,15 @@ export default function TermsGate({ children }: TermsGateProps) {
             type="button"
             onClick={handleAccept}
             disabled={!checked}
-            className="mt-4 w-full px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            className={cn(BUTTON.primary, 'mt-3 w-full py-2.5')}
           >
             同意并继续
           </button>
-          <p className="mt-3 text-xs text-center text-gray-500 dark:text-gray-400">
+          <p className="mt-2.5 text-center text-xs text-gray-500 dark:text-ink-400">
             不同意请直接关闭页面，并停止使用本项目。
           </p>
         </div>
       </div>
-    </div>
+    </PublicShell>
   );
 }
