@@ -409,9 +409,11 @@ class ConfirmRacesRefundTest(_RowsCase):
         ):
             return self._admin_confirm(token_use_id)
 
-    def _logged_actions(self):
+    def _logged_actions(self, after_id=0):
         conn = self._conn()
-        rows = conn.execute("SELECT action, result FROM operation_logs ORDER BY id").fetchall()
+        rows = conn.execute(
+            "SELECT action, result FROM operation_logs WHERE id > ? ORDER BY id", (after_id,)
+        ).fetchall()
         conn.close()
         return [(r["action"], r["result"]) for r in rows]
 
@@ -429,6 +431,21 @@ class ConfirmRacesRefundTest(_RowsCase):
         )
         self.assertEqual(self._use(token_use_id)["result"], "failed")
         self.assertEqual(self._expiry_rows(), [])
+
+    def test_skipped_fallback_is_logged_as_skipped_not_as_a_write_failure(self):
+        token_use_id = self._invite_confirmed_but_local_write_failed()
+        self._lock_interrupted(token_use_id)
+        # The setup's own (genuine) write failure is logged too; look past it.
+        conn = self._conn()
+        last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM operation_logs").fetchone()[0]
+        conn.close()
+
+        with self.assertRaises(HTTPException):
+            self._confirm_after_refund(token_use_id)
+
+        actions = self._logged_actions(after_id=last_id)
+        self.assertIn(("member_expiry_write_skipped", "skipped"), actions)
+        self.assertNotIn("member_expiry_write_failed", [a for a, _ in actions])
 
 
 if __name__ == "__main__":

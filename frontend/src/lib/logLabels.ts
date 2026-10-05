@@ -44,6 +44,7 @@ const ACTION_LABELS: Record<string, string> = {
   remove_expiry: '取消到期',
   member_cache_refresh: '刷新成员缓存',
   member_expiry_write_failed: '到期记录写入失败',
+  member_expiry_write_skipped: '兑换已结束，无需补记',
   invite_gpt_member: '添加 GPT 成员',
   invite_gpt_member_existing: '添加 GPT 成员（已在 Team）',
   invite_gpt_member_lookup: '添加 GPT 成员（查询失败）',

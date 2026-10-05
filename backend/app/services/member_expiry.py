@@ -957,7 +957,11 @@ async def _persist_confirmed_membership(
             "record_confirmed_invite: FAILED to persist pending_invite_reconciliations "
             "row too (%s). %s", exc, backfill_detail,
         )
+    log_action, log_result = "member_expiry_write_failed", "failed"
     if not inserted:
+        # 单独的动作名：后台把它显示成「兑换已结束，无需补记」，不能和真正需要人工
+        # 补记的"到期记录写入失败"混在一起（管理员会据此给已退码的码手动记时长）。
+        log_action, log_result = "member_expiry_write_skipped", "skipped"
         # 这次兑换在重试期间已被别的路径结清：确认成功（时长已记过一次），或管理员
         # 核实原 Team 里没有这个人后退码。两种都没有要回填的东西，也就不留行。
         backfill_detail = (
@@ -969,10 +973,10 @@ async def _persist_confirmed_membership(
     try:
         await log_operation(
             team_id,
-            "member_expiry_write_failed",
+            log_action,
             email,
             backfill_detail,
-            "failed",
+            log_result,
             error_text,
         )
     except Exception as exc:  # pragma: no cover - defensive
