@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { fetchLogs as fetchLogsApi, type OperationLog } from '../../api/client';
 import { ChevronLeft, ChevronRight, Download, Search } from 'lucide-react';
 import { formatDateSafe } from '../../lib/formatDate';
@@ -155,6 +155,15 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
     }
   };
 
+  // Team names seen on this page, so error lists of team ids can be shown by name.
+  const teamNames = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const log of logs) {
+      if (log.team_id && log.team_name) names.set(log.team_id, log.team_name);
+    }
+    return names;
+  }, [logs]);
+
   const resultPill = (log: OperationLog) => {
     const meta = logResultMeta(log.result);
     return <span className={cn(PILL, TONE[meta.tone])}>{meta.label}</span>;
@@ -185,7 +194,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
         )}
         {log.error_message && (
           <div className="mt-1 line-clamp-3 break-words rounded-md bg-red-50 px-2 py-1 text-xs text-red-700 dark:bg-red-500/10 dark:text-red-300" title={log.error_message}>
-            {formatLogError(log.error_message)}
+            {formatLogError(log.error_message, (id) => teamNames.get(id))}
           </div>
         )}
       </>
@@ -216,7 +225,7 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
       ) : (
         <>
           {/* Wide screens: table */}
-          <table className="hidden w-full table-fixed text-left text-sm lg:table">
+          <table className="hidden w-full table-fixed text-left text-sm xl:table">
             <colgroup>
               <col className="w-[5.5rem]" />
               <col className="w-[13%]" />
@@ -256,8 +265,8 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
             </tbody>
           </table>
 
-          {/* Narrow screens: one block per entry */}
-          <ul className="divide-y divide-gray-100 lg:hidden dark:divide-ink-800">
+          {/* Below 1280px: one block per entry */}
+          <ul className="divide-y divide-gray-100 xl:hidden dark:divide-ink-800">
             {logs.map((log, i) => (
               <li key={log.id ?? i} className="space-y-1.5 px-4 py-3.5 text-sm">
                 <div className="flex items-center gap-2">

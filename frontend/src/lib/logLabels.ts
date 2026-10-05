@@ -392,12 +392,19 @@ const TEAM_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$|^[0-9a-f]{24,}$/i
 
 /**
  * Some jobs store a list of team ids as the error ("id1,id2" or "id1: reason; id2: reason").
- * Shorten the ids the same way the rest of the UI does; any other error text is returned as is.
+ * Ids become Team names when the caller knows them, otherwise the usual 8-character short id;
+ * any other error text is returned as is.
  */
-export function formatLogError(message: string | null | undefined): string | null {
+export function formatLogError(
+  message: string | null | undefined,
+  teamName: (teamId: string) => string | undefined = () => undefined,
+): string | null {
   if (!message) return null;
   const text = message.trim();
-  const short = (id: string) => id.slice(0, 8);
+  // A structured error stored as a Python dict repr: show its message only.
+  const dictMessage = /^\{.*['"]message['"]:\s*['"]([^'"]+)['"].*\}$/s.exec(text);
+  if (dictMessage) return dictMessage[1];
+  const short = (id: string) => teamName(id) ?? id.slice(0, 8);
   const ids = text.split(/\s*,\s*/);
   if (ids.length > 0 && ids.every((id) => TEAM_ID.test(id))) {
     return `涉及 Team：${ids.map(short).join('、')}`;

@@ -48,6 +48,39 @@ const FIELD_LABEL = 'mb-1.5 flex items-baseline gap-1.5 text-sm font-medium text
 // 16px on phones keeps iOS Safari from zooming in when the field gets focus.
 const FIELD_INPUT = cn(INPUT, 'py-2.5 text-base sm:text-sm');
 
+/**
+ * Backend messages still say "Token" and 车队 ("Token 无效"); this page says 兑换码 and Team.
+ * Only "Token" followed by Chinese is rewritten, so upstream English errors stay intact.
+ */
+function friendlyError(message: string): string {
+  return message
+    .replace(/Token\s*(?=[\u4e00-\u9fff])/g, '兑换码')
+    .replace(/\s*车队\s*/g, ' Team ')
+    .trim();
+}
+
+/** Codes the backend stores as a redemption's error, shown to the member who owns it. */
+const HISTORY_ERRORS: Record<string, string> = {
+  no_active_team: '当时没有可用的 Team',
+  no_available_seat: '当时没有空余席位',
+  team_choice_unknown: '没有选择 Team',
+  team_choice_not_found: '所选 Team 不存在',
+  team_choice_vanished: '所选 Team 已不可用',
+  owner_email: 'Owner 邮箱不支持自助续期',
+  permanent_membership: '永久有效，无需续期',
+  request_aborted: '请求中断，兑换码未使用',
+  'local redemption interrupted before remote mutation': '兑换中断，未发出邀请',
+  'OpenAI invite result is uncertain': '邀请结果待确认',
+};
+
+function historyErrorText(message: string): string {
+  const text = message.trim();
+  if (HISTORY_ERRORS[text]) return HISTORY_ERRORS[text];
+  if (text.startsWith('admin_released')) return '管理员已退回这次兑换';
+  if (/^[a-z_]+$/.test(text)) return '未完成';
+  return friendlyError(text);
+}
+
 function choiceExpiryText(choice: RedeemTeamChoice): string {
   // expires_at 为空有两种完全不同的含义，绝不能都写成"永不过期"：
   // permanent 是真的永久（续期会被拒），unmanaged 是本地压根没有到期记录，
@@ -238,7 +271,7 @@ export default function JoinPage() {
         data.status === 'team_selection_required' ? { email: submitEmail, token: submitToken } : null
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : '操作失败');
+      setError(err instanceof Error ? friendlyError(err.message) : '操作失败');
     } finally {
       setRedeemLoading(false);
       setPendingTeamId(null);
@@ -272,7 +305,7 @@ export default function JoinPage() {
       });
       setStatusResult(data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '查询失败');
+      setError(err instanceof Error ? friendlyError(err.message) : '查询失败');
     } finally {
       setQueryLoading(false);
     }
@@ -384,7 +417,7 @@ export default function JoinPage() {
         <div aria-live="polite" className={cn('space-y-3', hasResult && 'mt-5')}>
           {redeemResult?.status === 'team_selection_required' && (
             <ResultPanel tone="info" icon={Users} title="请选择要续期的 Team">
-              <p className="text-sm text-gray-600 dark:text-ink-300">{redeemResult.message}</p>
+              <p className="text-sm text-gray-600 dark:text-ink-300">{friendlyError(redeemResult.message)}</p>
               <div className="mt-3 space-y-2">
                 {redeemResult.choices.map((choice: RedeemTeamChoice) => {
                   const blocked = choiceBlockedText(choice);
@@ -438,7 +471,7 @@ export default function JoinPage() {
 
           {redeemResult?.status === 'pending_confirmation' && (
             <ResultPanel tone="warning" icon={Clock3} title="结果确认中">
-              <p className="text-sm text-gray-600 dark:text-ink-300">{redeemResult.message}</p>
+              <p className="text-sm text-gray-600 dark:text-ink-300">{friendlyError(redeemResult.message)}</p>
             </ResultPanel>
           )}
 
@@ -554,7 +587,7 @@ export default function JoinPage() {
                             )}
                             {item.error_message && (
                               <Detail label="原因" className="text-red-600 dark:text-red-400">
-                                {item.error_message}
+                                {historyErrorText(item.error_message)}
                               </Detail>
                             )}
                           </Details>
