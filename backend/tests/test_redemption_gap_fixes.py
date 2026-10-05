@@ -3,6 +3,7 @@
 每条对应一个已确认的缺陷，断言的是"修好之后的行为"，不是实现细节。
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys

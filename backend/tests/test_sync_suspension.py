@@ -5,6 +5,7 @@
 测试钉住挂起、探活、恢复三段行为，以及挂起的 Team 绝不能进巡逻。
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import sqlite3
 import sys
 import unittest

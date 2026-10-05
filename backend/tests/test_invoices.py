@@ -6,6 +6,7 @@
 2. 对账在原币种内完成，容差 max(推算值 1%, 原币 1.00)。
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys

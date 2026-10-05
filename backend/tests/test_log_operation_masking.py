@@ -1,5 +1,6 @@
 """Regression coverage: log_operation must mask secrets in free-text fields."""
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys

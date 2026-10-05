@@ -1,5 +1,6 @@
 """Regression coverage for the admin-only expiry extension endpoint."""
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import json
 import sqlite3

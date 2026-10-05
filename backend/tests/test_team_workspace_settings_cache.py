@@ -1,3 +1,4 @@
+import _isolation  # noqa: F401  must precede any app import
 import json
 import sys
 import unittest

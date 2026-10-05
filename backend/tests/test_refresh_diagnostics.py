@@ -10,6 +10,7 @@ the Team meanwhile, the refresh's result belongs to the old session and must not
 overwrite the imported tokens or change status/auth_state.
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import hashlib
 import io

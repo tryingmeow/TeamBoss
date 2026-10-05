@@ -5,6 +5,7 @@
 也标成已踢，更不能拿 A 队的凭据去 B 队删人。
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import os
 import sqlite3

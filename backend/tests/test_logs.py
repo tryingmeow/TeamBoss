@@ -1,3 +1,4 @@
+import _isolation  # noqa: F401  must precede any app import
 import unittest
 from pathlib import Path
 import sqlite3

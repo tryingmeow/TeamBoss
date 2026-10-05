@@ -1,5 +1,6 @@
 """Regression coverage: session import errors must not echo submitted tokens back."""
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sys
 import tempfile

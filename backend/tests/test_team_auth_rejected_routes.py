@@ -6,6 +6,7 @@ sync, member-expiry edits and manual token refresh used to answer with a bare
 state to ``ok``.
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys

@@ -1,5 +1,6 @@
 """Regression coverage: GET /api/settings must not leak non-allowlisted secrets."""
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys

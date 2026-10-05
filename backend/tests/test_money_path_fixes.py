@@ -11,6 +11,7 @@
 7. 匿名查询的兑换历史需要出示这个邮箱自己的兑换码。
 """
 
+import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import json
 import sqlite3
