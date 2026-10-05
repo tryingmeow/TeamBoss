@@ -304,6 +304,28 @@ class EntitlementPatrolSafetyGuardsTest(_EntitlementBase):
                 self.assertEqual(self._over_quota_actions(team_id), [])
                 self.assertEqual(len(self._entitlement_alerts(team_id)), 1)
 
+    def test_unconfirmed_stored_entitlement_keeps_stranger_revokes_and_strict_mode(self):
+        # 库里有上一轮的合法值、本轮没确认：只跳过超员踢人，撤陌生邀请和严格模式照常。
+        for index, subscription in enumerate(
+            (_subscription(None), _subscription(), dict(SUBSCRIPTION_CALL_ERROR))
+        ):
+            team_id = f"team-stale-duties-{index}"
+            with self.subTest(subscription=subscription):
+                self._add_team(team_id, stored_entitled=1, subscription=subscription)
+                self._sync()
+                self.assertIn(
+                    ("revoke_invite", f"stray@{team_id}.example"), self.upstream_writes
+                )
+                self.assertEqual(
+                    [log["target_email"] for log in self._logs("patrol_strict_flagged", team_id)],
+                    [f"intruder@{team_id}.example"],
+                )
+                self.assertEqual(
+                    len(self._logs("patrol_skip_unconfirmed_entitlement", team_id)), 1
+                )
+                self.assertEqual(self._over_quota_actions(team_id), [])
+                self.assertEqual(self._logs("patrol_job_error"), [])
+
     def test_suspended_team_still_failing_subscription_stays_out_of_patrol(self):
         self._add_team(
             TEAM, stored_entitled=None, subscription=dict(SUBSCRIPTION_CALL_ERROR),

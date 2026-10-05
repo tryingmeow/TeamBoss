@@ -975,31 +975,34 @@ ENTITLEMENT_ALERT_KEY = "seats_entitled"
 ENTITLEMENT_ALERT_INTERVAL = timedelta(hours=24)
 
 
-def _admit_team_with_unconfirmed_entitlement(conn, team_id, problem, allow_ids):
-    """成员快照是新的、但本轮没确认 seats_entitled：决定进不进巡逻白名单，并提醒管理员。
+def _admit_team_with_unconfirmed_entitlement(conn, team_id, problem, allow_ids, skip_over_quota_ids):
+    """成员快照是新的、但本轮没确认 seats_entitled：放进巡逻白名单，并提醒管理员。
 
-    撤陌生邀请和严格模式只看成员/邀请快照；只有超员踢人拿 seats_entitled 当分母。
+    撤陌生邀请和严格模式只看成员/邀请快照，照常执行；只有超员踢人拿 seats_entitled
+    当分母，这一段必须跳过：
 
-    * 库里的值不是正整数（未知）：放进白名单。run_patrol 自己跳过超员那一段
-      （patrol_skip_invalid_entitlement），撤陌生邀请、严格模式照常。
-    * 库里还留着之前的合法值：不放。run_patrol 只认库里的值，会拿这个本轮没确认
-      过的旧值判超员、踢人；它没有"只跳过超员"的开关，所以只能整队不巡逻。
+    * 库里的值不是正整数（未知）：run_patrol 自己跳过超员那一段
+      （patrol_skip_invalid_entitlement）。
+    * 库里还留着之前的合法值：run_patrol 只认库里的值，会拿这个本轮没确认过的旧值
+      判超员、踢人，所以同时放进 skip_over_quota_ids（patrol_skip_unconfirmed_entitlement）。
+      白名单和跳过集合在这一处一起决定，不能只放其一。
     """
     row = conn.execute(
         "SELECT seats_entitled FROM teams WHERE id = ?", (team_id,)
     ).fetchone()
     stored = row["seats_entitled"] if row else None
+    allow_ids.add(team_id)
     if positive_seat_count(stored) is None:
-        allow_ids.add(team_id)
         detail = (
             f"本轮订阅没给出可用的席位数（{problem}），库里也没有有效值。"
             "巡逻照常撤陌生邀请、执行严格模式，只跳过超员踢人。"
         )
     else:
+        skip_over_quota_ids.add(team_id)
         detail = (
             f"本轮订阅没给出可用的席位数（{problem}）。库里保留的上次值 {stored} "
-            "未经本轮确认，不能用来判超员，所以该 Team 本轮整队不巡逻"
-            "（含撤陌生邀请、严格模式），直到拿到有效值。"
+            "未经本轮确认，不拿它判超员：巡逻照常撤陌生邀请、执行严格模式，"
+            "只跳过超员踢人，直到拿到有效值。"
         )
     report_team_failure_sync(
         team_id,
@@ -1016,9 +1019,11 @@ def data_sync_job():
     # 已挂起的 Team：本轮根本没打请求，既不算失败（不能一直压着摘要不发），
     # 也不能让 patrol 拿着冻住的快照去判超员。
     suspended_team_ids: set[str] = set()
-    # 巡逻白名单：本轮成员/邀请快照完整刷新、且巡逻要用的席位数可信的 team（规则见
-    # 每个 team 末尾的白名单判定）。没进这个集合的 team，这一轮巡逻一个都不碰。
+    # 巡逻白名单：本轮成员/邀请快照完整刷新、且没挂起的 team（规则见每个 team 末尾的
+    # 白名单判定；席位数没确认的只跳过超员踢人）。没进这个集合的 team，这一轮巡逻一个都不碰。
     refreshed_team_ids: set[str] = set()
+    # 白名单里席位数本轮没经上游确认、库里却留着旧合法值的 team：巡逻只跳过超员踢人。
+    unconfirmed_entitlement_team_ids: set[str] = set()
     newly_suspended: list[tuple[str, str]] = []  # (team_id, team_name)
     resumed_from_suspension: list[tuple[str, str]] = []
     teams_with_overview_failures: list[tuple[str, str, list[str]]] = []  # (team_id, team_name, failed_keys)
@@ -1607,7 +1612,11 @@ def data_sync_job():
                         refreshed_team_ids.add(team_id)
                     else:
                         _admit_team_with_unconfirmed_entitlement(
-                            conn, team_id, entitlement_problem, refreshed_team_ids
+                            conn,
+                            team_id,
+                            entitlement_problem,
+                            refreshed_team_ids,
+                            unconfirmed_entitlement_team_ids,
                         )
                 if entitlement_fresh:
                     report_team_recovery_sync(
@@ -1754,6 +1763,7 @@ def data_sync_job():
         run_patrol(
             dry_run=not patrol_live,
             allow_team_ids=refreshed_team_ids,
+            skip_over_quota_team_ids=unconfirmed_entitlement_team_ids,
         )
     except Exception as e:
         _log_operation_sync(None, "patrol_job_error", None, None, "failed", str(e))

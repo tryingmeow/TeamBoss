@@ -390,21 +390,25 @@ class SeatsEntitledGuardTest(_TempDbTest):
              patch.object(tg_summary, "maybe_send_summary_sync", lambda *a, **kw: None):
             app_scheduler.data_sync_job()
         run_patrol.assert_called_once()
+        self.skip_over_quota = set(run_patrol.call_args.kwargs.get("skip_over_quota_team_ids", ()))
         return set(run_patrol.call_args.kwargs["allow_team_ids"])
 
-    def test_scheduled_sync_keeps_previous_entitlement_and_skips_patrol(self):
+    def test_scheduled_sync_keeps_previous_entitlement_and_skips_over_quota(self):
         for bad in _BAD_ENTITLEMENTS + (_MISSING,):
             with self.subTest(seats_entitled=bad):
                 self._set_entitled(5)
                 patrolled = self._run_data_sync(_subscription(bad))
                 self.assertEqual(self._entitled(), (5, "integer"))
-                # 这一轮分母没刷新到可信值，巡逻不碰这个 team。
-                self.assertNotIn("team-1", patrolled)
+                # 这一轮分母没刷新到可信值：巡逻照常撤陌生邀请、执行严格模式，
+                # 但库里留着的 5 不能拿去判超员。
+                self.assertIn("team-1", patrolled)
+                self.assertIn("team-1", self.skip_over_quota)
 
     def test_scheduled_sync_writes_a_valid_entitlement(self):
         patrolled = self._run_data_sync(_subscription(7))
         self.assertEqual(self._entitled(), (7, "integer"))
         self.assertIn("team-1", patrolled)
+        self.assertNotIn("team-1", self.skip_over_quota)
 
     def test_capacity_cache_keeps_previous_entitlement(self):
         from app.services.seat_capacity import update_capacity_cache

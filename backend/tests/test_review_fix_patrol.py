@@ -544,6 +544,23 @@ class PatrolInvalidEntitlementTest(_Base):
         self.assertEqual(self.calls, [("remove_member", "ub-team-valid")])
         self.assertEqual(self._logs("patrol_skip_invalid_entitlement"), [])
 
+    def test_unconfirmed_entitlement_skips_over_quota_kicks_only(self):
+        # 库里的 1 是合法值，但调用方说它本轮没经上游确认：不能拿它判超员。
+        self._armed_team("team-unconfirmed", 1)
+
+        result = patrol.run_patrol(
+            dry_run=False,
+            allow_team_ids=["team-unconfirmed"],
+            skip_over_quota_team_ids=["team-unconfirmed"],
+        )
+
+        self.assertEqual(result["kicked"], 0)
+        self.assertEqual(result["would_kick"], 0)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self._logs("patrol_skip_unconfirmed_entitlement")), 1)
+        self.assertEqual(self._logs("patrol_skip_invalid_entitlement"), [])
+        self.assertEqual(self._logs("patrol_job_error"), [])
+
     def test_central_kick_gate_rejects_invalid_entitlement(self):
         for index, value in enumerate(INVALID_ENTITLEMENTS):
             team_id = f"team-gate-{index}"

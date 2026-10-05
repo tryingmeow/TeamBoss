@@ -1203,7 +1203,12 @@ def _patrol_strict_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id
 
 # ── 主入口 ───────────────────────────────────────────────────────────────
 
-def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
+def run_patrol(
+    dry_run: bool,
+    allow_team_ids: Iterable[str],
+    *,
+    skip_over_quota_team_ids: Iterable[str] = (),
+) -> dict:
     """跑一轮巡逻。返回 {"events": [...], "kicked": int, "would_kick": int, ...}。
 
     events 里每条要么是某个候选的踢人/预演动作记录，要么是豁免 Team 的
@@ -1219,6 +1224,12 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
 
     白名单已经隐含了"同步失败的 team 不巡逻"和"挂起的 team 不巡逻"，调用方不需要
     再额外传排除集合；同理，这里也不需要任何缓存新鲜度检查。
+
+    ``skip_over_quota_team_ids``：白名单里这些 team 的成员快照是本轮新拉的，但库里
+    的 seats_entitled 本轮没经上游确认（订阅接口报错、没给出正整数），只是上一轮
+    留下的值。超员踢人是唯一拿它当分母的一段，这些 team 只跳过这一段；撤陌生邀请、
+    严格模式不看席位数，照常执行。调用方把一个 team 放进白名单却漏放进这里，等于拿
+    未确认的旧席位数判超员，所以两者必须在同一处决定（scheduler 的白名单判定）。
     """
     events: list[dict] = []
     kicked = 0
@@ -1229,6 +1240,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
     strict_would_kick = 0
     conn: Optional[sqlite3.Connection] = None
     allow_ids = {str(x) for x in (allow_team_ids or ())}
+    skip_over_quota_ids = {str(x) for x in (skip_over_quota_team_ids or ())}
 
     try:
         conn = _get_sync_db()
@@ -1555,6 +1567,18 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                 events.append({
                     "team_id": team_id, "team_name": name,
                     "action": "skip_invalid_entitlement",
+                })
+                continue
+            # 库里的值合法但本轮没经上游确认（见 skip_over_quota_team_ids）：同样只跳过超员。
+            if str(team_id) in skip_over_quota_ids and not codex_enabled:
+                _log_operation_sync(
+                    team_id, "patrol_skip_unconfirmed_entitlement", None,
+                    f"stored seats_entitled={repr(team['seats_entitled'])[:64]} not confirmed this round",
+                    "skipped",
+                )
+                events.append({
+                    "team_id": team_id, "team_name": name,
+                    "action": "skip_unconfirmed_entitlement",
                 })
                 continue
 
