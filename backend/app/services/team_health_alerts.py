@@ -37,6 +37,7 @@ REPEAT_ALERT_INTERVAL = timedelta(hours=6)
 _ALERT_LABELS = {
     "chatgpt_auth": "ChatGPT 鉴权",
     "team_sync": "Team 数据同步",
+    "seats_entitled": "席位数（seats_entitled）",
 }
 
 
@@ -148,8 +149,15 @@ def report_team_failure_sync(
     error: Any,
     *,
     source: str,
+    notify_interval: Optional[timedelta] = None,
 ) -> dict:
-    """Open/update an incident and notify only when it has not been delivered."""
+    """Open/update an incident and notify only when it has not been delivered.
+
+    ``notify_interval``: for conditions that can flap between rounds. Admins hear
+    about this (team, alert_key) at most once per interval, counted from the last
+    delivered alert, and a recovery in between does not reopen the window. It also
+    replaces REPEAT_ALERT_INTERVAL as the reminder interval for an open incident.
+    """
     if not team_id:
         return {"notified": 0, "reason": "missing_team_id"}
 
@@ -171,20 +179,31 @@ def report_team_failure_sync(
             now_dt = _parse_iso(now) or datetime.now(timezone.utc)
             first_failed_at = None
             is_reminder = False
+            # 上一次真正发出去的时间。事件恢复后再开新事件时这一列不会被清掉，
+            # notify_interval 靠它跨事件限频。
+            last_notified_at = None
+            if row is not None and "last_notified_at" in row.keys():
+                last_notified_at = _parse_iso(row["last_notified_at"])
+            within_notify_interval = bool(
+                notify_interval is not None
+                and last_notified_at is not None
+                and now_dt - last_notified_at < notify_interval
+            )
             if row and row["status"] == "open":
                 failure_count = int(row["failure_count"] or 0) + 1
                 first_failed_at = _parse_iso(row["first_failed_at"])
                 # 已经通知过的故障默认静音，但静音有期限：超过 REPEAT_ALERT_INTERVAL
                 # 仍未恢复就再提醒一次，免得一条深夜的告警被顶走后再无人知晓。
-                last_notified_at = _parse_iso(
-                    row["last_notified_at"] if "last_notified_at" in row.keys() else None
-                )
                 already_notified = bool(row["notified"])
                 if already_notified:
                     reference = last_notified_at or first_failed_at
-                    if reference and now_dt - reference >= REPEAT_ALERT_INTERVAL:
+                    interval = notify_interval or REPEAT_ALERT_INTERVAL
+                    if reference and now_dt - reference >= interval:
                         already_notified = False
                         is_reminder = True
+                elif within_notify_interval:
+                    # 这次事件开在限频窗口里（中间恢复过又坏了），还没提醒过，继续静音。
+                    already_notified = True
                 conn.execute(
                     """UPDATE team_health_incidents
                        SET last_failed_at = ?, last_error = ?, last_source = ?,
@@ -194,7 +213,9 @@ def report_team_failure_sync(
                 )
             else:
                 failure_count = 1
-                already_notified = False
+                # 新事件：notify_interval 窗口内恢复过又坏了，就不再提醒。新事件的
+                # notified 仍记 0，于是它恢复时也不会再发一条"恢复"。
+                already_notified = within_notify_interval
                 conn.execute(
                     """INSERT INTO team_health_incidents
                        (team_id, alert_key, status, first_failed_at, last_failed_at,

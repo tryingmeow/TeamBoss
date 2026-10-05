@@ -969,14 +969,55 @@ def _classify_overview_failures(
     return overview_failures, display_failures, enforcement_failures
 
 
+# 席位数没经本轮确认时提醒管理员：复用 team_health_incidents 的去重，同一 Team
+# 24 小时最多一条，中间恢复过也不重开窗口（订阅接口偶发报错会来回抖）。
+ENTITLEMENT_ALERT_KEY = "seats_entitled"
+ENTITLEMENT_ALERT_INTERVAL = timedelta(hours=24)
+
+
+def _admit_team_with_unconfirmed_entitlement(conn, team_id, problem, allow_ids):
+    """成员快照是新的、但本轮没确认 seats_entitled：决定进不进巡逻白名单，并提醒管理员。
+
+    撤陌生邀请和严格模式只看成员/邀请快照；只有超员踢人拿 seats_entitled 当分母。
+
+    * 库里的值不是正整数（未知）：放进白名单。run_patrol 自己跳过超员那一段
+      （patrol_skip_invalid_entitlement），撤陌生邀请、严格模式照常。
+    * 库里还留着之前的合法值：不放。run_patrol 只认库里的值，会拿这个本轮没确认
+      过的旧值判超员、踢人；它没有"只跳过超员"的开关，所以只能整队不巡逻。
+    """
+    row = conn.execute(
+        "SELECT seats_entitled FROM teams WHERE id = ?", (team_id,)
+    ).fetchone()
+    stored = row["seats_entitled"] if row else None
+    if positive_seat_count(stored) is None:
+        allow_ids.add(team_id)
+        detail = (
+            f"本轮订阅没给出可用的席位数（{problem}），库里也没有有效值。"
+            "巡逻照常撤陌生邀请、执行严格模式，只跳过超员踢人。"
+        )
+    else:
+        detail = (
+            f"本轮订阅没给出可用的席位数（{problem}）。库里保留的上次值 {stored} "
+            "未经本轮确认，不能用来判超员，所以该 Team 本轮整队不巡逻"
+            "（含撤陌生邀请、严格模式），直到拿到有效值。"
+        )
+    report_team_failure_sync(
+        team_id,
+        ENTITLEMENT_ALERT_KEY,
+        detail,
+        source="scheduled_data_sync",
+        notify_interval=ENTITLEMENT_ALERT_INTERVAL,
+    )
+
+
 def data_sync_job():
     sync_completed = False
     failed_team_ids: set[str] = set()
     # 已挂起的 Team：本轮根本没打请求，既不算失败（不能一直压着摘要不发），
     # 也不能让 patrol 拿着冻住的快照去判超员。
     suspended_team_ids: set[str] = set()
-    # 本轮真正刷新成功的 team（成员/邀请名单 + 订阅 + 席位数全部拿到）。这是巡逻
-    # 的白名单：没进这个集合的 team，这一轮巡逻一个都不碰。
+    # 巡逻白名单：本轮成员/邀请快照完整刷新、且巡逻要用的席位数可信的 team（规则见
+    # 每个 team 末尾的白名单判定）。没进这个集合的 team，这一轮巡逻一个都不碰。
     refreshed_team_ids: set[str] = set()
     newly_suspended: list[tuple[str, str]] = []  # (team_id, team_name)
     resumed_from_suspension: list[tuple[str, str]] = []
@@ -1000,6 +1041,10 @@ def data_sync_job():
             suspended_at = team["sync_suspended_at"]
             last_full_sync_at = team["last_full_sync_at"]
             round_ok = False
+            # 成员/邀请快照完整拿到，且除订阅外的执行输入都没报错。订阅只喂超员踢人
+            # 的分母，它出问题不该连撤陌生邀请、严格模式一起停掉（见白名单判定）。
+            # round_ok 仍要求订阅也成功：挂起计时照旧。
+            snapshot_ok = False
 
             # 挂起中且没到探活点：这一轮对这个 Team 一个请求都不发。
             if suspended_at and not _sync_probe_due(team["sync_probe_at"], datetime.now(timezone.utc)):
@@ -1049,10 +1094,16 @@ def data_sync_job():
                 params = []
 
                 # seats_entitled 是 patrol 算 over_by 的分母。这一轮没拿到合法值
-                # （null / 0 / 非正整数 / 缺失）时库里保留上一次的值，但那已经不是
-                # 本轮刷新出来的输入，这个 team 本轮不进巡逻白名单（见 round_ok 处）。
+                # （null / 0 / 非正整数 / 缺失 / 订阅接口报错）时库里保留上一次的值，
+                # 但那已经不是本轮确认过的输入，不能拿去判超员（见白名单判定）。
                 entitlement_fresh = False
+                entitlement_problem = "订阅接口报错"
                 if "error" not in subscription:
+                    entitlement_problem = (
+                        "响应里没有 seats_entitled"
+                        if "seats_entitled" not in subscription
+                        else "seats_entitled 不是正整数"
+                    )
                     # 缺字段不写、seats_entitled 只认正整数：规则见
                     # seat_capacity.subscription_column_updates。
                     for col, value in subscription_column_updates(
@@ -1489,6 +1540,7 @@ def data_sync_job():
                     # 席位数）一个没漏，才算这一轮成功。展示接口失败照常播报，
                     # 但不参与挂起计时——见 enforcement_failures 处的说明。
                     round_ok = not enforcement_failures
+                    snapshot_ok = not (set(enforcement_failures) - {"subscription"})
                     if display_failures and not enforcement_failures:
                         logger.warning(
                             "data_sync: display-only sub-interface failures on team=%s: %s "
@@ -1528,18 +1580,6 @@ def data_sync_job():
                         source="scheduled_data_sync",
                     )
 
-                if round_ok and entitlement_fresh:
-                    refreshed_team_ids.add(team_id)
-                elif round_ok:
-                    _log_operation_sync(
-                        team_id,
-                        "data_sync",
-                        None,
-                        "subscription returned no valid seats_entitled; "
-                        "kept the previous value and left this team out of patrol this round",
-                        "warning",
-                    )
-
                 event = _record_team_sync_outcome(
                     conn,
                     team_id,
@@ -1558,6 +1598,21 @@ def data_sync_job():
                     # 一次的探针会把日报摘要一并掐掉。
                     failed_team_ids.discard(team_id)
                     suspended_team_ids.add(team_id)
+
+                # ── 巡逻白名单 ──
+                # 挂起中（包括本轮刚挂起）的 team 不进：它的快照不再按时刷新。
+                suspended_now = event == "suspended" or bool(suspended_at and event != "resumed")
+                if snapshot_ok and not suspended_now:
+                    if entitlement_fresh:
+                        refreshed_team_ids.add(team_id)
+                    else:
+                        _admit_team_with_unconfirmed_entitlement(
+                            conn, team_id, entitlement_problem, refreshed_team_ids
+                        )
+                if entitlement_fresh:
+                    report_team_recovery_sync(
+                        team_id, ENTITLEMENT_ALERT_KEY, source="scheduled_data_sync"
+                    )
 
             except Exception as e:
                 try:
