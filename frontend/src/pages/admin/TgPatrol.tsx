@@ -206,7 +206,11 @@ function PatrolSection() {
       const result = await activatePatrol();
       setShowKickConfirm(false);
       await loadStatus();
-      showToast(`已保护现有成员并开启自动踢人（保护 ${result.grandfathered + result.backfilled} 人）`);
+      const kept = result.detected_kept ?? 0;
+      showToast(
+        `已开启自动踢人（新保护 ${result.grandfathered + result.backfilled} 人` +
+          (kept > 0 ? `，${kept} 个之前检测到的外部成员/邀请仍是巡逻对象）` : '）'),
+      );
     } catch (err) {
       console.error(err);
       showToast(err instanceof Error ? err.message : '开启自动踢人失败', 'error');
@@ -299,7 +303,7 @@ function PatrolSection() {
                 {patrolRuleText(status.sync_interval_minutes)}
                 {status.baseline_at && (
                   <span className="mt-1 block text-xs">
-                    上次保护现有成员：{formatDateSafe(status.baseline_at, 'MM-dd HH:mm:ss')}
+                    上次开启自动踢人：{formatDateSafe(status.baseline_at, 'MM-dd HH:mm:ss')}
                   </span>
                 )}
               </>
@@ -388,13 +392,13 @@ function PatrolSection() {
           <Dialog.Content className={DIALOG_CONTENT}>
             <Dialog.Title className={cn(DIALOG_TITLE, 'flex items-center gap-2')}>
               <AlertTriangle className="size-5 shrink-0 text-amber-500" />
-              保护现有成员并开启自动踢人
+              开启自动踢人
             </Dialog.Title>
             <Dialog.Description className={DIALOG_TEXT}>
               请先确认各 Team 现在的成员都是你认可的。
               <br />
               <br />
-              确认后会实时刷新全部成员，把当前成员和邀请都列为受保护，再开启自动踢人。
+              确认后会实时刷新全部成员，再开启自动踢人。第一次纳入巡逻的 Team，当前成员和邀请都会列为受保护；已经纳入过巡逻的 Team 只补登系统里还没有记录的人，之前已检测到的外部成员和邀请不会因为重新开启而被保护。
               {patrolRuleText(status.sync_interval_minutes)}
             </Dialog.Description>
             <div className={DIALOG_ACTIONS}>

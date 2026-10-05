@@ -535,5 +535,25 @@ class PatrolInvalidEntitlementTest(_Base):
         self.assertEqual(self.calls, [("revoke_invite", "stray@x.com")])
 
 
+class TelegramPatrolOnCopyTest(unittest.TestCase):
+    """/patrol on 的回复不能再说"已豁免当前成员"：重新开启时之前检测到的外部成员仍是巡逻对象。"""
+
+    def _reply(self, payload):
+        from app import tg_bot
+
+        with patch.object(tg_bot, "_api_post", return_value=payload):
+            return tg_bot.cmd_patrol({}, "on")
+
+    def test_reports_detected_kept(self):
+        text = self._reply({"status": "ok", "grandfathered": 0, "backfilled": 1, "detected_kept": 2})
+        self.assertNotIn("已豁免当前成员", text)
+        self.assertIn("2 个未被保护", text)
+
+    def test_no_warning_when_nothing_kept(self):
+        text = self._reply({"status": "ok", "grandfathered": 5, "backfilled": 0, "detected_kept": 0})
+        self.assertIn("已开启巡逻自动踢人", text)
+        self.assertNotIn("未被保护", text)
+
+
 if __name__ == "__main__":
     unittest.main()

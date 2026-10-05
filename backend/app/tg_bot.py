@@ -736,10 +736,16 @@ def cmd_patrol(user: dict, args: str) -> str:
     sub = (args or "").strip().lower()
     if sub == "on":
         try:
-            _api_post("/api/patrol/activate", timeout=180)
+            result = _api_post("/api/patrol/activate", timeout=180)
         except Exception as exc:
             return f"操作失败：{exc}"
-        return "✅ 已豁免当前成员并开启巡逻自动踢人。"
+        # 只有第一次纳入巡逻的 Team 会保护当前成员；已纳入过的 Team 里之前检测到的
+        # 外部成员/邀请不会因为重新开启而被保护（见 services/patrol._protect_team_snapshot_sync）。
+        kept = result.get("detected_kept") if isinstance(result, dict) else None
+        text = "✅ 已开启巡逻自动踢人。第一次纳入巡逻的 Team 已保护当前成员。"
+        if isinstance(kept, int) and kept > 0:
+            text += f"\n⚠️ 之前检测到的外部成员/邀请 {kept} 个未被保护，仍是巡逻对象。"
+        return text
     if sub == "off":
         try:
             _api_patch("/api/patrol/settings", {"kick_enabled": False})

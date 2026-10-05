@@ -56,6 +56,7 @@ const ACTION_LABELS: Record<string, string> = {
   self_service_cache_refresh: '自助兑换：刷新缓存',
   self_service_redeem: '自助兑换',
   self_service_invite_reconciled: '自助兑换：核对确认',
+  self_service_invite_interrupted: '自助兑换：中断待确认',
   self_service_invite_admin_confirmed: '自助兑换：管理员确认',
   self_service_invite_admin_released: '自助兑换：管理员退回',
   self_service_renew: '自助续期',
@@ -96,6 +97,7 @@ const ACTION_LABELS: Record<string, string> = {
   patrol_strict_refresh_failed: '严格模式刷新失败',
   patrol_kick_batch_capped: '巡逻移出数已达上限',
   patrol_team_initialize: '巡逻登记新 Team',
+  patrol_skip_invalid_entitlement: '巡逻跳过：席位数未知',
 
   // Telegram and notifications
   tg_summary: 'TG 汇总推送',
@@ -276,6 +278,7 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   teams_protected: (v) => `保护 ${v} 个 Team`,
   grandfathered: (v) => `保留现有成员 ${v}`,
   backfilled: (v) => `补录 ${v}`,
+  detected_kept: (v) => `仍在巡逻的外部成员 ${v}`,
   patrolled: (v) => `巡逻 ${v} 个 Team`,
   skipped_unrefreshed: (v) => `跳过未刷新 ${v}`,
   refresh_failures: (v) => `刷新失败 ${v}`,
