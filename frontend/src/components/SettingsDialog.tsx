@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Globe, Loader2, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
-import type { Settings } from '../types';
+import type { Settings, Team } from '../types';
 import {
   changeAdminPassword,
   checkProxy,
@@ -13,6 +13,7 @@ import {
   type AdminAccount,
   type Proxy,
 } from '../api/client';
+import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { BUTTON, INPUT } from './ui';
 import { cn } from '../lib/utils';
@@ -60,9 +61,11 @@ interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void;
   settings: Settings;
   onSave: (data: Partial<Settings>) => Promise<void>;
+  /** Used to tell which Teams a proxy deletion affects. */
+  teams?: Pick<Team, 'name' | 'proxy_id'>[];
 }
 
-export default function SettingsDialog({ open, onOpenChange, settings, onSave }: SettingsDialogProps) {
+export default function SettingsDialog({ open, onOpenChange, settings, onSave, teams = [] }: SettingsDialogProps) {
   const [interval, setInterval_] = useState(settings.sync_interval_minutes);
   const [concurrency, setConcurrency] = useState(settings.api_concurrency);
   const [kickMode, setKickMode] = useState(settings.expiry_kick_mode);
@@ -74,6 +77,9 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
   const [confirmPassword, setConfirmPassword] = useState('');
   const [saving, setSaving] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [rotateConfirmOpen, setRotateConfirmOpen] = useState(false);
+  const [proxyToDelete, setProxyToDelete] = useState<Proxy | null>(null);
+  const [deletingProxy, setDeletingProxy] = useState(false);
   const [statusText, setStatusText] = useState('');
   const [errorText, setErrorText] = useState('');
 
@@ -151,6 +157,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
   };
 
   const handleRotateApiKey = async () => {
+    setRotateConfirmOpen(false);
     setRotating(true);
     setStatusText('');
     setErrorText('');
@@ -184,13 +191,20 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
   };
 
   const handleDeleteProxy = async (id: number) => {
+    setDeletingProxy(true);
     try {
       await deleteProxy(id);
       setProxies((prev) => prev.filter((p) => p.id !== id));
+      setProxyToDelete(null);
     } catch (err) {
+      setProxyToDelete(null);
       setErrorText(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingProxy(false);
     }
   };
+
+  const boundTeams = proxyToDelete ? teams.filter((t) => t.proxy_id === proxyToDelete.id) : [];
 
   const handleCheckProxy = async (id: number) => {
     setCheckingId(id);
@@ -409,7 +423,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleDeleteProxy(p.id)}
+                    onClick={() => setProxyToDelete(p)}
                     className={cn(BUTTON.icon, 'hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10 dark:hover:text-red-400')}
                     title="删除"
                     aria-label={`删除 ${p.name}`}
@@ -445,7 +459,7 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
               </button>
               <button
                 type="button"
-                onClick={handleRotateApiKey}
+                onClick={() => setRotateConfirmOpen(true)}
                 disabled={rotating}
                 className={cn(BUTTON.secondary, 'size-9 px-0 py-0')}
                 title="更换"
@@ -502,6 +516,31 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
         </section>
       </div>
       {hasFooter && <ScrollEdge side="bottom" />}
+      <ConfirmDialog
+        open={rotateConfirmOpen}
+        onOpenChange={setRotateConfirmOpen}
+        title="更换 API Key？"
+        message="旧 Key 会立刻失效：所有正在使用它的浏览器和脚本都会被登出，需要改用新 Key 重新登录。新 Key 会显示在这里并自动复制。"
+        confirmLabel="更换"
+        destructive
+        onConfirm={() => void handleRotateApiKey()}
+      />
+      <ConfirmDialog
+        open={proxyToDelete !== null}
+        onOpenChange={(next) => {
+          if (!next && !deletingProxy) setProxyToDelete(null);
+        }}
+        title={`删除代理「${proxyToDelete?.name ?? ''}」？`}
+        message={
+          boundTeams.length > 0
+            ? `${boundTeams.length} 个 Team 正在使用它（${boundTeams.map((t) => t.name).join('、')}），删除后这些 Team 会改为直连，不再经过代理。`
+            : '没有 Team 绑定这个代理。删除后不可恢复。'
+        }
+        confirmLabel="删除"
+        destructive
+        loading={deletingProxy}
+        onConfirm={() => proxyToDelete && void handleDeleteProxy(proxyToDelete.id)}
+      />
     </DialogFrame>
   );
 }

@@ -480,6 +480,7 @@ export default function Layout() {
           onOpenChange={setSettingsOpen}
           settings={settings}
           onSave={handleSaveSettings}
+          teams={teams}
         />
 
         <ConfirmDialog
