@@ -195,12 +195,15 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     const j = Math.floor(rand() * (i + 1));
     [seats[i], seats[j]] = [seats[j], seats[i]];
   }
-  const detectedCount = spec.detected ?? 0;
+  // The newest ChatGPT seats are the externally added ones. Pick them from the ChatGPT seats
+  // only: after the shuffle the last seat can be a Codex one, which would leave none.
+  const chatgptSeats = seats.flatMap((seat, index) => (seat === 'default' ? [index] : []));
+  const detectedSeats = new Set(spec.detected ? chatgptSeats.slice(-spec.detected) : []);
   const forced = [...(spec.forcedExpiries ?? [])];
 
   seats.forEach((seat, index) => {
     const person = index < shared.length ? { email: shared[index].email, name: shared[index].name } : nextPerson();
-    const isDetected = seat === 'default' && index >= seats.length - detectedCount;
+    const isDetected = detectedSeats.has(index);
     let joinedAt = isDetected
       ? now - 40 * MINUTE
       : createdAt + Math.floor(rand() * Math.max(1, now - createdAt - DAY));
@@ -283,6 +286,10 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
 
   const activeUntil = now + spec.renewsInDays * DAY + 5 * HOUR;
   const activeStart = activeUntil - spec.periodDays * DAY;
+  // Like the real API, the Team's active_start is when the subscription began (the first
+  // period boundary after the Team was created), not the start of the current period.
+  const periodMs = spec.periodDays * DAY;
+  const subscriptionStart = activeStart - Math.max(0, Math.floor((activeStart - createdAt) / periodMs)) * periodMs;
   const subtotal = spec.price !== null ? spec.price * spec.entitled : null;
   const discountAmount = spec.discount?.amount ?? 0;
   const total = subtotal !== null ? Math.max(0, subtotal - discountAmount) : null;
@@ -316,7 +323,7 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     monthly_subtotal: subtotal,
     monthly_total: total,
     balance: spec.balance,
-    active_start: isoAt(activeStart),
+    active_start: isoAt(subscriptionStart),
     active_until: isoAt(activeUntil),
     will_renew: spec.willRenew,
     subscription_status: spec.willRenew ? 'renewing' : 'nonrenewing',
