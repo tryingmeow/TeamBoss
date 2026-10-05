@@ -1,11 +1,14 @@
-import { X, MailPlus, Loader2 } from 'lucide-react';
+import { useState } from 'react';
+import { Loader2, X } from 'lucide-react';
 import type { MembersData, ShowToast } from '../types';
-import MemberRow from './MemberRow';
+import MemberRow, { ExpiryLabel } from './MemberRow';
 import MemberRemarkEditor from './MemberRemarkEditor';
 import LoadingSpinner from './LoadingSpinner';
 import { revokeInvite } from '../api/client';
-import { formatSeatTypeLabel } from '../lib/seatType';
-import { useState } from 'react';
+import { formatSeatTypeLabel, isCodexSeat } from '../lib/seatType';
+import { formatAppLocalFull } from '../lib/expiry';
+import { PILL, TONE } from './ui';
+import { cn } from '../lib/utils';
 
 interface MemberPanelProps {
   teamId: string;
@@ -16,12 +19,6 @@ interface MemberPanelProps {
   onRefresh: () => void;
   onRemarkSaved: (email: string, remark: string | null) => void;
   showToast: ShowToast;
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 export default function MemberPanel({ teamId, data, loading, settling, isCodexEnabled, onRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
@@ -50,24 +47,30 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
 
   if (!data) return null;
 
+  const empty = data.members.length === 0 && data.pending_invites.length === 0;
+
   return (
-    <div className="mt-1 overflow-x-auto">
-      {settling && (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-blue-500 dark:text-blue-400">
-          <Loader2 size={12} className="animate-spin" />
-          同步中…
-        </div>
-      )}
-      <table className="w-full text-left text-sm">
-        <thead className="text-xs text-gray-500 dark:text-gray-400 border-b border-gray-100 dark:border-[#2a2d3a]">
-          <tr>
-            <th className="font-normal py-2 px-3">邮箱 / 姓名</th>
-            <th className="font-normal py-2 px-3">到期时间</th>
-            <th className="font-normal py-2 px-3">席位类型</th>
-            <th className="font-normal py-2 px-3 text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-50 dark:divide-[#2a2d3a]">
+    <div className="pt-1">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-gray-500 dark:text-ink-400">
+        <span className="whitespace-nowrap">
+          成员 {data.members.length}
+          {data.pending_invites.length > 0 && ` · 待接受 ${data.pending_invites.length}`}
+        </span>
+        {settling && (
+          <span className="flex items-center gap-1.5 whitespace-nowrap text-blue-600 dark:text-blue-400">
+            <Loader2 size={12} className="animate-spin" />
+            同步中…
+          </span>
+        )}
+      </div>
+
+      {empty ? (
+        <p className="py-4 text-center text-sm text-gray-500 dark:text-ink-400">暂无成员</p>
+      ) : (
+        <ul
+          aria-label="成员列表"
+          className="max-h-[30rem] divide-y divide-gray-100 overflow-y-auto border-t border-gray-100 dark:divide-ink-800 dark:border-ink-800"
+        >
           {data.members.map((m) => (
             <MemberRow
               key={m.id}
@@ -82,57 +85,53 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
           {data.pending_invites.map((inv) => {
             const remark = inv.system_display_name?.trim() || '';
             return (
-            <tr key={inv.id} className="hover:bg-gray-50 dark:hover:bg-[#222533] group transition-colors">
-              <td className="py-2 px-3 min-w-[120px]">
-                <div
-                  className="text-gray-700 dark:text-gray-300 truncate max-w-[120px] sm:max-w-[160px] flex items-center gap-1"
-                  title={remark ? `${remark} · ${inv.email}` : inv.email}
-                >
-                  <span className="truncate">{remark || inv.email}</span>
-                  <MailPlus size={14} className="text-yellow-500 shrink-0" />
-                  <MemberRemarkEditor
-                    email={inv.email}
-                    remark={remark}
-                    onSaved={onRemarkSaved}
-                    showToast={showToast}
-                  />
+              <li key={inv.id} className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-gray-50 dark:hover:bg-ink-850">
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-1">
+                    <span
+                      className="truncate text-sm font-medium text-gray-700 dark:text-ink-200"
+                      title={remark ? `${remark} · ${inv.email}` : inv.email}
+                    >
+                      {remark || inv.email.split('@')[0]}
+                    </span>
+                    <MemberRemarkEditor
+                      email={inv.email}
+                      remark={remark}
+                      onSaved={onRemarkSaved}
+                      showToast={showToast}
+                    />
+                  </div>
+                  <div className="flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-ink-400">
+                    <span className={cn(PILL, TONE.warning)}>待接受</span>
+                    <span className="truncate" title={inv.email}>{inv.email}</span>
+                  </div>
                 </div>
-                <div className="text-xs text-gray-400 truncate max-w-[120px] sm:max-w-[160px]">
-                  {remark ? `待接受 · ${inv.email}` : '待接受'}
-                </div>
-              </td>
-              <td className="py-2 px-3">
-                {inv.expires_at ? (
-                  <span className="text-xs text-yellow-600 dark:text-yellow-400">
-                    {formatDate(inv.expires_at)}
+
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <span className={cn(PILL, isCodexSeat(inv.seat_type) ? TONE.codex : TONE.info)}>
+                    {formatSeatTypeLabel(inv.seat_type)}
                   </span>
-                ) : (
-                  <span className="text-gray-400">—</span>
-                )}
-              </td>
-              <td className="py-2 px-3">
-                <span className="text-xs text-gray-500 bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded">
-                  {formatSeatTypeLabel(inv.seat_type)}
-                </span>
-              </td>
-              <td className="py-2 px-3 text-right">
+                  {inv.expires_at && (
+                    <span className="text-xs leading-5" title={`到期 ${formatAppLocalFull(new Date(inv.expires_at))}`}>
+                      <ExpiryLabel iso={inv.expires_at} />
+                    </span>
+                  )}
+                </div>
+
                 <button
+                  type="button"
                   onClick={() => handleRevoke(inv.email)}
                   disabled={revoking === inv.email}
-                  className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 disabled:cursor-wait dark:text-ink-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
                   title="撤销邀请"
+                  aria-label="撤销邀请"
                 >
-                  <X size={14} />
+                  {revoking === inv.email ? <Loader2 size={15} className="animate-spin" /> : <X size={16} />}
                 </button>
-              </td>
-            </tr>
+              </li>
             );
           })}
-        </tbody>
-      </table>
-
-      {data.members.length === 0 && data.pending_invites.length === 0 && (
-        <p className="text-center text-sm text-gray-500 py-4">暂无成员</p>
+        </ul>
       )}
     </div>
   );

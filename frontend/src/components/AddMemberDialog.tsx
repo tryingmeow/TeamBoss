@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { AlertTriangle, X } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import { useKickPolicy } from '../hooks/useKickPolicy';
 import { useSettings } from '../hooks/useSettings';
@@ -8,8 +8,10 @@ import { selectionToDuration } from '../lib/expiry';
 import { inviteMember, OverageConfirmationError } from '../api/client';
 import { SEAT_TYPE_OPTIONS } from '../lib/seatType';
 import type { SeatType } from '../types';
-import LoadingSpinner from './LoadingSpinner';
 import ConfirmDialog from './ConfirmDialog';
+import DialogFrame from './DialogFrame';
+import { BUTTON, INPUT } from './ui';
+import { cn } from '../lib/utils';
 
 interface AddMemberDialogProps {
   open: boolean;
@@ -45,6 +47,8 @@ function asBatchResult(result: unknown): BatchInviteResultLike | null {
   if (!Array.isArray(candidate.failed)) return null;
   return candidate;
 }
+
+const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
 
 // 新增成员的默认到期时间一直是 30 天，换成结构化选择项后仍然是同一个值。
 const DEFAULT_EXPIRY: ExpirySelection = { kind: 'duration', value: '30d' };
@@ -189,119 +193,110 @@ export default function AddMemberDialog({
 
   return (
     <>
-      <Dialog.Root open={open} onOpenChange={handleDialogOpenChange}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black/60 z-50" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-md rounded-xl bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] p-6 shadow-2xl">
-          <Dialog.Title className="text-lg font-bold text-gray-900 dark:text-gray-100">
-            {title}
-          </Dialog.Title>
-
-          <div className="mt-4 space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-400 mb-1.5">邮箱（每行一个）</label>
-              <textarea
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder={'user@example.com\nanother@example.com'}
-                rows={4}
-                className="w-full px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all resize-y min-h-[6rem]"
-              />
-            </div>
-
-            {!fixedSeatType && (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-400 mb-2">席位类型</label>
-                <div className="flex gap-3">
-                  {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => setSeatType(value)}
-                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all ${
-                        seatType === value
-                          ? value === 'usage_based'
-                            ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20'
-                            : 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
-                          : 'bg-gray-100 dark:bg-[#2a2d3a] text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[#3a3d4a]'
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-400 mb-2">过期时间</label>
-              <ExpiryPicker value={expiry} onChange={setExpiry} policy={kickPolicy} disabled={loading} />
-            </div>
-
-            {error && (
-              <p className="text-sm text-red-500 dark:text-red-400">{error}</p>
-            )}
-
-            {batchResult?.failed && batchResult.failed.length > 0 && (
-              <div className="rounded-lg border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-950/30 p-3 text-sm space-y-2">
-                <div className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-300">
-                  <AlertTriangle size={15} className="shrink-0" />
-                  {(batchResult.added?.length ?? 0) > 0
-                    ? `${batchResult.added?.length} 个成功，${batchResult.failed.length} 个失败`
-                    : `全部 ${batchResult.failed.length} 个添加失败`}
-                </div>
-                <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
-                  {batchResult.failed.map((f, i) => (
-                    <div
-                      key={`${f.email}-${i}`}
-                      className="rounded-md bg-white/70 dark:bg-black/20 px-2 py-1.5 border border-red-100 dark:border-red-900/40"
-                    >
-                      <div className="text-xs font-medium text-gray-800 dark:text-gray-200 break-all">{f.email}</div>
-                      <div className="text-xs text-red-600 dark:text-red-400 mt-0.5">{f.error}</div>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={handleRetryFailed}
-                  className="text-xs font-medium text-red-700 dark:text-red-300 underline decoration-dotted underline-offset-2 hover:text-red-800 dark:hover:text-red-200"
-                >
-                  仅重试失败邮箱
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="mt-6 flex justify-end gap-3">
+      <DialogFrame
+        open={open}
+        onOpenChange={handleDialogOpenChange}
+        title={title}
+        footer={
+          <>
             <Dialog.Close asChild>
-              <button
-                onClick={resetForm}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-[#2a2d3a] hover:bg-gray-200 dark:hover:bg-[#3a3d4a] transition-colors"
-              >
+              <button type="button" onClick={resetForm} className={BUTTON.secondary}>
                 {batchResult ? '完成' : '取消'}
               </button>
             </Dialog.Close>
             <button
+              type="button"
               onClick={() => { void handleSubmit(); }}
               disabled={loading}
-              className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 shadow-md shadow-blue-500/20 transition-all disabled:opacity-50 flex items-center gap-2"
+              className={BUTTON.primary}
             >
-              {loading && <LoadingSpinner size={14} />}
-              {loading ? '添加中...' : batchResult ? '重新提交' : submitLabel}
+              {loading && <Loader2 size={14} className="animate-spin" />}
+              {loading ? '添加中…' : batchResult ? '重新提交' : submitLabel}
             </button>
+          </>
+        }
+      >
+        <div className="space-y-5">
+          <div>
+            <label htmlFor="add-member-emails" className={LABEL}>
+              邮箱 <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>
+            </label>
+            <textarea
+              id="add-member-emails"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder={'user@example.com\nanother@example.com'}
+              rows={4}
+              className={cn(INPUT, 'min-h-24 resize-y')}
+            />
           </div>
 
-          <Dialog.Close asChild>
-            <button
-              onClick={resetForm}
-              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800"
-            >
-              <X size={16} />
-            </button>
-          </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+          {!fixedSeatType && (
+            <div>
+              <span className={LABEL}>席位类型</span>
+              <div className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950" role="group" aria-label="席位类型">
+                {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setSeatType(value)}
+                    aria-pressed={seatType === value}
+                    className={cn(
+                      'h-8 whitespace-nowrap rounded-md text-sm font-medium transition-colors',
+                      seatType === value
+                        ? cn(
+                          'bg-white shadow-sm dark:bg-ink-800',
+                          value === 'usage_based' ? 'text-purple-700 dark:text-purple-300' : 'text-blue-700 dark:text-blue-300',
+                        )
+                        : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <span className={LABEL}>到期时间</span>
+            <ExpiryPicker value={expiry} onChange={setExpiry} policy={kickPolicy} disabled={loading} />
+          </div>
+
+          {error && (
+            <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+          )}
+
+          {batchResult?.failed && batchResult.failed.length > 0 && (
+            <div className="space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm dark:border-red-500/30 dark:bg-red-500/10">
+              <div className="flex items-center gap-2 font-medium text-red-700 dark:text-red-300">
+                <AlertTriangle size={15} className="shrink-0" />
+                {(batchResult.added?.length ?? 0) > 0
+                  ? `${batchResult.added?.length} 个成功，${batchResult.failed.length} 个失败`
+                  : `全部 ${batchResult.failed.length} 个添加失败`}
+              </div>
+              <div className="max-h-36 space-y-1.5 overflow-y-auto pr-1">
+                {batchResult.failed.map((f, i) => (
+                  <div
+                    key={`${f.email}-${i}`}
+                    className="rounded-md border border-red-100 bg-white px-2 py-1.5 dark:border-red-500/20 dark:bg-ink-900"
+                  >
+                    <div className="break-all text-xs font-medium text-gray-800 dark:text-gray-200">{f.email}</div>
+                    <div className="mt-0.5 text-xs text-red-600 dark:text-red-400">{f.error}</div>
+                  </div>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleRetryFailed}
+                className="text-xs font-medium text-red-700 underline decoration-dotted underline-offset-2 hover:text-red-800 dark:text-red-300 dark:hover:text-red-200"
+              >
+                仅重试失败邮箱
+              </button>
+            </div>
+          )}
+        </div>
+      </DialogFrame>
 
       <ConfirmDialog
         open={confirmOverageOpen}
@@ -320,12 +315,12 @@ export default function AddMemberDialog({
           void handleSubmit(true, emails);
         }}
       >
-        <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+        <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-ink-200">
           <input
             type="checkbox"
             checked={skipOverageChecked}
             onChange={(e) => setSkipOverageChecked(e.target.checked)}
-            className="accent-blue-600 dark:accent-blue-500"
+            className="size-4 accent-blue-600 dark:accent-blue-500"
           />
           不再提示，以后超额直接添加
         </label>

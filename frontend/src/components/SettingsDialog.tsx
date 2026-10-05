@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import * as Dialog from '@radix-ui/react-dialog';
-import { Check, Copy, Globe, Plus, RefreshCw, Trash2, Wifi, WifiOff, X } from 'lucide-react';
+import { Check, Copy, Globe, Loader2, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
 import type { Settings } from '../types';
 import {
   changeAdminPassword,
@@ -14,7 +13,12 @@ import {
   type AdminAccount,
   type Proxy,
 } from '../api/client';
+import DialogFrame from './DialogFrame';
+import { BUTTON, INPUT } from './ui';
+import { cn } from '../lib/utils';
 
+const SECTION_TITLE = 'text-sm font-semibold text-gray-900 dark:text-gray-100';
+const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
 
 interface SettingsDialogProps {
   open: boolean;
@@ -22,7 +26,6 @@ interface SettingsDialogProps {
   settings: Settings;
   onSave: (data: Partial<Settings>) => Promise<void>;
 }
-
 
 export default function SettingsDialog({ open, onOpenChange, settings, onSave }: SettingsDialogProps) {
   const [interval, setInterval_] = useState(settings.sync_interval_minutes);
@@ -169,296 +172,297 @@ export default function SettingsDialog({ open, onOpenChange, settings, onSave }:
   };
 
   const proxyStatusIcon = (p: Proxy) => {
-    if (checkingId === p.id) return <RefreshCw size={14} className="animate-spin text-gray-400" />;
-    if (p.status === 'ok') return <Wifi size={14} className="text-emerald-500" />;
-    if (p.status === 'error') return <WifiOff size={14} className="text-red-400" />;
-    return <Globe size={14} className="text-gray-400" />;
+    if (checkingId === p.id) return <RefreshCw size={14} className="shrink-0 animate-spin text-gray-400" />;
+    if (p.status === 'ok') return <Wifi size={14} className="shrink-0 text-emerald-500" />;
+    if (p.status === 'error') return <WifiOff size={14} className="shrink-0 text-red-500" />;
+    return <Globe size={14} className="shrink-0 text-gray-400" />;
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/60 z-50" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-xl bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] p-6 shadow-2xl">
-          <Dialog.Title className="text-lg font-bold text-gray-900 dark:text-gray-100">
-            设置
-          </Dialog.Title>
+    <DialogFrame
+      open={open}
+      onOpenChange={onOpenChange}
+      title="设置"
+      description="全局设置，对所有 Team 生效。"
+      size="lg"
+      footer={
+        (statusText || errorText) && (
+          <p
+            role="status"
+            className={cn(
+              'mr-auto flex items-center gap-1.5 text-sm',
+              errorText ? 'text-red-600 dark:text-red-400' : 'text-emerald-600 dark:text-emerald-400',
+            )}
+          >
+            {!errorText && <Check size={16} />}
+            {errorText || statusText}
+          </p>
+        )
+      }
+    >
+      <div className="space-y-6">
+        <section className="space-y-4">
+          <h3 className={SECTION_TITLE}>常规</h3>
 
-          <div className="mt-5 space-y-6">
-            <section className="space-y-4">
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">系统</h3>
-
-              <div>
-                <label className="flex items-center justify-between text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  <span>同步间隔</span>
-                  <span className="text-blue-600 dark:text-blue-400 font-bold">{interval} 分钟</span>
-                </label>
-                <input
-                  type="range"
-                  min={5}
-                  max={60}
-                  step={5}
-                  value={interval}
-                  onChange={(event) => setInterval_(Number(event.target.value))}
-                  className="w-full accent-blue-600 dark:accent-blue-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="block">
-                  <label htmlFor="apiConcurrency" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    API 并发
-                  </label>
-                  <div className="flex items-center w-full px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg focus-within:ring-2 focus-within:ring-blue-500/50 transition-all">
-                    <input
-                      id="apiConcurrency"
-                      type="number"
-                      min={1}
-                      max={10}
-                      value={concurrency}
-                      onChange={(event) => setConcurrency(Number(event.target.value))}
-                      className="flex-1 min-w-0 bg-transparent border-none p-0 text-sm text-gray-900 dark:text-gray-200 focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="block">
-                  <label htmlFor="kickDelay" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    移除延迟
-                  </label>
-                  <div className={`flex items-center w-full px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg focus-within:ring-2 focus-within:ring-blue-500/50 transition-all ${kickMode !== 'delay_hours' ? 'opacity-50' : ''}`}>
-                    <input
-                      id="kickDelay"
-                      type="number"
-                      min={0}
-                      max={720}
-                      disabled={kickMode !== 'delay_hours'}
-                      value={kickDelayHours}
-                      onChange={(event) => setKickDelayHours(Number(event.target.value || 0))}
-                      className="flex-1 min-w-0 bg-transparent border-none p-0 text-sm text-gray-900 dark:text-gray-200 focus:ring-0 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none disabled:cursor-not-allowed"
-                    />
-                    <span className="text-gray-500 dark:text-gray-400 text-sm ml-2 select-none shrink-0 border-l border-gray-200 dark:border-[#2a2d3a] pl-2">小时</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex gap-4 text-sm text-gray-700 dark:text-gray-300">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    checked={kickMode === 'delay_hours'}
-                    onChange={() => setKickMode('delay_hours')}
-                    className="accent-blue-600 dark:accent-blue-500"
-                  />
-                  到期后
-                </label>
-                <label className="flex items-center gap-2">
-                  <input
-                    type="radio"
-                    checked={kickMode === 'day_end'}
-                    onChange={() => setKickMode('day_end')}
-                    className="accent-blue-600 dark:accent-blue-500"
-                  />
-                  当天 23:59
-                </label>
-              </div>
-
-              <div>
-                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
-                  <input
-                    type="checkbox"
-                    checked={skipOverageConfirmation}
-                    onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
-                    className="accent-blue-600 dark:accent-blue-500"
-                  />
-                  超额添加不再确认
-                </label>
-                <p className="mt-1 text-xs text-gray-500 dark:text-gray-500">
-                  席位不足时直接超额添加，不再弹确认框；额外席位照常计费
-                </p>
-              </div>
-
-              <button
-                onClick={handleSaveSettings}
-                disabled={saving}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
-              >
-                {saving ? '保存中...' : '保存'}
-              </button>
-            </section>
-
-            {/* ── Proxy Section ── */}
-            <section className="space-y-3 border-t border-gray-200 dark:border-[#2a2d3a] pt-5">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
-                  <Globe size={15} className="text-gray-400" />
-                  代理
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setShowAddProxy(!showAddProxy)}
-                  className="p-1.5 rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors"
-                  title="添加代理"
-                >
-                  <Plus size={16} />
-                </button>
-              </div>
-
-              {showAddProxy && (
-                <div className="space-y-2 p-3 rounded-xl border border-dashed border-blue-300 dark:border-blue-500/30 bg-blue-50/30 dark:bg-blue-500/5">
-                  <input
-                    type="text"
-                    placeholder="名称"
-                    value={newProxyName}
-                    onChange={(e) => setNewProxyName(e.target.value)}
-                    className="w-full px-3 py-1.5 bg-white dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                  />
-                  <input
-                    type="text"
-                    placeholder="http://user:pass@host:port"
-                    value={newProxyUrl}
-                    onChange={(e) => setNewProxyUrl(e.target.value)}
-                    className="w-full px-3 py-1.5 bg-white dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-xs font-mono text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                  />
-                  <div className="flex justify-end gap-2">
-                    <button
-                      type="button"
-                      onClick={() => { setShowAddProxy(false); setNewProxyName(''); setNewProxyUrl(''); }}
-                      className="px-3 py-1 rounded-lg text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
-                    >
-                      取消
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleAddProxy}
-                      disabled={addingProxy || !newProxyName.trim() || !newProxyUrl.trim()}
-                      className="px-3 py-1 rounded-lg text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
-                    >
-                      {addingProxy ? '...' : '添加'}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {proxies.length === 0 && !showAddProxy && (
-                <p className="text-xs text-gray-400 dark:text-gray-500 py-2">暂无代理</p>
-              )}
-
-              <div className="space-y-1.5">
-                {proxies.map((p) => (
-                  <div
-                    key={p.id}
-                    className="group flex items-center gap-2.5 px-3 py-2 rounded-xl bg-gray-50 dark:bg-[#0f1117] border border-gray-100 dark:border-[#2a2d3a] hover:border-gray-300 dark:hover:border-[#3a3d4a] transition-colors"
-                  >
-                    {proxyStatusIcon(p)}
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">{p.name}</div>
-                      <div className="text-[11px] font-mono text-gray-400 dark:text-gray-500 truncate">{p.url.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}</div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleCheckProxy(p.id)}
-                      disabled={checkingId === p.id}
-                      className="p-1 rounded-md text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title="测试连接"
-                    >
-                      <Wifi size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteProxy(p.id)}
-                      className="p-1 rounded-md text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors opacity-0 group-hover:opacity-100"
-                      title="删除"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="space-y-4 border-t border-gray-200 dark:border-[#2a2d3a] pt-5">
-              <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">管理员</h3>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  API Key
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    readOnly
-                    value={account?.api_key ?? ''}
-                    className="flex-1 min-w-0 px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-xs font-mono text-gray-900 dark:text-gray-200"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => copyApiKey()}
-                    className="p-2 rounded-lg bg-gray-100 dark:bg-[#2a2d3a] text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-[#3a3d4a]"
-                    title="复制"
-                  >
-                    <Copy size={16} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleRotateApiKey}
-                    disabled={rotating}
-                    className="p-2 rounded-lg bg-gray-100 dark:bg-[#2a2d3a] text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-[#3a3d4a] disabled:opacity-50"
-                    title="更换"
-                  >
-                    <RefreshCw size={16} className={rotating ? 'animate-spin' : ''} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <input
-                  type="password"
-                  placeholder="当前密码"
-                  value={currentPassword}
-                  onChange={(event) => setCurrentPassword(event.target.value)}
-                  className="px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                />
-                <input
-                  type="password"
-                  placeholder="新密码"
-                  value={newPassword}
-                  onChange={(event) => setNewPassword(event.target.value)}
-                  className="px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                />
-                <input
-                  type="password"
-                  placeholder="确认密码"
-                  value={confirmPassword}
-                  onChange={(event) => setConfirmPassword(event.target.value)}
-                  className="px-3 py-2 bg-gray-50 dark:bg-[#0f1117] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                />
-              </div>
-
-              <button
-                type="button"
-                onClick={handleChangePassword}
-                disabled={!currentPassword || !newPassword || !confirmPassword}
-                className="px-4 py-2 rounded-lg text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
-              >
-                更新密码
-              </button>
-            </section>
+          <div>
+            <label htmlFor="syncInterval" className={cn(LABEL, 'flex items-center justify-between')}>
+              <span>同步间隔</span>
+              <span className="font-semibold tabular-nums text-blue-600 dark:text-blue-400">{interval} 分钟</span>
+            </label>
+            <input
+              id="syncInterval"
+              type="range"
+              min={5}
+              max={60}
+              step={5}
+              value={interval}
+              onChange={(event) => setInterval_(Number(event.target.value))}
+              className="w-full accent-blue-600 dark:accent-blue-500"
+            />
           </div>
 
-          {(statusText || errorText) && (
-            <div className={`mt-4 flex items-center gap-2 text-sm ${errorText ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
-              {!errorText && <Check size={16} />}
-              {errorText || statusText}
+          <div>
+            <label htmlFor="apiConcurrency" className={LABEL}>API 并发</label>
+            <input
+              id="apiConcurrency"
+              type="number"
+              min={1}
+              max={10}
+              value={concurrency}
+              onChange={(event) => setConcurrency(Number(event.target.value))}
+              className={cn(INPUT, 'w-28')}
+            />
+          </div>
+
+          <fieldset>
+            <legend className={LABEL}>到期移出时间</legend>
+            <div className="space-y-2 text-sm text-gray-700 dark:text-ink-200">
+              <label className="flex flex-wrap items-center gap-2">
+                <input
+                  type="radio"
+                  name="kickMode"
+                  checked={kickMode === 'delay_hours'}
+                  onChange={() => setKickMode('delay_hours')}
+                  className="size-4 accent-blue-600 dark:accent-blue-500"
+                />
+                到期后
+                <input
+                  id="kickDelay"
+                  type="number"
+                  min={0}
+                  max={720}
+                  disabled={kickMode !== 'delay_hours'}
+                  value={kickDelayHours}
+                  onChange={(event) => setKickDelayHours(Number(event.target.value || 0))}
+                  aria-label="到期后延迟小时数"
+                  className={cn(INPUT, 'w-20 py-1.5 disabled:cursor-not-allowed disabled:opacity-50')}
+                />
+                小时移出
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="radio"
+                  name="kickMode"
+                  checked={kickMode === 'day_end'}
+                  onChange={() => setKickMode('day_end')}
+                  className="size-4 accent-blue-600 dark:accent-blue-500"
+                />
+                到期当天 23:59 移出
+              </label>
+            </div>
+          </fieldset>
+
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-ink-200">
+              <input
+                type="checkbox"
+                checked={skipOverageConfirmation}
+                onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
+                className="size-4 accent-blue-600 dark:accent-blue-500"
+              />
+              超额添加不再确认
+            </label>
+            <p className="mt-1 pl-6 text-xs text-gray-500 dark:text-ink-400">
+              席位不足时直接超额添加，不再弹确认框；额外席位照常计费。
+            </p>
+          </div>
+
+          <div className="flex justify-end">
+            <button type="button" onClick={handleSaveSettings} disabled={saving} className={BUTTON.primary}>
+              {saving && <Loader2 size={14} className="animate-spin" />}
+              {saving ? '保存中…' : '保存'}
+            </button>
+          </div>
+        </section>
+
+        <section className="space-y-3 border-t border-gray-200 pt-5 dark:border-ink-800">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className={SECTION_TITLE}>代理</h3>
+            <button
+              type="button"
+              onClick={() => setShowAddProxy(!showAddProxy)}
+              className={cn(BUTTON.secondary, 'h-8 px-2.5 py-0 text-xs')}
+              aria-expanded={showAddProxy}
+            >
+              <Plus size={14} />
+              添加代理
+            </button>
+          </div>
+
+          {showAddProxy && (
+            <div className="space-y-2 rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-ink-800 dark:bg-ink-950">
+              <input
+                type="text"
+                placeholder="名称"
+                aria-label="代理名称"
+                value={newProxyName}
+                onChange={(e) => setNewProxyName(e.target.value)}
+                className={INPUT}
+              />
+              <input
+                type="text"
+                placeholder="http://user:pass@host:port"
+                aria-label="代理地址"
+                value={newProxyUrl}
+                onChange={(e) => setNewProxyUrl(e.target.value)}
+                className={cn(INPUT, 'font-mono text-xs')}
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setShowAddProxy(false); setNewProxyName(''); setNewProxyUrl(''); }}
+                  className={cn(BUTTON.secondary, 'h-8 px-3 py-0 text-xs')}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddProxy}
+                  disabled={addingProxy || !newProxyName.trim() || !newProxyUrl.trim()}
+                  className={cn(BUTTON.primary, 'h-8 px-3 py-0 text-xs')}
+                >
+                  {addingProxy ? '添加中…' : '添加'}
+                </button>
+              </div>
             </div>
           )}
 
-          <Dialog.Close asChild>
-            <button className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-1 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
-              <X size={16} />
+          {proxies.length === 0 && !showAddProxy && (
+            <p className="text-sm text-gray-500 dark:text-ink-400">暂无代理，所有 Team 直连。</p>
+          )}
+
+          {proxies.length > 0 && (
+            <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
+              {proxies.map((p) => (
+                <li key={p.id} className="flex items-center gap-2.5 py-1.5 pl-3 pr-1.5">
+                  {proxyStatusIcon(p)}
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{p.name}</div>
+                    <div className="truncate font-mono text-[11px] text-gray-500 dark:text-ink-400">{p.url.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleCheckProxy(p.id)}
+                    disabled={checkingId === p.id}
+                    className={cn(BUTTON.secondary, 'h-8 px-2.5 py-0 text-xs')}
+                    title="测试连接"
+                  >
+                    测试
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteProxy(p.id)}
+                    className={cn(BUTTON.icon, 'hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10 dark:hover:text-red-400')}
+                    title="删除"
+                    aria-label={`删除 ${p.name}`}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <section className="space-y-4 border-t border-gray-200 pt-5 dark:border-ink-800">
+          <h3 className={SECTION_TITLE}>管理员</h3>
+
+          <div>
+            <label htmlFor="adminApiKey" className={LABEL}>API Key</label>
+            <div className="flex gap-2">
+              <input
+                id="adminApiKey"
+                readOnly
+                value={account?.api_key ?? ''}
+                className={cn(INPUT, 'min-w-0 flex-1 font-mono text-xs')}
+              />
+              <button
+                type="button"
+                onClick={() => copyApiKey()}
+                className={cn(BUTTON.secondary, 'size-9 px-0 py-0')}
+                title="复制"
+                aria-label="复制 API Key"
+              >
+                <Copy size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={handleRotateApiKey}
+                disabled={rotating}
+                className={cn(BUTTON.secondary, 'size-9 px-0 py-0')}
+                title="更换"
+                aria-label="更换 API Key"
+              >
+                <RefreshCw size={16} className={rotating ? 'animate-spin' : ''} />
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <span className={LABEL}>修改密码</span>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <input
+                type="password"
+                placeholder="当前密码"
+                aria-label="当前密码"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                className={INPUT}
+              />
+              <input
+                type="password"
+                placeholder="新密码"
+                aria-label="新密码"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                className={INPUT}
+              />
+              <input
+                type="password"
+                placeholder="确认新密码"
+                aria-label="确认新密码"
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                className={INPUT}
+              />
+            </div>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={handleChangePassword}
+              disabled={!currentPassword || !newPassword || !confirmPassword}
+              className={BUTTON.primary}
+            >
+              更新密码
             </button>
-          </Dialog.Close>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+          </div>
+        </section>
+      </div>
+    </DialogFrame>
   );
 }

@@ -1,20 +1,23 @@
 import { useRef, useState } from 'react';
-import { Crown, Trash2, Pencil } from 'lucide-react';
+import { CalendarClock, Check, ChevronDown, Crown, Trash2 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import type { Member, ShowToast } from '../types';
 import { removeMember, changeSeat, extendMemberExpiry, removeExpiry, updateMemberExpiry } from '../api/client';
 import {
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
+  isCodexSeat,
   normalizeSeatType,
-  seatTypeBadgeClass,
   seatUpdateErrorMessage,
 } from '../lib/seatType';
+import { formatAppLocalFull, toAppLocal } from '../lib/expiry';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import MemberRemarkEditor from './MemberRemarkEditor';
 import { useKickPolicy } from '../hooks/useKickPolicy';
 import ConfirmDialog from './ConfirmDialog';
 import { ExpiryExtensionRequestIds } from '../lib/expiryExtensionRequest';
+import { PILL, TONE } from './ui';
+import { cn } from '../lib/utils';
 
 interface MemberRowProps {
   member: Member;
@@ -25,10 +28,37 @@ interface MemberRowProps {
   showToast: ShowToast;
 }
 
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '';
-  const d = new Date(dateStr);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+const SOON_MS = 3 * 24 * 3_600_000;
+
+const POPOVER =
+  'z-50 rounded-xl border border-gray-200 bg-white shadow-xl dark:border-ink-800 dark:bg-ink-900';
+
+function seatPillClass(seatType: string | null | undefined): string {
+  return cn(PILL, isCodexSeat(seatType) ? TONE.codex : TONE.info);
+}
+
+/** 到期日（应用时区的 月/日，跨年时带年份）；已过期标红，3 天内到期标黄。 */
+export function ExpiryLabel({ iso }: { iso: string | null }) {
+  if (!iso) return <span className="text-gray-400 dark:text-ink-500">不过期</span>;
+  const date = new Date(iso);
+  const left = date.getTime() - Date.now();
+  const p = toAppLocal(date);
+  const sameYear = p.year === toAppLocal(new Date()).year;
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 tabular-nums',
+        left <= 0
+          ? 'text-red-600 dark:text-red-400'
+          : left < SOON_MS
+            ? 'text-amber-600 dark:text-amber-400'
+            : 'text-gray-600 dark:text-ink-300',
+      )}
+    >
+      <CalendarClock size={12} className="shrink-0 opacity-70" />
+      {sameYear ? `${p.month}/${p.day}` : `${p.year}/${p.month}/${p.day}`}
+    </span>
+  );
 }
 
 export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, onRemarkSaved, showToast }: MemberRowProps) {
@@ -96,127 +126,133 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
   };
 
   const seatLabel = formatSeatTypeLabel(member.seat_type);
-  const seatColor = seatTypeBadgeClass(member.seat_type);
-  // 备注优先显示：管理员认人靠自己写的备注，ChatGPT 侧的 name 退到第二行，不丢。
+  // 备注优先显示：管理员认人靠自己写的备注，ChatGPT 侧的 name 跟在后面，不丢。
   const remark = member.system_display_name?.trim() || '';
   const profileName = member.name?.trim() || '';
   const primaryName = remark || profileName || member.email.split('@')[0];
-  const secondaryLine = remark && profileName ? `${profileName} · ${member.email}` : member.email;
+  const expiryTitle = member.expires_at ? `到期 ${formatAppLocalFull(new Date(member.expires_at))}` : '未设置到期时间';
 
   return (
-    <>
-      <tr className="hover:bg-gray-50 dark:hover:bg-[#222533] group transition-colors">
-        <td className="py-2 px-3 min-w-[120px]">
-          <div
-            className="text-sm text-gray-900 dark:text-gray-200 font-medium truncate max-w-[120px] sm:max-w-[160px] flex items-center gap-1"
+    <li className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-gray-50 dark:hover:bg-ink-850">
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-1">
+          <span
+            className="truncate text-sm font-medium text-gray-900 dark:text-gray-100"
             title={[remark, profileName, member.email].filter(Boolean).join(' · ')}
           >
-            <span className="truncate">{primaryName}</span>
-            {member.is_owner && (
-              <Crown size={14} className="text-yellow-500 shrink-0" />
+            {primaryName}
+            {remark && profileName && (
+              <span className="font-normal text-gray-400 dark:text-ink-500"> · {profileName}</span>
             )}
-            <MemberRemarkEditor
-              email={member.email}
-              remark={remark}
-              onSaved={onRemarkSaved}
-              showToast={showToast}
-            />
-          </div>
-          <div
-            className="text-xs text-gray-500 truncate max-w-[120px] sm:max-w-[160px]"
-            title={secondaryLine}
-          >
-            {secondaryLine}
-          </div>
-        </td>
-
-        <td className="py-2 px-3">
-          {!member.is_owner ? (
-            <Popover.Root open={expiryOpen} onOpenChange={setExpiryOpen}>
-              <Popover.Trigger asChild>
-                <button className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-900 dark:hover:text-gray-200">
-                  {member.expires_at ? formatDate(member.expires_at) : '—'}
-                  <Pencil size={10} />
-                </button>
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  className="bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] rounded-xl p-3 shadow-xl z-50 w-[19rem]"
-                  sideOffset={5}
-                >
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">设置过期时间</p>
-                  <ExpiryPicker
-                    onSubmit={handleSetExpiry}
-                    joinedAt={member.created_time}
-                    policy={kickPolicy}
-                    disabled={loading}
-                  />
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
-          ) : (
-            <span className="text-gray-400 text-xs">—</span>
+          </span>
+          {member.is_owner && (
+            <Crown size={13} className="shrink-0 text-amber-500" aria-label="所有者" />
           )}
-        </td>
+          <MemberRemarkEditor
+            email={member.email}
+            remark={remark}
+            onSaved={onRemarkSaved}
+            showToast={showToast}
+          />
+        </div>
+        <div className="truncate text-xs text-gray-500 dark:text-ink-400" title={member.email}>
+          {member.email}
+        </div>
+      </div>
 
-        <td className="py-2 px-3">
-          <Popover.Root open={seatOpen} onOpenChange={setSeatOpen}>
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <Popover.Root open={seatOpen} onOpenChange={setSeatOpen}>
+          <Popover.Trigger asChild>
+            <button
+              type="button"
+              className={cn(seatPillClass(member.seat_type), 'transition-opacity', loading ? 'cursor-wait opacity-60' : 'hover:opacity-80')}
+              disabled={loading}
+              aria-label={`席位类型 ${seatLabel}，点击修改`}
+            >
+              {seatLabel}
+              <ChevronDown size={11} className="opacity-70" />
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content className={cn(POPOVER, 'w-40 p-1')} sideOffset={6} align="end" collisionPadding={16}>
+              {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => handleChangeSeat(value)}
+                  disabled={loading}
+                  className="flex h-9 w-full items-center justify-between rounded-lg px-3 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-200 dark:hover:bg-ink-800"
+                >
+                  {label}
+                  {normalizeSeatType(member.seat_type) === value && (
+                    <Check size={14} className="text-blue-600 dark:text-blue-400" />
+                  )}
+                </button>
+              ))}
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+
+        {!member.is_owner && (
+          <Popover.Root open={expiryOpen} onOpenChange={setExpiryOpen}>
             <Popover.Trigger asChild>
               <button
-                className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${seatColor} ${
-                  loading ? 'opacity-60 cursor-wait' : 'hover:opacity-80'
-                }`}
-                disabled={loading}
+                type="button"
+                className="-mr-1 inline-flex items-center gap-0.5 rounded-md px-1 text-xs leading-5 transition-colors hover:bg-gray-100 dark:hover:bg-ink-800"
+                title={expiryTitle}
+                aria-label={`到期时间 ${expiryTitle}，点击修改`}
               >
-                {seatLabel}
-                <Pencil size={10} />
+                <ExpiryLabel iso={member.expires_at} />
+                <ChevronDown size={11} className="text-gray-400 dark:text-ink-500" />
               </button>
             </Popover.Trigger>
             <Popover.Portal>
               <Popover.Content
-                className="bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] rounded-xl p-2 shadow-xl z-50"
-                sideOffset={5}
+                className={cn(POPOVER, 'max-h-[var(--radix-popover-content-available-height)] w-[19rem] max-w-[calc(100vw-2rem)] overflow-y-auto p-3')}
+                sideOffset={6}
+                align="end"
+                collisionPadding={16}
               >
-                {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
-                  <button
-                    key={value}
-                    onClick={() => handleChangeSeat(value)}
-                    disabled={loading}
-                    className="block w-full text-left px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#2a2d3a] rounded-lg flex items-center justify-between disabled:opacity-60 disabled:cursor-wait"
-                  >
-                    {label}
-                    {normalizeSeatType(member.seat_type) === value && (
-                      <span className="text-xs text-blue-500">✓</span>
-                    )}
-                  </button>
-                ))}
+                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">修改到期时间</p>
+                <p className="mb-2.5 truncate text-xs text-gray-500 dark:text-ink-400" title={member.email}>
+                  {member.email} · {member.expires_at ? `当前 ${formatAppLocalFull(new Date(member.expires_at))}` : '当前不过期'}
+                </p>
+                <ExpiryPicker
+                  onSubmit={handleSetExpiry}
+                  joinedAt={member.created_time}
+                  policy={kickPolicy}
+                  disabled={loading}
+                />
               </Popover.Content>
             </Popover.Portal>
           </Popover.Root>
-        </td>
+        )}
+      </div>
 
-        <td className="py-2 px-3 text-right">
-          {!member.is_owner && (
-            <button
-              onClick={() => setConfirmDelete(true)}
-              className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
-        </td>
-      </tr>
+      {member.is_owner ? (
+        <span className="size-9 shrink-0" aria-hidden />
+      ) : (
+        <button
+          type="button"
+          onClick={() => setConfirmDelete(true)}
+          className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 dark:text-ink-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+          title="移除成员"
+          aria-label="移除成员"
+        >
+          <Trash2 size={15} />
+        </button>
+      )}
 
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
         title="移除成员"
-        message={`确定要移除 ${member.email} 吗？`}
+        message={<>确定把 <span className="break-all font-medium text-gray-900 dark:text-gray-100">{member.email}</span> 移出这个 Team 吗？</>}
         confirmLabel="移除"
         destructive
         loading={loading}
         onConfirm={handleDelete}
       />
-    </>
+    </li>
   );
 }

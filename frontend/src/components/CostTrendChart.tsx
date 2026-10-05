@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart3, LineChart, Table2 } from 'lucide-react';
+import { type PointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { LineChart, Table2 } from 'lucide-react';
 import { getFinanceTrends, type FinanceDailyTotal } from '../api/client';
+import { formatAmount, formatMoney } from '../lib/money';
+import { cn } from '../lib/utils';
+import { BUTTON, CARD } from './ui';
 
 /**
  * 支出趋势：billing_snapshots 每天落一条，这里把 `daily_total_base` 画成一条线。
@@ -9,11 +12,8 @@ import { getFinanceTrends, type FinanceDailyTotal } from '../api/client';
  * 一条折线不值得为它背一个依赖。
  */
 
-/**
- * 单系列颜色。同一个值在浅色和深色底上都通过了调色板校验
- * （亮度带 / 彩度下限 / 对比度），所以两套主题共用一个 hue，不做自动翻转。
- */
-const SERIES = '#6366f1';
+/** 单系列颜色 blue-500：对白色卡片和 ink-900 卡片的对比度都在 3:1 以上，两套主题共用。 */
+const SERIES = '#3b82f6';
 
 const RANGES = [30, 90, 180, 365] as const;
 type Range = (typeof RANGES)[number];
@@ -83,10 +83,6 @@ function formatTick(v: number): string {
   if (abs >= 10_000) return `${(v / 1000).toFixed(abs >= 100_000 ? 0 : 1)}k`;
   if (abs >= 100) return v.toFixed(0);
   return v.toFixed(abs >= 10 ? 1 : 2);
-}
-
-function formatMoney(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function formatDay(date: string): string {
@@ -168,7 +164,7 @@ export default function CostTrendChart() {
 
   const hoverPoint = hover !== null ? points[hover] ?? null : null;
 
-  const handleMove = (e: React.MouseEvent<SVGSVGElement>) => {
+  const handleMove = (e: PointerEvent<SVGSVGElement>) => {
     if (!geometry || points.length === 0) return;
     const box = e.currentTarget.getBoundingClientRect();
     const px = e.clientX - box.left;
@@ -186,100 +182,101 @@ export default function CostTrendChart() {
 
   const ticks = geometry ? niceTicks(geometry.yMin, geometry.yMax) : [];
   const segments = useMemo(() => splitSegments(points), [points]);
+  const viewLabel = view === 'chart' ? '切换到表格' : '切换到图表';
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none sm:p-6">
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-slate-100">
-            <BarChart3 className="h-4 w-4 text-indigo-500 dark:text-indigo-400" />
-            支出趋势
-          </div>
-          <div className="mt-1 text-xs text-gray-500 dark:text-slate-400">
-            月预计支出趋势{currency ? `（${currency}）` : ''}
-          </div>
+    <section className={cn(CARD, 'min-w-0 p-4 sm:p-6')}>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">支出趋势</h2>
+          <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">
+            每日快照的月预计支出合计{currency ? `（${currency}）` : ''}
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="inline-flex rounded-lg border border-gray-200 bg-gray-100/80 p-0.5 dark:border-slate-800 dark:bg-slate-950/60">
+          <div className="inline-flex rounded-lg bg-gray-100 p-0.5 dark:bg-ink-950">
             {RANGES.map((r) => (
               <button
                 key={r}
                 type="button"
                 onClick={() => { setRange(r); setHover(null); }}
-                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                aria-pressed={range === r}
+                className={cn(
+                  'h-8 whitespace-nowrap rounded-md px-2.5 text-xs font-medium tabular-nums transition-colors',
                   range === r
-                    ? 'bg-white text-indigo-600 shadow-sm dark:bg-slate-800 dark:text-indigo-300'
-                    : 'text-gray-500 hover:text-gray-900 dark:text-slate-400 dark:hover:text-slate-200'
-                }`}
+                    ? 'bg-white text-gray-900 shadow-sm dark:bg-ink-800 dark:text-gray-50'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
+                )}
               >
-                {r}天
+                {r} 天
               </button>
             ))}
           </div>
           <button
             type="button"
             onClick={() => setView((v) => (v === 'chart' ? 'table' : 'chart'))}
-            title={view === 'chart' ? '切换到表格' : '切换到图表'}
-            aria-label={view === 'chart' ? '切换到表格' : '切换到图表'}
-            className="rounded-lg border border-gray-200 p-1.5 text-gray-500 transition-colors hover:text-indigo-500 dark:border-slate-800 dark:text-slate-400 dark:hover:text-indigo-400"
+            title={viewLabel}
+            aria-label={viewLabel}
+            className={cn(BUTTON.icon, 'border border-gray-200 dark:border-ink-800')}
           >
-            {view === 'chart' ? <Table2 className="h-4 w-4" /> : <LineChart className="h-4 w-4" />}
+            {view === 'chart' ? <Table2 className="size-4" /> : <LineChart className="size-4" />}
           </button>
         </div>
       </div>
 
       {loading && rows === null ? (
-        <div className="h-[206px] animate-pulse rounded-lg bg-gray-100 dark:bg-slate-800" />
+        <div className="h-[206px] animate-pulse rounded-lg bg-gray-100 dark:bg-ink-800" />
       ) : error ? (
-        <div className="py-10 text-center text-sm text-rose-600 dark:text-rose-400">{error}</div>
+        <div className="py-10 text-center text-sm text-red-600 dark:text-red-400">{error}</div>
       ) : points.length === 0 ? (
-        <div className="py-10 text-center text-sm text-gray-500 dark:text-slate-400">
-          暂无账单数据
+        <div className="py-10 text-center">
+          <p className="text-sm font-medium text-gray-700 dark:text-ink-200">还没有支出快照</p>
+          <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">每天会记录一次各 Team 的月预计支出，有记录后这里显示趋势。</p>
         </div>
       ) : (
         <>
           <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-2xl font-bold text-gray-900 dark:text-slate-100">
-              {formatMoney(latest!.value)}
+            <span className="text-2xl font-semibold tabular-nums tracking-tight text-gray-900 dark:text-gray-50">
+              {formatMoney(latest!.value, currency)}
             </span>
-            <span className="text-xs text-gray-500 dark:text-slate-400">
-              {currency} · {formatDay(latest!.date)}
+            <span className="whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
+              {formatDay(latest!.date)} 快照
             </span>
             {points.length > 1 && (
               <span
-                className={`text-xs font-medium ${
+                className={cn(
+                  'whitespace-nowrap text-xs font-medium tabular-nums',
                   delta > 0
-                    ? 'text-rose-600 dark:text-rose-400'
+                    ? 'text-red-600 dark:text-red-400'
                     : delta < 0
                       ? 'text-emerald-600 dark:text-emerald-400'
-                      : 'text-gray-500 dark:text-slate-400'
-                }`}
+                      : 'text-gray-500 dark:text-ink-400',
+                )}
               >
-                {delta > 0 ? '+' : ''}
-                {formatMoney(delta)} 较 {formatDay(first!.date)}
+                较 {formatDay(first!.date)} {delta > 0 ? '+' : ''}{formatMoney(delta, currency)}
               </span>
             )}
-            <span className="text-xs text-gray-400 dark:text-slate-500">
-              统计天数：{points.length} 天
+            <span className="whitespace-nowrap text-xs text-gray-400 dark:text-ink-500">
+              {points.length} 天有快照
             </span>
           </div>
 
           {view === 'table' ? (
-            <div className="max-h-[206px] overflow-y-auto rounded-lg border border-gray-100 dark:border-slate-800">
+            <div className="max-h-[206px] overflow-y-auto rounded-lg border border-gray-200 dark:border-ink-800">
               <table className="w-full text-left text-xs">
-                <thead className="sticky top-0 bg-gray-50 text-gray-500 dark:bg-slate-950/60 dark:text-slate-400">
+                <thead className="sticky top-0 bg-gray-50 text-gray-500 dark:bg-ink-950 dark:text-ink-400">
                   <tr>
-                    <th className="px-3 py-2 font-medium">日期</th>
-                    <th className="px-3 py-2 text-right font-medium">合计 {currency}</th>
+                    <th className="whitespace-nowrap px-3 py-2 font-medium">日期</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">合计{currency ? `（${currency}）` : ''}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100 dark:divide-slate-800">
+                <tbody className="divide-y divide-gray-100 dark:divide-ink-800">
                   {[...points].reverse().map((p) => (
                     <tr key={p.date}>
-                      <td className="px-3 py-1.5 text-gray-600 dark:text-slate-300">{p.date}</td>
-                      <td className="px-3 py-1.5 text-right tabular-nums text-gray-900 dark:text-slate-100">
-                        {formatMoney(p.value)}
+                      <td className="px-3 py-1.5 tabular-nums text-gray-600 dark:text-ink-300">{p.date}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-gray-900 dark:text-gray-100">
+                        {formatAmount(p.value)}
                       </td>
                     </tr>
                   ))}
@@ -292,10 +289,11 @@ export default function CostTrendChart() {
                 width={width}
                 height={PLOT_HEIGHT + AXIS_BAND}
                 role="img"
-                aria-label={`支出趋势，${points.length} 个快照日，最新 ${formatMoney(latest!.value)} ${currency}`}
-                onMouseMove={handleMove}
-                onMouseLeave={() => setHover(null)}
-                className="block touch-none"
+                aria-label={`支出趋势，${points.length} 个快照日，最新 ${formatMoney(latest!.value, currency)}`}
+                onPointerMove={handleMove}
+                onPointerDown={handleMove}
+                onPointerLeave={(e) => { if (e.pointerType === 'mouse') setHover(null); }}
+                className="block touch-pan-y select-none"
               >
                 {/* 网格与坐标轴：实线发丝线，比表面暗一档，不抢数据的视线 */}
                 {geometry && ticks.map((t) => (
@@ -305,7 +303,7 @@ export default function CostTrendChart() {
                       x2={width - PAD_RIGHT}
                       y1={geometry.y(t)}
                       y2={geometry.y(t)}
-                      className="stroke-gray-200 dark:stroke-slate-800"
+                      className="stroke-gray-200 dark:stroke-ink-800"
                       strokeWidth={1}
                     />
                     <text
@@ -313,7 +311,7 @@ export default function CostTrendChart() {
                       y={geometry.y(t)}
                       textAnchor="end"
                       dominantBaseline="middle"
-                      className="fill-gray-400 text-[10px] tabular-nums dark:fill-slate-500"
+                      className="fill-gray-500 text-[10px] tabular-nums dark:fill-ink-400"
                     >
                       {formatTick(t)}
                     </text>
@@ -356,7 +354,7 @@ export default function CostTrendChart() {
                     cy={geometry.y(p.value)}
                     r={3}
                     fill={SERIES}
-                    className="stroke-white dark:stroke-slate-900"
+                    className="stroke-white dark:stroke-ink-900"
                     strokeWidth={2}
                   />
                 ))}
@@ -368,7 +366,7 @@ export default function CostTrendChart() {
                       x2={geometry.x(hoverPoint.ts)}
                       y1={PAD_TOP}
                       y2={PLOT_HEIGHT}
-                      className="stroke-gray-300 dark:stroke-slate-600"
+                      className="stroke-gray-300 dark:stroke-ink-600"
                       strokeWidth={1}
                     />
                     <circle
@@ -376,7 +374,7 @@ export default function CostTrendChart() {
                       cy={geometry.y(hoverPoint.value)}
                       r={5}
                       fill={SERIES}
-                      className="stroke-white dark:stroke-slate-900"
+                      className="stroke-white dark:stroke-ink-900"
                       strokeWidth={2}
                     />
                   </>
@@ -389,7 +387,7 @@ export default function CostTrendChart() {
                       x={PAD_LEFT}
                       y={PLOT_HEIGHT + 18}
                       textAnchor="start"
-                      className="fill-gray-400 text-[10px] tabular-nums dark:fill-slate-500"
+                      className="fill-gray-500 text-[10px] tabular-nums dark:fill-ink-400"
                     >
                       {formatDay(points[0].date)}
                     </text>
@@ -398,7 +396,7 @@ export default function CostTrendChart() {
                         x={width - PAD_RIGHT}
                         y={PLOT_HEIGHT + 18}
                         textAnchor="end"
-                        className="fill-gray-400 text-[10px] tabular-nums dark:fill-slate-500"
+                        className="fill-gray-500 text-[10px] tabular-nums dark:fill-ink-400"
                       >
                         {formatDay(points[points.length - 1].date)}
                       </text>
@@ -409,15 +407,15 @@ export default function CostTrendChart() {
 
               {geometry && hoverPoint && (
                 <div
-                  className="pointer-events-none absolute z-10 -translate-x-1/2 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-800"
+                  className="pointer-events-none absolute z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs shadow-lg dark:border-ink-700 dark:bg-ink-800"
                   style={{
                     left: Math.min(Math.max(geometry.x(hoverPoint.ts), 60), width - 60),
                     top: Math.max(0, geometry.y(hoverPoint.value) - 52),
                   }}
                 >
-                  <div className="text-gray-500 dark:text-slate-400">{hoverPoint.date}</div>
-                  <div className="font-medium tabular-nums text-gray-900 dark:text-slate-100">
-                    {formatMoney(hoverPoint.value)} {currency}
+                  <div className="tabular-nums text-gray-500 dark:text-ink-400">{hoverPoint.date}</div>
+                  <div className="font-medium tabular-nums text-gray-900 dark:text-gray-100">
+                    {formatMoney(hoverPoint.value, currency)}
                   </div>
                 </div>
               )}
@@ -425,6 +423,6 @@ export default function CostTrendChart() {
           )}
         </>
       )}
-    </div>
+    </section>
   );
 }

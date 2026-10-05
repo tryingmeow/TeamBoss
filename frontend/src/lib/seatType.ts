@@ -25,21 +25,6 @@ export function isCodexSeat(value: string | null | undefined): boolean {
   return normalizeSeatType(value) === 'usage_based';
 }
 
-export function seatTypeBadgeClass(
-  value: string | null | undefined,
-  theme: 'dashboard' | 'admin' = 'dashboard'
-): string {
-  const codex = isCodexSeat(value);
-  if (theme === 'admin') {
-    return codex
-      ? 'bg-purple-500/10 text-purple-400'
-      : 'bg-indigo-500/10 text-indigo-400';
-  }
-  return codex
-    ? 'bg-purple-100 text-purple-700 dark:bg-purple-600/20 dark:text-purple-400'
-    : 'bg-blue-100 text-blue-700 dark:bg-blue-600/20 dark:text-blue-400';
-}
-
 /** True when an API error looks like an HTTP 403 (used to special-case
  * "Codex 席位未开启" below). Matches both the raw `HTTP 403` fallback and
  * backend detail text mentioning "forbidden". */

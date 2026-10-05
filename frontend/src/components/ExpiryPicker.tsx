@@ -13,6 +13,8 @@ import {
   type ExpirySelection,
   type KickPolicy,
 } from '../lib/expiry';
+import { BUTTON, INPUT } from './ui';
+import { cn } from '../lib/utils';
 
 export type { ExpirySelection } from '../lib/expiry';
 
@@ -35,44 +37,6 @@ const TILES: PresetTile[] = [
 
 const PRESET_IDS = new Set(TILES.filter((t) => t.id !== 'custom').map((t) => t.id));
 
-type Tone = 'blue' | 'indigo';
-
-/**
- * 两个调用面各自的主色：成员面板一直是 blue-600，后台管理页一直是 indigo-500。
- * 组件是同一个，只有这一张表决定它长成哪边的样子。
- */
-const TONE: Record<Tone, {
-  active: string;
-  idle: string;
-  accentText: string;
-  ring: string;
-  solid: string;
-  calendarSelected: string;
-  panelBorder: string;
-  muted: string;
-}> = {
-  blue: {
-    active: 'bg-blue-600 text-white shadow-md shadow-blue-500/20',
-    idle: 'bg-gray-100 dark:bg-[#2a2d3a] text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[#3a3d4a]',
-    accentText: 'text-blue-600 dark:text-blue-400',
-    ring: 'focus:ring-blue-500/50 focus:border-blue-500',
-    solid: 'bg-blue-600 hover:bg-blue-700 text-white',
-    calendarSelected: 'bg-blue-600 text-white hover:bg-blue-600 hover:text-white focus:bg-blue-600 focus:text-white rounded-md',
-    panelBorder: 'border-gray-200 dark:border-[#2a2d3a]',
-    muted: 'text-gray-500 dark:text-gray-400',
-  },
-  indigo: {
-    active: 'bg-indigo-500 text-white shadow-md shadow-indigo-500/20',
-    idle: 'bg-white dark:bg-slate-900 text-gray-700 dark:text-slate-300 border border-gray-300 dark:border-slate-700 hover:bg-indigo-500/10 hover:text-indigo-500 hover:border-indigo-500/40',
-    accentText: 'text-indigo-500 dark:text-indigo-400',
-    ring: 'focus:ring-indigo-500/50 focus:border-indigo-500',
-    solid: 'bg-indigo-500 hover:bg-indigo-600 text-white',
-    calendarSelected: 'bg-indigo-500 text-white hover:bg-indigo-500 hover:text-white focus:bg-indigo-500 focus:text-white rounded-md',
-    panelBorder: 'border-gray-300 dark:border-slate-700',
-    muted: 'text-gray-500 dark:text-slate-400',
-  },
-};
-
 interface ExpiryPickerProps {
   /** 受控用法（表单里先选后交）。不传则组件自己记住选中项。 */
   value?: ExpirySelection | null;
@@ -87,7 +51,6 @@ interface ExpiryPickerProps {
   joinedAt?: string | null;
   /** 来自 useSettings 的宽限规则，用来算「预计 X 移出」。 */
   policy: KickPolicy;
-  tone?: Tone;
   disabled?: boolean;
   /**
    * 'both'     九宫格 + 自定义（时长/日期两个分页）——默认，成员行与新增对话框用。
@@ -110,13 +73,11 @@ export default function ExpiryPicker({
   onSubmit,
   joinedAt,
   policy,
-  tone = 'blue',
   disabled = false,
   mode = 'both',
 }: ExpiryPickerProps) {
   const dateOnly = mode === 'date';
   const durationOnly = mode === 'duration';
-  const t = TONE[tone];
   const controlled = value !== undefined;
   const [internal, setInternal] = useState<ExpirySelection | null>(null);
   const current = controlled ? value ?? null : internal;
@@ -209,50 +170,55 @@ export default function ExpiryPicker({
   return (
     <div className="space-y-2.5">
       {!dateOnly && (
-      <div className="grid grid-cols-3 gap-1.5">
-        {(durationOnly ? TILES.filter((tile) => tile.id !== 'custom') : TILES).map((tile) => {
-          const isActive = activeId === tile.id;
-          return (
-            <button
-              key={tile.id}
-              type="button"
-              disabled={disabled}
-              onClick={() => handleTile(tile)}
-              aria-pressed={isActive}
-              className={`rounded-lg px-2 py-2 text-xs font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
-                isActive ? t.active : t.idle
-              }`}
-            >
-              {tile.label}
-            </button>
-          );
-        })}
-      </div>
+        <div className="grid grid-cols-3 gap-1.5">
+          {(durationOnly ? TILES.filter((tile) => tile.id !== 'custom') : TILES).map((tile) => {
+            const isActive = activeId === tile.id;
+            return (
+              <button
+                key={tile.id}
+                type="button"
+                disabled={disabled}
+                onClick={() => handleTile(tile)}
+                aria-pressed={isActive}
+                className={cn(
+                  'h-9 whitespace-nowrap rounded-lg border px-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:cursor-not-allowed disabled:opacity-50',
+                  isActive
+                    ? 'border-blue-600 bg-blue-600 text-white shadow-sm'
+                    : 'border-transparent bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-ink-800 dark:text-ink-200 dark:hover:bg-ink-700',
+                )}
+              >
+                {tile.label}
+              </button>
+            );
+          })}
+        </div>
       )}
 
       {(customOpen || dateOnly) && (
-        <div className={`rounded-lg border p-2.5 space-y-2.5 ${t.panelBorder}`}>
+        <div className={cn('space-y-2.5', !dateOnly && 'rounded-lg border border-gray-200 p-2.5 dark:border-ink-800')}>
           {mode === 'both' && (
-          <div className="flex gap-1">
-            {([
-              { id: 'days' as const, label: '按时长', Icon: Hash },
-              { id: 'date' as const, label: '按日期', Icon: CalendarDays },
-            ]).map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setCustomMode(id)}
-                className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-colors ${
-                  customMode === id
-                    ? t.active
-                    : `${t.muted} hover:bg-gray-100 dark:hover:bg-white/5`
-                }`}
-              >
-                <Icon className="h-3.5 w-3.5" />
-                {label}
-              </button>
-            ))}
-          </div>
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950">
+              {([
+                { id: 'days' as const, label: '按时长', Icon: Hash },
+                { id: 'date' as const, label: '按日期', Icon: CalendarDays },
+              ]).map(({ id, label, Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setCustomMode(id)}
+                  aria-pressed={customMode === id}
+                  className={cn(
+                    'flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2 py-1.5 text-xs font-medium transition-colors',
+                    customMode === id
+                      ? 'bg-white text-gray-900 shadow-sm dark:bg-ink-800 dark:text-gray-100'
+                      : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
+                  )}
+                >
+                  <Icon className="size-3.5" />
+                  {label}
+                </button>
+              ))}
+            </div>
           )}
 
           {customMode === 'days' ? (
@@ -269,13 +235,14 @@ export default function ExpiryPicker({
                     handleCustomConfirm();
                   }
                 }}
-                className={`w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-sm text-gray-900 transition-all focus:outline-none focus:ring-2 dark:border-[#2a2d3a] dark:bg-[#0f1117] dark:text-gray-200 ${t.ring}`}
-                placeholder="天数"
+                className={cn(INPUT, 'py-1.5')}
+                placeholder="数量"
               />
               <select
                 value={amountUnit}
                 onChange={(e) => setAmountUnit(e.target.value as 'd' | 'h' | 'm')}
-                className={`shrink-0 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm text-gray-900 focus:outline-none focus:ring-2 dark:border-[#2a2d3a] dark:bg-[#0f1117] dark:text-gray-200 ${t.ring}`}
+                aria-label="时长单位"
+                className={cn(INPUT, 'w-auto shrink-0 py-1.5')}
               >
                 <option value="d">天</option>
                 <option value="h">小时</option>
@@ -283,7 +250,7 @@ export default function ExpiryPicker({
               </select>
             </div>
           ) : (
-            <div className="w-[264px] max-w-full">
+            <div className="mx-auto w-[252px] max-w-full">
               <DayPicker
                 mode="single"
                 locale={zhCN}
@@ -292,39 +259,39 @@ export default function ExpiryPicker({
                 disabled={{ before: new Date() }}
                 defaultMonth={calendarDate || new Date()}
                 classNames={{
-                  root: 'p-0',
-                  months: 'flex flex-col space-y-4',
+                  root: 'relative p-0',
+                  months: 'flex flex-col',
                   month: 'space-y-2',
-                  month_caption: 'flex justify-center pt-1 relative items-center',
-                  caption_label: 'text-sm font-medium text-gray-800 dark:text-gray-200',
-                  nav: 'space-x-1 flex items-center',
+                  month_caption: 'flex h-8 items-center justify-center',
+                  caption_label: 'text-sm font-medium text-gray-900 dark:text-gray-100',
+                  nav: 'absolute inset-x-0 top-0 flex items-center justify-between',
                   button_previous:
-                    'absolute left-1 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100 flex items-center justify-center text-gray-500 dark:text-gray-400',
+                    'flex size-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-30 dark:text-ink-400 dark:hover:bg-ink-800 dark:hover:text-gray-100',
                   button_next:
-                    'absolute right-1 h-7 w-7 bg-transparent p-0 opacity-50 hover:opacity-100 flex items-center justify-center text-gray-500 dark:text-gray-400',
+                    'flex size-8 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-30 dark:text-ink-400 dark:hover:bg-ink-800 dark:hover:text-gray-100',
                   month_grid: 'w-full border-collapse',
                   weekdays: 'flex',
-                  weekday: 'text-gray-400 dark:text-gray-500 rounded-md w-8 font-normal text-[0.75rem]',
-                  week: 'flex w-full mt-1',
-                  day: 'h-8 w-8 text-center text-sm p-0 relative',
+                  weekday: 'w-9 text-[0.75rem] font-normal text-gray-400 dark:text-ink-500',
+                  week: 'mt-0.5 flex w-full',
+                  day: 'size-9 p-0 text-center text-sm text-gray-700 dark:text-ink-200',
                   day_button:
-                    'h-8 w-8 p-0 font-normal rounded-md transition-colors inline-flex items-center justify-center text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[#2a2d3a]',
-                  selected: t.calendarSelected,
-                  today: 'bg-gray-100 dark:bg-[#2a2d3a] rounded-md',
-                  outside: 'text-gray-400 dark:text-gray-600 opacity-50',
-                  disabled: 'text-gray-400 dark:text-gray-600 opacity-50',
+                    'inline-flex size-9 items-center justify-center rounded-md p-0 font-normal transition-colors hover:bg-gray-100 dark:hover:bg-ink-800',
+                  selected: '[&>button]:bg-blue-600 [&>button]:font-medium [&>button]:text-white [&>button]:hover:bg-blue-600',
+                  today: '[&>button]:ring-1 [&>button]:ring-inset [&>button]:ring-gray-300 dark:[&>button]:ring-ink-600',
+                  outside: '[&>button]:text-gray-300 dark:[&>button]:text-ink-600',
+                  disabled: '[&>button]:cursor-not-allowed [&>button]:text-gray-300 [&>button]:hover:bg-transparent dark:[&>button]:text-ink-600',
                   hidden: 'invisible',
                 }}
                 components={{
                   Chevron: ({ orientation }) => {
                     const Icon = orientation === 'left' ? ChevronLeft : ChevronRight;
-                    return <Icon className="h-4 w-4" />;
+                    return <Icon className="size-4" />;
                   },
                 }}
               />
 
               <div className="mt-2 flex items-center gap-2">
-                <span className={`text-xs ${t.muted}`}>时间</span>
+                <span className="text-xs text-gray-500 dark:text-ink-400">时间</span>
                 <input
                   type="number"
                   min={0}
@@ -333,9 +300,9 @@ export default function ExpiryPicker({
                   onChange={(e) => { setClockTouched(true); setHourText(e.target.value); }}
                   onBlur={() => setHourText(String(clampInt(hourText, 0, 23, 0)).padStart(2, '0'))}
                   aria-label="小时"
-                  className={`w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-center text-sm text-gray-900 focus:outline-none focus:ring-2 dark:border-[#2a2d3a] dark:bg-[#0f1117] dark:text-gray-200 ${t.ring}`}
+                  className={cn(INPUT, 'w-16 px-2 py-1.5 text-center')}
                 />
-                <span className="text-sm text-gray-400">:</span>
+                <span className="text-sm text-gray-400 dark:text-ink-500">:</span>
                 <input
                   type="number"
                   min={0}
@@ -344,7 +311,7 @@ export default function ExpiryPicker({
                   onChange={(e) => { setClockTouched(true); setMinuteText(e.target.value); }}
                   onBlur={() => setMinuteText(String(clampInt(minuteText, 0, 59, 0)).padStart(2, '0'))}
                   aria-label="分钟"
-                  className={`w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-center text-sm text-gray-900 focus:outline-none focus:ring-2 dark:border-[#2a2d3a] dark:bg-[#0f1117] dark:text-gray-200 ${t.ring}`}
+                  className={cn(INPUT, 'w-16 px-2 py-1.5 text-center')}
                 />
               </div>
             </div>
@@ -354,23 +321,23 @@ export default function ExpiryPicker({
             type="button"
             onClick={handleCustomConfirm}
             disabled={!draft || disabled}
-            className={`w-full rounded-lg px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${t.solid}`}
+            className={cn(BUTTON.primary, 'w-full py-1.5')}
           >
             确认
           </button>
         </div>
       )}
 
-      <div className="min-h-[1rem] text-[11px] leading-4">
+      <div className="min-h-4 text-xs leading-4">
         {previewSelection?.kind === 'never' ? (
-          <span className="text-amber-600 dark:text-amber-400">永不过期</span>
+          <span className="text-amber-600 dark:text-amber-400">永不过期，不会到期移出</span>
         ) : previewExpiry && previewKick ? (
-          <span className={t.muted}>
-            <span className={t.accentText}>预计 {formatAppLocalMinute(previewKick)} 移出</span>
-            <span className="text-gray-400 dark:text-gray-500">（{kickPolicyLabel(policy)}）</span>
+          <span>
+            <span className="text-blue-600 dark:text-blue-400">预计 {formatAppLocalMinute(previewKick)} 移出</span>
+            <span className="text-gray-400 dark:text-ink-500">（{kickPolicyLabel(policy)}）</span>
           </span>
         ) : (
-          <span className="text-gray-400 dark:text-gray-600">选择一个到期时间</span>
+          <span className="text-gray-400 dark:text-ink-500">选择一个到期时间</span>
         )}
       </div>
     </div>

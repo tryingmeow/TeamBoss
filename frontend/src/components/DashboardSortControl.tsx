@@ -50,7 +50,7 @@ export default function DashboardSortControl({
 
   return (
     <div
-      className="inline-flex h-11 items-stretch overflow-hidden rounded-[14px] border border-gray-200/90 bg-white/90 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_8px_24px_rgba(15,23,42,0.04)] backdrop-blur-xl transition-all duration-200 hover:border-gray-300 hover:shadow-[0_2px_4px_rgba(15,23,42,0.05),0_10px_28px_rgba(15,23,42,0.07)] focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-500/10 dark:border-white/[0.08] dark:bg-[#1a1d27]/90 dark:shadow-[0_8px_24px_rgba(0,0,0,0.18)] dark:hover:border-white/[0.14]"
+      className="inline-flex h-11 items-stretch overflow-hidden rounded-[14px] border border-gray-200/90 bg-white/90 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_8px_24px_rgba(15,23,42,0.04)] backdrop-blur-xl transition-all duration-200 hover:border-gray-300 hover:shadow-[0_2px_4px_rgba(15,23,42,0.05),0_10px_28px_rgba(15,23,42,0.07)] focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-500/10 dark:border-white/[0.08] dark:bg-ink-900/90 dark:shadow-[0_8px_24px_rgba(0,0,0,0.18)] dark:hover:border-white/[0.14]"
       role="group"
       aria-label="Team 排序"
     >
@@ -85,7 +85,7 @@ export default function DashboardSortControl({
             align="end"
             sideOffset={8}
             collisionPadding={12}
-            className="sort-menu-content z-50 min-w-[13.5rem] rounded-2xl border border-gray-200/90 bg-white/95 p-1.5 shadow-[0_18px_50px_rgba(15,23,42,0.14)] backdrop-blur-xl outline-none dark:border-white/[0.09] dark:bg-[#1a1d27]/95 dark:shadow-[0_20px_55px_rgba(0,0,0,0.38)]"
+            className="sort-menu-content z-50 min-w-[13.5rem] rounded-2xl border border-gray-200/90 bg-white/95 p-1.5 shadow-[0_18px_50px_rgba(15,23,42,0.14)] backdrop-blur-xl outline-none dark:border-white/[0.09] dark:bg-ink-900/95 dark:shadow-[0_20px_55px_rgba(0,0,0,0.38)]"
           >
             <DropdownMenu.RadioGroup
               value={sortKey}

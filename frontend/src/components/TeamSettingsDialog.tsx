@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import * as Dialog from '@radix-ui/react-dialog';
-import { Globe, Loader2, RefreshCw, Settings, X } from 'lucide-react';
+import { ArrowLeftRight, ChevronDown, Loader2 } from 'lucide-react';
 import type { SeatType, TeamWorkspaceSettings } from '../types';
 import {
   checkProxy,
@@ -12,6 +11,8 @@ import {
 } from '../api/client';
 import { formatSeatTypeLabel, normalizeSeatType } from '../lib/seatType';
 import ConfirmDialog from './ConfirmDialog';
+import DialogFrame from './DialogFrame';
+import { cn } from '../lib/utils';
 
 interface TeamSettingsDialogProps {
   open: boolean;
@@ -22,8 +23,6 @@ interface TeamSettingsDialogProps {
   onChanged?: (settings: TeamWorkspaceSettings) => void;
   onProxyChanged?: (proxyId: number | null) => void;
 }
-
-const seatLabel = formatSeatTypeLabel;
 
 function normalizeWorkspaceSeatType(value: TeamWorkspaceSettings['default_seat_type']): SeatType {
   return normalizeSeatType(value);
@@ -171,103 +170,90 @@ export default function TeamSettingsDialog({
     return 'bg-gray-400';
   };
 
+  const selectedProxy = proxies.find((p) => p.id === selectedProxyId);
+
   return (
     <>
-      <Dialog.Root open={open} onOpenChange={handleOpenChange}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black/60 z-50" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-gray-200 bg-white p-5 shadow-2xl dark:border-[#2a2d3a] dark:bg-[#1a1d27]">
-            <Dialog.Title className="flex items-center gap-2 text-base font-bold text-gray-900 dark:text-gray-100">
-              <Settings size={17} />
-              设置
-            </Dialog.Title>
-
-            <div className="mt-5 space-y-4">
-              {/* Seat type */}
-              <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-3 dark:border-[#2a2d3a] dark:bg-[#0f1117]">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300">默认席位</span>
-                  <button
-                    type="button"
-                    disabled={loading || !settings}
-                    onClick={() => setConfirmOpen(true)}
-                    className={`group inline-flex items-center overflow-hidden rounded-full text-xs font-semibold ring-1 transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
-                      currentSeat === 'usage_based'
-                        ? 'bg-purple-50 text-purple-700 ring-purple-200 hover:bg-purple-100 dark:bg-purple-500/10 dark:text-purple-300 dark:ring-purple-500/30 dark:hover:bg-purple-500/20'
-                        : 'bg-blue-50 text-blue-700 ring-blue-200 hover:bg-blue-100 dark:bg-blue-500/10 dark:text-blue-300 dark:ring-blue-500/30 dark:hover:bg-blue-500/20'
-                    }`}
-                    aria-label="切换默认席位"
-                    title="切换"
-                  >
-                    <span className="flex items-center gap-1.5 px-3 py-1.5">
-                      {loading ? (
-                        <>
-                          <Loader2 size={14} className="animate-spin" />
-                          <span>查询中...</span>
-                        </>
-                      ) : (
-                        seatLabel(currentSeat)
-                      )}
-                    </span>
-                    <span className="flex h-7 w-7 items-center justify-center bg-white/70 dark:bg-white/10">
-                      <RefreshCw size={12} className="transition-transform group-hover:rotate-180" />
-                    </span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Proxy selector */}
-              <div className="rounded-xl border border-gray-100 bg-gray-50/70 p-3 dark:border-[#2a2d3a] dark:bg-[#0f1117]">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
-                    <Globe size={14} className="text-gray-400" />
-                    网络
-                  </span>
-                  <div className="relative">
-                    <select
-                      value={selectedProxyId ?? ''}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        handleProxyChange(val === '' ? null : Number(val));
-                      }}
-                      disabled={savingProxy}
-                      className="appearance-none pl-3 pr-7 py-1.5 rounded-full text-xs font-semibold bg-gray-100 dark:bg-[#2a2d3a] text-gray-700 dark:text-gray-300 border-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 cursor-pointer disabled:opacity-50"
-                    >
-                      <option value="">直连</option>
-                      {proxies.map((p) => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                    <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
-                      {savingProxy ? (
-                        <Loader2 size={12} className="animate-spin text-gray-400" />
-                      ) : (
-                        <span className={`block w-2 h-2 rounded-full ${
-                          selectedProxyId == null ? 'bg-emerald-500' : proxyStatusDot(proxies.find((p) => p.id === selectedProxyId) ?? { status: 'unknown' } as Proxy)
-                        }`} />
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
+      <DialogFrame open={open} onOpenChange={handleOpenChange} title="Team 设置" size="md">
+        <div className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
+          <div className="flex items-center justify-between gap-3 p-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-gray-900 dark:text-gray-100">默认邀请席位</div>
+              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">成员邀请默认使用的席位</div>
             </div>
+            <button
+              type="button"
+              disabled={loading || !settings}
+              onClick={() => setConfirmOpen(true)}
+              className={cn(
+                'inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+                currentSeat === 'usage_based'
+                  ? 'border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100 dark:border-purple-500/30 dark:bg-purple-500/10 dark:text-purple-300 dark:hover:bg-purple-500/20'
+                  : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300 dark:hover:bg-blue-500/20',
+              )}
+              aria-label={`默认邀请席位：${formatSeatTypeLabel(currentSeat)}，点击切换`}
+              title="切换"
+            >
+              {loading ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  查询中…
+                </>
+              ) : (
+                <>
+                  {formatSeatTypeLabel(currentSeat)}
+                  <ArrowLeftRight size={13} className="opacity-70" />
+                </>
+              )}
+            </button>
+          </div>
 
-            {error && <p className="mt-3 text-xs text-red-500 dark:text-red-400">{error}</p>}
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 p-3">
+            <div className="min-w-0 flex-1 basis-40">
+              <label htmlFor="team-proxy" className="text-sm font-medium text-gray-900 dark:text-gray-100">代理</label>
+              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">访问 ChatGPT 时使用的网络</div>
+            </div>
+            <div className="relative w-full sm:w-44">
+              <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2">
+                {savingProxy ? (
+                  <Loader2 size={12} className="animate-spin text-gray-400" />
+                ) : (
+                  <span
+                    className={cn(
+                      'block size-2 rounded-full',
+                      selectedProxyId == null ? 'bg-emerald-500' : proxyStatusDot(selectedProxy ?? ({ status: 'unknown' } as Proxy)),
+                    )}
+                  />
+                )}
+              </span>
+              <select
+                id="team-proxy"
+                value={selectedProxyId ?? ''}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  handleProxyChange(val === '' ? null : Number(val));
+                }}
+                disabled={savingProxy}
+                className="h-9 w-full cursor-pointer appearance-none truncate rounded-lg border border-gray-200 bg-white pl-7 pr-8 text-sm text-gray-700 transition-colors hover:border-gray-300 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 disabled:opacity-50 dark:border-ink-800 dark:bg-ink-950 dark:text-gray-200 dark:hover:border-ink-700"
+              >
+                <option value="">直连</option>
+                {proxies.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+              <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 dark:text-ink-500" />
+            </div>
+          </div>
+        </div>
 
-            <Dialog.Close asChild>
-              <button className="absolute right-4 top-4 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-200">
-                <X size={16} />
-              </button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+        {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+      </DialogFrame>
 
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title="切换默认席位"
-        message={`切换为 ${formatSeatTypeLabel(nextSeat)}？`}
+        title="切换默认邀请席位"
+        message={`成员邀请的默认席位将从 ${formatSeatTypeLabel(currentSeat)} 改为 ${formatSeatTypeLabel(nextSeat)}。`}
         confirmLabel="切换"
         loading={saving}
         onConfirm={handleConfirmSwitch}

@@ -1,10 +1,9 @@
 import { useState, useRef, useEffect, type FormEvent } from 'react';
-import { UserPlus, Trash2, KeyRound, DollarSign, CreditCard, Globe, Mail, Users, Zap, Calendar, ChevronDown, RefreshCw, Settings, Pencil, X, Loader2, CircleAlert, Copy, Check } from 'lucide-react';
-import * as Dialog from '@radix-ui/react-dialog';
-import * as Tooltip from '@radix-ui/react-tooltip';
+import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check } from 'lucide-react';
 import type { Team, TeamWorkspaceSettings, MembersData, ShowToast } from '../types';
 import MemberPanel from './MemberPanel';
 import ConfirmDialog from './ConfirmDialog';
+import DialogFrame from './DialogFrame';
 import AddMemberDialog from './AddMemberDialog';
 import TeamSettingsDialog from './TeamSettingsDialog';
 import { useMembers } from '../hooks/useMembers';
@@ -12,6 +11,8 @@ import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '.
 import { activeChatGptSeats } from '../lib/seatCapacity';
 import { formatSeatTypeLabel } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
+import { formatMoney } from '../lib/money';
+import { BUTTON, INPUT, PILL, TONE } from './ui';
 
 interface TeamCardProps {
   team: Team;
@@ -29,8 +30,20 @@ function formatShortDate(dateStr: string | null): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-function formatAmount(total: number): string {
-  return Number.isInteger(total) ? String(total) : String(Math.round(total * 100) / 100);
+const CARD_BRANDS: Record<string, string> = {
+  visa: 'Visa',
+  mastercard: 'Mastercard',
+  amex: 'Amex',
+  american_express: 'Amex',
+  discover: 'Discover',
+  jcb: 'JCB',
+  unionpay: 'UnionPay',
+  diners: 'Diners',
+};
+
+function cardBrandLabel(brand: string): string {
+  const key = brand.trim().toLowerCase().replace(/\s+/g, '_');
+  return CARD_BRANDS[key] ?? brand;
 }
 
 function discountedMonthlyTotal(team: Team): number | null {
@@ -401,46 +414,74 @@ export default function TeamCard({
     : isSubscriptionExpired
       ? 'bg-red-500'
     : isWarning
-      ? 'bg-yellow-400 animate-pulse'
+      ? 'bg-amber-400 animate-pulse'
       : 'bg-emerald-500';
+
+  const statusLabel = syncError
+    ? '刷新失败'
+    : authBlocked
+    ? '登录失效'
+    : isSubscriptionExpired
+      ? '订阅已到期'
+    : isWarning
+      ? '即将到期'
+      : '正常';
 
   const borderClass = syncError
     ? 'border-red-500 ring-1 ring-red-500/40 dark:border-red-500 dark:ring-red-500/30'
     : isSubscriptionExpired
     ? 'border-red-400/60 dark:border-red-500/60'
-    : isWarning ? 'border-yellow-400/50 dark:border-yellow-500/50' : 'border-gray-200 dark:border-[#2a2d3a]';
+    : isWarning ? 'border-amber-300 dark:border-amber-500/50' : 'border-gray-200 dark:border-ink-800';
 
   const hoverBorderClass = syncError
     ? 'hover:border-red-500 dark:hover:border-red-500'
-    : 'hover:border-blue-300 dark:hover:border-[#3a3d4a]';
+    : 'hover:border-blue-300 dark:hover:border-ink-700';
+
+  const unit = moneySuffix(team);
+  const seatsEntitled = Number(team.seats_entitled) || 0;
+  const overSeats = seatsEntitled > 0 && activeGptSeats > seatsEntitled;
+  const seatFill = seatsEntitled > 0 ? Math.min(100, (activeGptSeats / seatsEntitled) * 100) : 0;
+  const showCodex = team.is_codex_enabled && team.codex_count > 0;
+
+  const renewalLabel = isSubscriptionExpired || isNonRenewing ? '到期' : '续费';
+  const renewalWhen = isSubscriptionExpired
+    ? '已到期'
+    : isSubscriptionStale
+      ? '数据未同步'
+      : team.days_remaining === null
+        ? ''
+        : team.days_remaining <= 0
+          ? '今天'
+          : `${team.days_remaining} 天后`;
+  const renewalTone = isSubscriptionExpired
+    ? 'text-red-600 dark:text-red-400'
+    : isWarning
+      ? 'text-amber-600 dark:text-amber-400'
+      : 'text-gray-900 dark:text-gray-100';
 
   return (
     <div className="relative">
       <div
-        className={`relative bg-white dark:bg-[#1a1d27] rounded-2xl border ${borderClass} ${hoverBorderClass} overflow-hidden transition-all duration-300 hover:shadow-lg group`}
+        className={`group relative overflow-hidden rounded-2xl border bg-white transition-[border-color,box-shadow] duration-200 hover:shadow-md dark:bg-ink-900 dark:hover:shadow-black/30 ${borderClass} ${hoverBorderClass}`}
       >
         {authBlocked && (
-          <div className="absolute inset-0 bg-white/85 dark:bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-10 px-5 text-center">
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white/90 px-5 text-center backdrop-blur-sm dark:bg-ink-950/85">
             <div className="w-full space-y-1.5">
-              <div className="text-xs font-semibold text-red-500 dark:text-red-400">
-                {isAuthExpired ? 'Session 失效' : '登录已失效'}
+              <div className="text-xs font-semibold text-red-600 dark:text-red-400">
+                {isAuthExpired ? 'Session 已失效' : '登录已失效'}
               </div>
-              <div className="text-xs text-gray-600 dark:text-gray-400">
-                需重新导入 session
+              <div className="text-xs text-gray-600 dark:text-ink-300">
+                需要重新导入 Session
                 {!isAuthExpired && authBlockedSince && ` · ${authBlockedSince}`}
+                {isSyncSuspended && ' · 已暂停自动同步'}
               </div>
-              {isSyncSuspended && (
-                <div className="text-xs text-gray-500 dark:text-gray-500">
-                  已暂停自动同步
-                </div>
-              )}
-              <div className="break-words text-base font-bold text-gray-900 dark:text-gray-100">
+              <div className="break-words pt-1 text-base font-semibold text-gray-900 dark:text-gray-100">
                 {team.name}
                 {team.remark && (
-                  <span className="font-semibold text-gray-500 dark:text-gray-400">（{team.remark}）</span>
+                  <span className="font-medium text-gray-500 dark:text-ink-400">（{team.remark}）</span>
                 )}
               </div>
-              <div className="inline-flex max-w-full items-center justify-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
+              <div className="inline-flex max-w-full items-center justify-center gap-1.5 text-xs text-gray-600 dark:text-ink-300">
                 <span className="break-all">{team.owner_email}</span>
                 <button
                   type="button"
@@ -450,7 +491,7 @@ export default function TeamCard({
                   }}
                   className={`shrink-0 rounded-md p-1 transition-colors ${ownerEmailCopied
                     ? 'text-emerald-500 dark:text-emerald-400'
-                    : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-200'
+                    : 'text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-ink-800 dark:hover:text-gray-200'
                   }`}
                   title="复制邮箱"
                   aria-label={`复制 ${team.owner_email}`}
@@ -458,285 +499,270 @@ export default function TeamCard({
                   {ownerEmailCopied ? <Check size={14} /> : <Copy size={14} />}
                 </button>
               </div>
-              <div className="inline-flex rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400" title={team.id}>
+              <div className="inline-flex rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-500 dark:bg-ink-800 dark:text-ink-400" title={team.id}>
                 ID {shortTeamId(team.id)}
               </div>
             </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); onReimport(team); }}
-              className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-semibold transition-all transform hover:scale-105 shadow-md"
-            >
-              <KeyRound size={16} /> 重新导入
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-              className="flex items-center gap-2 px-5 py-2.5 bg-red-500 hover:bg-red-600 text-white rounded-xl text-sm font-semibold transition-all transform hover:scale-105 shadow-md"
-            >
-              <Trash2 size={16} /> 删除
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onReimport(team); }}
+                className={BUTTON.primary}
+              >
+                <KeyRound size={16} /> 重新导入
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
+                className={`${BUTTON.secondary} text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300`}
+              >
+                <Trash2 size={16} /> 删除
+              </button>
+            </div>
           </div>
         )}
 
-        <div
-          className="p-5 cursor-pointer"
-          onClick={handleToggleExpanded}
-        >
+        <div className="cursor-pointer p-4 sm:p-5" onClick={handleToggleExpanded}>
           {/* Header */}
-          <div className="flex items-start justify-between mb-4">
-            <div className="flex flex-col gap-1 w-full overflow-hidden">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className={`w-2.5 h-2.5 rounded-full shadow-sm ${statusDotClass}`} />
-                {syncError && (
-                  <span
-                    className="shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/20 dark:text-red-300"
-                    title={`刷新失败：${syncError}`}
-                  >
-                    刷新失败
-                  </span>
-                )}
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <h3 className="flex min-w-0 items-baseline overflow-hidden pr-0.5 font-bold text-gray-900 dark:text-gray-100 text-base">
-                    <span className="truncate">{team.name}</span>
-                    {team.remark && (
-                      <span
-                        className="ml-1 max-w-[9rem] shrink-0 truncate text-sm font-semibold text-gray-500 dark:text-gray-400"
-                        title={team.remark}
-                      >
-                        （{team.remark}）
-                      </span>
-                    )}
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); handleOpenRemark(); }}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-gray-400 transition-colors hover:bg-gray-100 hover:text-blue-500 dark:text-gray-500 dark:hover:bg-gray-800 dark:hover:text-blue-400"
-                    aria-label="编辑备注，不修改 Workspace 名称"
-                    title="编辑备注，不修改 Workspace 名称"
-                  >
-                    <Pencil size={12} />
-                    <span>备注</span>
-                  </button>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 pl-4">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <Mail size={12} className="shrink-0" />
-                  <span className="truncate">{team.owner_email}</span>
-                </span>
-                {team.proxy_id && (
-                  <span className="shrink-0 text-blue-400 dark:text-blue-500" title="代理">
-                    <Globe size={11} />
-                  </span>
-                )}
-                <span className={`flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium ${team.is_codex_enabled ? 'bg-purple-100 text-purple-600 dark:bg-purple-500/20 dark:text-purple-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`} title={`Codex ${team.is_codex_enabled ? 'ON' : 'OFF'}`}>
-                  <Zap size={10} /> {team.is_codex_enabled ? 'Codex ON' : 'Codex OFF'}
-                </span>
+          <div className="flex items-center gap-2">
+            <span className={`size-2.5 shrink-0 rounded-full ${statusDotClass}`} title={statusLabel} aria-label={statusLabel} />
+            <h3 className="flex min-w-0 items-baseline text-base font-semibold text-gray-900 dark:text-gray-50">
+              <span className="min-w-0 truncate" title={team.name}>{team.name}</span>
+              {team.remark && (
                 <span
-                  className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                    team.default_seat_type === 'usage_based'
-                      ? 'bg-purple-100 text-purple-600 dark:bg-purple-500/20 dark:text-purple-400'
-                      : team.default_seat_type === 'default'
-                        ? 'bg-blue-100 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400'
-                        : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-                  }`}
-                  title={`默认邀请席位：${defaultSeatLabel}`}
+                  className="ml-1 min-w-0 max-w-[10rem] shrink-[4] truncate text-sm font-medium text-gray-500 dark:text-ink-400"
+                  title={team.remark}
                 >
-                  Default: {defaultSeatLabel}
+                  （{team.remark}）
                 </span>
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setDefaultSeatInfoOpen(true);
-                  }}
-                  className="inline-flex shrink-0 rounded-full text-gray-400 transition hover:text-gray-500 focus:outline-none focus:ring-2 focus:ring-gray-400/40 dark:text-gray-500 dark:hover:text-gray-400"
-                  aria-label="查看默认邀请席位说明"
-                  title="默认邀请席位说明"
-                >
-                  <CircleAlert size={14} />
-                </button>
-              </div>
-            </div>
-            <div className="flex items-center gap-1 shrink-0">
+              )}
+            </h3>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); handleOpenRemark(); }}
+              className="shrink-0 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-blue-400"
+              aria-label="编辑备注（不修改工作区名称）"
+              title="编辑备注（不修改工作区名称）"
+            >
+              <Pencil size={13} />
+            </button>
+            <div className="-my-1 -mr-1.5 ml-auto flex shrink-0 items-center">
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); void handleForceRefresh(); }}
                 disabled={syncing}
-                className="text-gray-400 hover:text-emerald-500 dark:text-gray-500 dark:hover:text-emerald-400 transition-all p-1.5 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 rounded-lg disabled:opacity-50"
-                aria-label="强制刷新 Team"
-                title="强制刷新 Team"
+                className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:opacity-50 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-200"
+                aria-label="强制刷新这个 Team"
+                title="强制刷新"
               >
                 <RefreshCw size={16} className={syncing ? 'animate-spin' : ''} />
               </button>
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); void handleOpenSettings(); }}
-                className="text-gray-400 hover:text-blue-500 dark:text-gray-500 dark:hover:text-blue-400 transition-all p-1.5 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-lg"
+                className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-200"
                 aria-label="Team 设置"
-                title="设置"
+                title="Team 设置"
               >
                 <Settings size={16} />
               </button>
               <button
+                type="button"
                 onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-                className="text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all p-1.5 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg"
+                className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 dark:text-ink-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                aria-label="删除这个 Team"
+                title="删除"
               >
                 <Trash2 size={16} />
               </button>
             </div>
           </div>
-
-          {/* Metrics */}
-          <div className={team.is_codex_enabled && team.codex_count > 0 ? "grid grid-cols-2 gap-3 mb-5" : "grid grid-cols-1 gap-3 mb-5"}>
-            <div className="bg-blue-50/50 dark:bg-blue-900/10 p-3 rounded-xl border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center transition-colors group-hover:bg-blue-50 dark:group-hover:bg-blue-900/20">
-              <span className="text-xs font-medium text-blue-600 dark:text-blue-400 mb-1.5 flex items-center gap-1.5">
-                <Users size={12} className="opacity-80"/> ChatGPT
+          <div className="mt-1 flex min-w-0 items-center gap-1.5 pl-[18px] text-xs text-gray-500 dark:text-ink-400">
+            <Mail size={12} className="shrink-0" />
+            <span className="truncate" title={team.owner_email}>{team.owner_email}</span>
+            {team.proxy_id && (
+              <span className="shrink-0 text-blue-500 dark:text-blue-400" title="通过代理连接">
+                <Globe size={12} />
               </span>
-              <div className="flex items-baseline gap-1">
-                <span className="text-xl font-bold text-gray-900 dark:text-gray-100">{activeGptSeats}</span>
-                <span className="text-sm font-medium text-gray-400 dark:text-gray-500">/ {team.seats_entitled}</span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-[18px]">
+            {syncError && (
+              <span className={`${PILL} ${TONE.danger}`} title={`刷新失败：${syncError}`}>
+                刷新失败
+              </span>
+            )}
+            {isSyncSuspended && !authBlocked && (
+              <span
+                className={`${PILL} ${TONE.neutral}`}
+                title={`连续同步失败${syncFailingFor ? ` · ${syncFailingFor}` : ''}，已暂停自动同步`}
+              >
+                同步已暂停
+              </span>
+            )}
+            <span className={`${PILL} ${team.is_codex_enabled ? TONE.codex : TONE.neutral}`}>
+              <Zap size={11} /> {team.is_codex_enabled ? 'Codex 已开' : 'Codex 未开'}
+            </span>
+            <span
+              className={`${PILL} ${
+                team.default_seat_type === 'usage_based'
+                  ? TONE.codex
+                  : team.default_seat_type === 'default'
+                    ? TONE.info
+                    : TONE.neutral
+              }`}
+            >
+              默认席位 {defaultSeatLabel}
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setDefaultSeatInfoOpen(true);
+                }}
+                className="-mr-0.5 inline-flex rounded-full opacity-70 transition hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50"
+                aria-label="默认邀请席位说明"
+                title="默认邀请席位说明"
+              >
+                <CircleAlert size={12} />
+              </button>
+            </span>
+          </div>
+
+          {/* Seats */}
+          <div className={`mt-4 grid gap-3 ${showCodex ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <div className="rounded-xl bg-gray-50 px-3.5 py-3 dark:bg-ink-950/60">
+              <div className="flex items-center justify-between gap-2 text-xs text-gray-500 dark:text-ink-400">
+                <span className="flex items-center gap-1.5 whitespace-nowrap"><Users size={13} /> ChatGPT 席位</span>
+                {overSeats && <span className="whitespace-nowrap font-medium text-red-600 dark:text-red-400">超出 {activeGptSeats - seatsEntitled}</span>}
+              </div>
+              <div className="mt-1 flex items-baseline gap-1">
+                <span className={`text-xl font-semibold tabular-nums ${overSeats ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-50'}`}>{activeGptSeats}</span>
+                <span className="text-sm tabular-nums text-gray-400 dark:text-ink-500">/ {team.seats_entitled}</span>
+              </div>
+              <div className="mt-2 h-1 overflow-hidden rounded-full bg-gray-200 dark:bg-ink-800" aria-hidden="true">
+                <div className={`h-full rounded-full ${overSeats ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${seatFill}%` }} />
               </div>
             </div>
-            {team.is_codex_enabled && team.codex_count > 0 && (
-              <div className="bg-purple-50/50 dark:bg-purple-900/10 p-3 rounded-xl border border-purple-100/50 dark:border-purple-800/30 flex flex-col items-center justify-center transition-colors group-hover:bg-purple-50 dark:group-hover:bg-purple-900/20">
-                <span className="text-xs font-medium text-purple-600 dark:text-purple-400 mb-1.5 flex items-center gap-1.5">
-                  <Zap size={12} className="opacity-80"/> Codex
-                </span>
-                <div className="flex items-baseline gap-1">
-                  <span className="text-xl font-bold text-gray-900 dark:text-gray-100">{team.codex_count}</span>
-                  <span className="text-sm font-medium text-gray-400 dark:text-gray-500">人</span>
+            {showCodex && (
+              <div className="rounded-xl bg-gray-50 px-3.5 py-3 dark:bg-ink-950/60">
+                <div className="flex items-center gap-1.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
+                  <Zap size={13} /> Codex 成员
+                </div>
+                <div className="mt-1 flex items-baseline gap-1">
+                  <span className="text-xl font-semibold tabular-nums text-gray-900 dark:text-gray-50">{team.codex_count}</span>
+                  <span className="text-sm text-gray-400 dark:text-ink-500">人</span>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Footer Info */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-sm">
-              <div className="flex items-center gap-1.5 text-gray-500 dark:text-gray-400">
-                <Calendar size={14} />
-                <span>
-                  {formatShortDate(team.active_start)} - {formatShortDate(team.active_until)}
+          {/* Billing facts */}
+          <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+            <div className="min-w-0">
+              <dt className={`text-[11px] leading-4 ${isNonRenewing && !isSubscriptionExpired ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400 dark:text-ink-500'}`}>
+                {renewalLabel}{isNonRenewing && !isSubscriptionExpired ? ' · 不续费' : ''}
+              </dt>
+              <dd className={`mt-0.5 flex min-w-0 items-center gap-1 text-sm font-medium ${renewalTone}`}>
+                <span className="truncate">
+                  {formatShortDate(team.active_until)}
+                  {renewalWhen && <span className="font-normal text-gray-500 dark:text-ink-400"> · {renewalWhen}</span>}
                 </span>
                 {team.active_until && (
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); setShowExactTime((v) => !v); }}
                     aria-expanded={showExactTime}
-                    aria-label="具体续费时间"
-                    className="rounded p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                    aria-label="查看具体续费时间"
+                    title="具体时间"
+                    className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-200"
                   >
                     <ChevronDown size={14} className={`transition-transform ${showExactTime ? 'rotate-180' : ''}`} />
                   </button>
                 )}
-                {team.days_remaining !== null && (
-                  <span className={`ml-1 px-1.5 py-0.5 rounded text-xs font-semibold ${
-                    isWarning ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-500/20 dark:text-yellow-400' 
-                    : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
-                  }`}>
-                    {isSubscriptionExpired ? '已到期' : isSubscriptionStale ? '未同步' : `${team.days_remaining}d`}
-                  </span>
-                )}
-              </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); void handleOpenAddMember(); }}
-                disabled={openingAddMember || isSubscriptionExpired}
-                title={isSubscriptionExpired ? '订阅已到期，不能添加成员' : undefined}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 dark:bg-blue-600/20 text-blue-600 dark:text-blue-400 dark:hover:bg-blue-600/30 rounded-lg text-xs font-semibold transition-colors disabled:cursor-wait disabled:opacity-70"
-              >
-                {openingAddMember ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <UserPlus size={14} />
-                )}
-                {openingAddMember ? '加载中' : '添加成员'}
-              </button>
+              </dd>
             </div>
-            {showExactTime && team.active_until && (
-              <div className="-mt-1 pl-5 text-xs text-gray-500 dark:text-gray-400">
-                续费 {formatBeijingDateTime(team.active_until)}
-              </div>
-            )}
-
-            <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-500 pt-3 border-t border-gray-100 dark:border-gray-800">
-              <div className="flex items-center gap-1.5">
+            <div className="min-w-0">
+              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">月费</dt>
+              <dd className="mt-0.5 min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100">
                 {monthlyTotal !== null && subtotal !== null ? (
                   <>
-                    <span title={team.discount_amount ? `原价 ${formatAmount(subtotal)}, 优惠 -${formatAmount(team.discount_amount)}` : undefined}>
-                      {moneySuffix(team)} {formatAmount(monthlyTotal)}/m
+                    <span
+                      className="whitespace-nowrap"
+                      title={team.discount_amount ? `原价 ${formatMoney(subtotal, unit)}，优惠 -${formatMoney(team.discount_amount, unit)}` : undefined}
+                    >
+                      {formatMoney(monthlyTotal, unit)}
+                      <span className="font-normal text-gray-400 dark:text-ink-500"> /月</span>
                     </span>
                     {team.discount_amount > 0 && (
-                      <>
-                        <span className="text-sky-500 dark:text-sky-400">
-                          (-{formatAmount(team.discount_amount)})
-                        </span>
-                        <span className="inline-flex items-center rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-600 dark:bg-sky-500/10 dark:text-sky-300 border border-sky-200/60 dark:border-sky-500/20">
-                          {promoLabel(team)}
-                        </span>
-                      </>
+                      <span className="block truncate text-xs font-normal text-sky-600 dark:text-sky-400">
+                        已减 {formatMoney(team.discount_amount, unit)} · {promoLabel(team)}
+                      </span>
                     )}
                   </>
                 ) : team.billing_period === null ? (
-                  <span className="text-gray-400 dark:text-gray-600">计费周期未知</span>
+                  <span className="font-normal text-gray-400 dark:text-ink-500">计费周期未知</span>
                 ) : (
-                  <span className="text-gray-400 dark:text-gray-600">年付，月费暂不计算</span>
+                  <span className="font-normal text-gray-500 dark:text-ink-400" title="年付订阅不折算月费">年付</span>
                 )}
-              </div>
-              <ChevronDown
-                size={14}
-                className={`text-gray-400 dark:text-gray-500 transition-transform duration-300 group-hover:text-blue-500 dark:group-hover:text-blue-400 shrink-0 ${
-                  expanded ? 'rotate-180' : ''
-                }`}
-                aria-hidden
-              />
-              <div className="flex items-center gap-3">
-                <span className="flex items-center gap-1">
-                  <DollarSign size={12} /> {team.balance}
-                </span>
-                {team.card_last4 && (
-                  <Tooltip.Provider delayDuration={200}>
-                    <Tooltip.Root>
-                      <Tooltip.Trigger asChild>
-                        <span className="flex items-center gap-1 cursor-default bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">
-                          <CreditCard size={12} /> {team.card_last4}
-                        </span>
-                      </Tooltip.Trigger>
-                      <Tooltip.Portal>
-                        <Tooltip.Content
-                          className="bg-white dark:bg-[#2a2d3a] text-gray-900 dark:text-gray-200 text-xs px-2 py-1 rounded shadow-lg z-50 border border-gray-200 dark:border-transparent"
-                          sideOffset={5}
-                        >
-                          {team.card_brand || 'Card'}
-                        </Tooltip.Content>
-                      </Tooltip.Portal>
-                    </Tooltip.Root>
-                  </Tooltip.Provider>
-                )}
-                <span className={
-                  isSubscriptionExpired
-                    ? 'text-red-500 dark:text-red-400'
-                    : isNonRenewing
-                      ? 'text-amber-500 dark:text-amber-400'
-                      : 'text-gray-400 dark:text-gray-500'
-                }>
-                  {isSubscriptionExpired ? '订阅已到期' : isSubscriptionStale ? '数据未同步' : isNonRenewing ? '到期不续费' : '正常续费'}
-                </span>
-                {isSyncSuspended && !authBlocked && (
-                  <span
-                    className="ml-2 rounded-md bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500 dark:bg-gray-800 dark:text-gray-400"
-                    title={`连续同步失败${syncFailingFor ? ` · ${syncFailingFor}` : ''}，已暂停自动同步`}
-                  >
-                    同步已暂停
-                  </span>
-                )}
-              </div>
+              </dd>
             </div>
+            {showExactTime && team.active_until && (
+              <div className="col-span-2 -mt-1 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 dark:bg-ink-950/60 dark:text-ink-400">
+                本期 {formatShortDate(team.active_start)} – {formatShortDate(team.active_until)} · {isNonRenewing || isSubscriptionExpired ? '到期' : '续费'}于 {formatBeijingDateTime(team.active_until)}
+              </div>
+            )}
+            <div className="min-w-0">
+              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">余额</dt>
+              <dd className="mt-0.5 truncate text-sm font-medium tabular-nums text-gray-900 dark:text-gray-100" title="账户 Credit 余额">
+                {formatMoney(team.balance, unit)}
+              </dd>
+            </div>
+            <div className="min-w-0">
+              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">付款卡</dt>
+              <dd className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm font-medium text-gray-900 dark:text-gray-100">
+                {team.card_last4 ? (
+                  <>
+                    <CreditCard size={14} className="shrink-0 text-gray-400 dark:text-ink-500" />
+                    <span className="truncate">
+                      {team.card_brand ? `${cardBrandLabel(team.card_brand)} ` : ''}
+                      <span className="tabular-nums">···· {team.card_last4}</span>
+                    </span>
+                  </>
+                ) : (
+                  <span className="font-normal text-gray-400 dark:text-ink-500">未绑定</span>
+                )}
+              </dd>
+            </div>
+          </dl>
+
+          {/* Footer */}
+          <div className="mt-4 flex items-center justify-between gap-3 border-t border-gray-100 pt-3 dark:border-ink-800">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); void handleOpenAddMember(); }}
+              disabled={openingAddMember || isSubscriptionExpired}
+              title={isSubscriptionExpired ? '订阅已到期，不能添加成员' : undefined}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-blue-500/15 dark:text-blue-300 dark:hover:bg-blue-500/25"
+            >
+              {openingAddMember ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <UserPlus size={14} />
+              )}
+              {openingAddMember ? '加载中' : '添加成员'}
+            </button>
+            <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-gray-400 transition-colors group-hover:text-blue-600 dark:text-ink-500 dark:group-hover:text-blue-400">
+              {expanded ? '收起成员' : '查看成员'}
+              <ChevronDown size={14} className={`transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`} aria-hidden />
+            </span>
           </div>
         </div>
 
         <div
-          className="overflow-hidden transition-all duration-300 ease-in-out bg-gray-50/50 dark:bg-transparent"
+          className="overflow-hidden bg-gray-50/60 transition-all duration-300 ease-in-out dark:bg-ink-950/40"
           style={{ maxHeight: expanded ? '600px' : '0px' }}
         >
-          <div className="border-t border-gray-100 dark:border-[#2a2d3a] px-2 pb-3">
+          <div className="border-t border-gray-100 px-2 pb-3 dark:border-ink-800">
             <MemberPanel
               teamId={team.id}
               data={membersData}
@@ -764,122 +790,80 @@ export default function TeamCard({
         onConfirm={handleDelete}
       />
 
-      <Dialog.Root open={defaultSeatInfoOpen} onOpenChange={setDefaultSeatInfoOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-[#2a2d3a] dark:bg-[#1a1d27]">
-            <Dialog.Title className="flex items-center gap-2 text-lg font-bold text-gray-900 dark:text-gray-100">
-              <CircleAlert size={18} className="text-gray-400 dark:text-gray-500" />
-              默认邀请席位
-            </Dialog.Title>
-            <Dialog.Description className="mt-2 text-sm leading-6 text-gray-500 dark:text-gray-400">
-              空间邀请新成员时使用的默认席位类型。
-            </Dialog.Description>
+      <DialogFrame
+        open={defaultSeatInfoOpen}
+        onOpenChange={setDefaultSeatInfoOpen}
+        title="默认邀请席位"
+        description="工作区邀请新成员时默认使用的席位类型。"
+        footer={
+          <button type="button" onClick={() => setDefaultSeatInfoOpen(false)} className={BUTTON.primary}>
+            知道了
+          </button>
+        }
+      >
+        <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-50 px-4 py-3 dark:bg-ink-950/60">
+          <span className="text-sm text-gray-500 dark:text-ink-400">当前默认席位</span>
+          <span
+            className={`${PILL} ${
+              team.default_seat_type === 'usage_based'
+                ? TONE.codex
+                : team.default_seat_type === 'default'
+                  ? TONE.info
+                  : TONE.neutral
+            }`}
+          >
+            {defaultSeatLabel}
+          </span>
+        </div>
+        <div className="mt-4 space-y-2 text-sm leading-6 text-gray-600 dark:text-ink-300">
+          <p>管理员邀请时可自选席位，成员邀请使用这个默认值。</p>
+          <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+            默认设为 Codex 可以防止意外占用计费的 ChatGPT 席位，也可能有助于防止超员（以官方实际表现为准）。
+          </p>
+        </div>
+      </DialogFrame>
 
-            <div className="mt-5 rounded-xl border border-gray-100 bg-gray-50 p-4 dark:border-[#2a2d3a] dark:bg-[#0f1117]">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm text-gray-500 dark:text-gray-400">当前默认席位</span>
-                <span className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${
-                  team.default_seat_type === 'usage_based'
-                    ? 'bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-300'
-                    : team.default_seat_type === 'default'
-                      ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300'
-                      : 'bg-gray-200 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
-                }`}>
-                  {defaultSeatLabel}
-                </span>
-              </div>
-            </div>
-
-            <div className="mt-5 space-y-2 text-sm leading-6 text-gray-600 dark:text-gray-300">
-              <p>管理员邀请可自选席位，成员邀请跟随此默认值。</p>
-              <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-                默认设为 Codex 可防意外占用 GPT 计费席位。（可能可以防止超拉人 官测为准）
-              </p>
-            </div>
-
-            <div className="mt-6 flex justify-end">
-              <Dialog.Close asChild>
-                <button className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-gray-700 dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white">
-                  知道了
-                </button>
-              </Dialog.Close>
-            </div>
-            <Dialog.Close asChild>
-              <button
-                className="absolute right-4 top-4 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-                aria-label="关闭默认邀请席位说明"
-              >
-                <X size={16} />
-              </button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-
-      <Dialog.Root open={remarkOpen} onOpenChange={handleRemarkOpenChange}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black/60 z-50" />
-          <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-[#2a2d3a] dark:bg-[#1a1d27]">
-            <Dialog.Title className="flex items-center gap-2 text-lg font-bold text-gray-900 dark:text-gray-100">
-              <Pencil size={17} />
-              Team 备注
-            </Dialog.Title>
-            <form className="mt-5 space-y-4" onSubmit={handleSaveRemark}>
-              <div>
-                <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  {team.name}
-                </label>
-                <input
-                  value={remarkDraft}
-                  onChange={(e) => {
-                    setRemarkDraft(e.target.value);
-                    if (remarkError) setRemarkError('');
-                  }}
-                  maxLength={80}
-                  autoFocus
-                  placeholder="备注，例如：主力 / 备用"
-                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 transition-all focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 dark:border-[#2a2d3a] dark:bg-[#0f1117] dark:text-gray-200 dark:placeholder:text-gray-600"
-                />
-                <div className="mt-1 flex items-center justify-between text-xs text-gray-400 dark:text-gray-500">
-                  <span>留空则清除备注</span>
-                  <span>{remarkDraft.trim().length}/80</span>
-                </div>
-              </div>
-
-              {remarkError && <p className="text-sm text-red-500 dark:text-red-400">{remarkError}</p>}
-
-              <div className="flex justify-end gap-3 pt-1">
-                <Dialog.Close asChild>
-                  <button
-                    type="button"
-                    disabled={savingRemark}
-                    className="rounded-lg bg-gray-100 px-4 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-200 disabled:opacity-50 dark:bg-[#2a2d3a] dark:text-gray-300 dark:hover:bg-[#3a3d4a]"
-                  >
-                    取消
-                  </button>
-                </Dialog.Close>
-                <button
-                  type="submit"
-                  disabled={savingRemark}
-                  className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-md shadow-blue-500/20 transition-all hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {savingRemark && <Loader2 size={14} className="animate-spin" />}
-                  {savingRemark ? '保存中...' : '保存'}
-                </button>
-              </div>
-            </form>
-            <Dialog.Close asChild>
-              <button
-                disabled={savingRemark}
-                className="absolute right-4 top-4 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50 dark:hover:bg-gray-800 dark:hover:text-gray-200"
-              >
-                <X size={16} />
-              </button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+      <DialogFrame
+        open={remarkOpen}
+        onOpenChange={handleRemarkOpenChange}
+        size="sm"
+        title="Team 备注"
+        description="只保存在 TeamBoss 里，不会修改 ChatGPT 工作区名称。"
+        footer={
+          <>
+            <button type="button" onClick={() => handleRemarkOpenChange(false)} disabled={savingRemark} className={BUTTON.secondary}>
+              取消
+            </button>
+            <button type="submit" form={`team-remark-${team.id}`} disabled={savingRemark} className={BUTTON.primary}>
+              {savingRemark && <Loader2 size={14} className="animate-spin" />}
+              {savingRemark ? '保存中…' : '保存'}
+            </button>
+          </>
+        }
+      >
+        <form id={`team-remark-${team.id}`} onSubmit={handleSaveRemark}>
+          <label htmlFor={`team-remark-input-${team.id}`} className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
+            {team.name}
+          </label>
+          <input
+            id={`team-remark-input-${team.id}`}
+            value={remarkDraft}
+            onChange={(e) => {
+              setRemarkDraft(e.target.value);
+              if (remarkError) setRemarkError('');
+            }}
+            maxLength={80}
+            autoFocus
+            placeholder="例如：主力 / 备用"
+            className={INPUT}
+          />
+          <div className="mt-1 flex items-center justify-between text-xs text-gray-400 dark:text-ink-500">
+            <span>留空则清除备注</span>
+            <span className="tabular-nums">{remarkDraft.trim().length}/80</span>
+          </div>
+          {remarkError && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{remarkError}</p>}
+        </form>
+      </DialogFrame>
 
       <AddMemberDialog
         open={addMemberOpen}

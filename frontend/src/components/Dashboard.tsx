@@ -1,9 +1,10 @@
 import { useMemo } from 'react';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, Plus, SearchX } from 'lucide-react';
 import type { Team, ShowToast } from '../types';
 import TeamCard from './TeamCard';
 import type { SortDirection, SortKey } from './DashboardSortControl';
 import { activeChatGptSeats } from '../lib/seatCapacity';
+import { BUTTON } from './ui';
 
 interface DashboardProps {
   teams: Team[];
@@ -18,7 +19,10 @@ interface DashboardProps {
   showToast: ShowToast;
   sortKey: SortKey;
   sortDirection: SortDirection;
+  onAddTeam: () => void;
 }
+
+const GRID = 'grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3 min-[1800px]:grid-cols-4';
 
 function renewalTimestamp(team: Team): number | null {
   if (!team.active_until) return null;
@@ -42,18 +46,18 @@ function compareNullableNumbers(a: number | null, b: number | null): number {
 
 function SkeletonCard() {
   return (
-    <div className="bg-white dark:bg-[#1a1d27] rounded-xl border border-gray-100 dark:border-[#2a2d3a] p-5 animate-pulse shadow-sm">
-      <div className="flex items-center gap-3 mb-6">
-        <div className="w-3 h-3 rounded-full bg-gray-200 dark:bg-[#2a2d3a]" />
-        <div className="h-4 w-24 bg-gray-200 dark:bg-[#2a2d3a] rounded" />
+    <div className="animate-pulse rounded-2xl border border-gray-200 bg-white p-5 dark:border-ink-800 dark:bg-ink-900">
+      <div className="mb-3 flex items-center gap-2">
+        <div className="size-2.5 rounded-full bg-gray-200 dark:bg-ink-800" />
+        <div className="h-4 w-32 rounded bg-gray-200 dark:bg-ink-800" />
       </div>
-      <div className="flex justify-center gap-8 mb-6">
-        <div className="w-16 h-16 rounded-full bg-gray-200 dark:bg-[#2a2d3a]" />
-        <div className="w-12 h-12 rounded-full bg-gray-200 dark:bg-[#2a2d3a]" />
-      </div>
-      <div className="space-y-3">
-        <div className="h-3 w-full bg-gray-200 dark:bg-[#2a2d3a] rounded" />
-        <div className="h-3 w-3/4 bg-gray-200 dark:bg-[#2a2d3a] rounded" />
+      <div className="mb-5 h-3 w-48 rounded bg-gray-100 dark:bg-ink-800/70" />
+      <div className="mb-5 h-16 rounded-xl bg-gray-100 dark:bg-ink-800/70" />
+      <div className="grid grid-cols-2 gap-3">
+        <div className="h-3 rounded bg-gray-100 dark:bg-ink-800/70" />
+        <div className="h-3 rounded bg-gray-100 dark:bg-ink-800/70" />
+        <div className="h-3 rounded bg-gray-100 dark:bg-ink-800/70" />
+        <div className="h-3 rounded bg-gray-100 dark:bg-ink-800/70" />
       </div>
     </div>
   );
@@ -72,6 +76,7 @@ export default function Dashboard({
   showToast,
   sortKey,
   sortDirection,
+  onAddTeam,
 }: DashboardProps) {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -117,8 +122,8 @@ export default function Dashboard({
 
   if (loading && teams.length === 0) {
     return (
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 p-6">
-        {Array.from({ length: 8 }).map((_, i) => (
+      <div className={GRID} aria-busy="true">
+        {Array.from({ length: 6 }).map((_, i) => (
           <SkeletonCard key={i} />
         ))}
       </div>
@@ -127,14 +132,11 @@ export default function Dashboard({
 
   if (error && filtered.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 gap-3">
-        <AlertCircle size={48} className="text-red-500 dark:text-red-400" />
-        <p className="text-lg font-semibold text-gray-900 dark:text-gray-100">加载 Team 列表失败</p>
-        <p className="text-sm text-gray-600 dark:text-gray-400">{error}</p>
-        <button
-          onClick={() => window.location.reload()}
-          className="mt-4 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium text-sm transition-colors"
-        >
+      <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-gray-300 px-6 py-20 text-center dark:border-ink-800">
+        <AlertCircle size={36} className="text-red-500 dark:text-red-400" />
+        <p className="text-base font-semibold text-gray-900 dark:text-gray-100">加载 Team 列表失败</p>
+        <p className="max-w-md text-sm text-gray-500 dark:text-ink-400">{error}</p>
+        <button type="button" onClick={() => window.location.reload()} className={`${BUTTON.primary} mt-2`}>
           重试
         </button>
       </div>
@@ -143,16 +145,29 @@ export default function Dashboard({
 
   if (filtered.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-24 text-gray-400 dark:text-gray-500">
-        <p className="text-lg">
-          {search ? '没有匹配的 Team' : '暂无 Team，点击右上角添加'}
-        </p>
+      <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-gray-300 px-6 py-20 text-center dark:border-ink-800">
+        {search ? (
+          <>
+            <SearchX size={32} className="text-gray-300 dark:text-ink-600" />
+            <p className="text-sm text-gray-500 dark:text-ink-400">没有匹配“{search.trim()}”的 Team</p>
+          </>
+        ) : (
+          <>
+            <p className="text-base font-semibold text-gray-900 dark:text-gray-100">还没有接入 Team</p>
+            <p className="max-w-md text-sm text-gray-500 dark:text-ink-400">
+              用 ChatGPT 工作区 owner 账号的 Session 接入第一个 Team，之后就能在这里管理席位、成员和续费。
+            </p>
+            <button type="button" onClick={onAddTeam} className={`${BUTTON.primary} mt-2`}>
+              <Plus size={16} /> 添加 Team
+            </button>
+          </>
+        )}
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 px-6 pb-6 lg:grid-cols-2 xl:grid-cols-3">
+    <div className={GRID}>
       {filtered.map((team) => (
         <TeamCard
           key={team.id}

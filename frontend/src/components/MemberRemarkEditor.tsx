@@ -3,6 +3,8 @@ import { Pencil } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import { updateUserDisplayName } from '../api/client';
 import type { ShowToast } from '../types';
+import { BUTTON, INPUT } from './ui';
+import { cn } from '../lib/utils';
 
 interface MemberRemarkEditorProps {
   email: string;
@@ -44,19 +46,21 @@ export default function MemberRemarkEditor({ email, remark, onSaved, showToast }
       <Popover.Trigger asChild>
         <button
           type="button"
-          className="shrink-0 p-0.5 rounded text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
+          className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-100"
           title={remark ? '编辑备注' : '添加备注'}
           aria-label={remark ? '编辑备注' : '添加备注'}
         >
-          <Pencil size={10} />
+          <Pencil size={12} />
         </button>
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
-          className="bg-white dark:bg-[#1a1d27] border border-gray-200 dark:border-[#2a2d3a] rounded-xl p-3 shadow-xl z-50 w-64"
-          sideOffset={5}
+          className="z-50 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-gray-200 bg-white p-3 shadow-xl dark:border-ink-800 dark:bg-ink-900"
+          sideOffset={6}
+          collisionPadding={16}
         >
-          <p className="text-xs text-gray-500 dark:text-gray-400 mb-2 break-all">备注 · {email}</p>
+          <p className="text-sm font-medium text-gray-900 dark:text-gray-100">备注</p>
+          <p className="mb-2 truncate text-xs text-gray-500 dark:text-ink-400" title={email}>{email}</p>
           <input
             autoFocus
             type="text"
@@ -69,14 +73,14 @@ export default function MemberRemarkEditor({ email, remark, onSaved, showToast }
               }
             }}
             maxLength={120}
-            placeholder="添加备注..."
-            className="w-full px-2 py-1.5 bg-white dark:bg-[#11131b] border border-gray-200 dark:border-[#2a2d3a] rounded-lg text-sm text-gray-800 dark:text-gray-200 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder="留空则清除备注"
+            className={INPUT}
           />
-          <div className="mt-2 flex justify-end gap-2">
+          <div className="mt-3 flex justify-end gap-2">
             <button
               type="button"
               onClick={() => setOpen(false)}
-              className="px-2.5 py-1 rounded-lg bg-gray-100 dark:bg-[#2a2d3a] text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-[#343849] text-xs transition-colors"
+              className={cn(BUTTON.secondary, 'h-8 px-3 py-0 text-xs')}
             >
               取消
             </button>
@@ -84,7 +88,7 @@ export default function MemberRemarkEditor({ email, remark, onSaved, showToast }
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className="px-2.5 py-1 rounded-lg bg-blue-500 text-white hover:bg-blue-600 text-xs disabled:opacity-60 disabled:cursor-wait transition-colors"
+              className={cn(BUTTON.primary, 'h-8 px-3 py-0 text-xs')}
             >
               {saving ? '保存中…' : '保存'}
             </button>

@@ -27,7 +27,7 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-[#0f1117] px-4 transition-colors">
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-ink-950 px-4 transition-colors">
           <div className="text-center space-y-4">
             <p className="text-gray-700 dark:text-gray-300 text-sm">页面出错了，请刷新重试</p>
             <button

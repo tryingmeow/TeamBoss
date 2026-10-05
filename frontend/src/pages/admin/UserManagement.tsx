@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import {
   fetchOwners,
   fetchAllMembers,
@@ -11,20 +11,38 @@ import {
   updateUserDisplayName,
   createTgMemberCode,
 } from '../../api/client';
-import { Edit2, Plus, Trash2, UserX, Check, Copy, MessageCircle, Search, ArrowUpDown, ChevronDown, Zap } from 'lucide-react';
+import {
+  ArrowUpDown,
+  CalendarDays,
+  Check,
+  ChevronDown,
+  Copy,
+  MessageCircle,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  UserX,
+  Zap,
+} from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Popover from '@radix-ui/react-popover';
 import type { SeatType } from '../../types';
 import ExpiryPicker, { type ExpirySelection } from '../../components/ExpiryPicker';
+import LoadingSpinner from '../../components/LoadingSpinner';
+import PageShell from '../../components/PageShell';
+import Toast from '../../components/Toast';
+import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { useKickPolicy } from '../../hooks/useKickPolicy';
 import type { KickPolicy } from '../../lib/expiry';
-import Toast from '../../components/Toast';
+import { cn } from '../../lib/utils';
 import SystemLogs from './SystemLogs';
 import {
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
+  isCodexSeat,
   normalizeSeatType,
-  seatTypeBadgeClass,
+  seatUpdateErrorMessage,
 } from '../../lib/seatType';
 import { ExpiryExtensionRequestIds } from '../../lib/expiryExtensionRequest';
 
@@ -89,6 +107,8 @@ type MemberStatus = 'joined' | 'pending' | 'kicked';
 type SeatFilter = 'all' | SeatType;
 type ToastType = 'success' | 'error';
 type ShowToast = (text: string, type?: ToastType) => void;
+/** `row` = desktop table cell, `card` = stacked phone/tablet card with larger touch targets. */
+type Variant = 'row' | 'card';
 
 interface ToastMessage {
   id: number;
@@ -96,18 +116,44 @@ interface ToastMessage {
   type: ToastType;
 }
 
-const MEMBER_STATUS_FILTERS: {
-  value: MemberStatus;
-  dotClass: string;
-  ringClass: string;
-  title: string;
-}[] = [
-  { value: 'joined', dotClass: 'bg-emerald-500', ringClass: 'ring-emerald-500/60', title: '已加入' },
-  { value: 'pending', dotClass: 'bg-amber-500', ringClass: 'ring-amber-500/60', title: '待接受' },
-  { value: 'kicked', dotClass: 'bg-rose-500', ringClass: 'ring-rose-500/60', title: '已踢出' },
-];
+const MEMBER_STATUS: Record<MemberStatus, { label: string; dotClass: string; tone: string }> = {
+  joined: { label: '已加入', dotClass: 'bg-emerald-500', tone: TONE.success },
+  pending: { label: '待接受', dotClass: 'bg-amber-500', tone: TONE.warning },
+  kicked: { label: '已踢出', dotClass: 'bg-red-500', tone: TONE.danger },
+};
+
+const MEMBER_STATUS_ORDER: MemberStatus[] = ['joined', 'pending', 'kicked'];
 
 const DEFAULT_MEMBER_STATUS_FILTERS = new Set<MemberStatus>(['joined', 'pending']);
+
+const JOIN_SOURCE: Record<string, { label: string; tone: string }> = {
+  system: { label: '系统邀请', tone: TONE.neutral },
+  detected: { label: '手动拉入', tone: TONE.warning },
+  self_service: { label: '自助加入', tone: TONE.info },
+};
+
+const KICK_SOURCE: Record<string, { label: string; tone: string }> = {
+  auto_expire: { label: '自动过期', tone: TONE.neutral },
+  admin: { label: '手动踢出', tone: TONE.info },
+  detected: { label: '检测移除', tone: TONE.warning },
+  patrol: { label: '巡逻移除', tone: TONE.warning },
+};
+
+const TABS = [
+  { value: 'owner', label: 'Owner' },
+  { value: 'members', label: '成员' },
+  { value: 'logs', label: '日志' },
+] as const;
+
+type TabValue = (typeof TABS)[number]['value'];
+
+/** Small icon button next to a value (edit name / date / seat, copy). Size comes from the variant. */
+const ICON_BUTTON =
+  'inline-flex shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:cursor-wait disabled:opacity-50 dark:text-ink-500 dark:hover:bg-blue-500/10 dark:hover:text-blue-400';
+const ICON_BUTTON_SIZE: Record<Variant, string> = { row: 'size-7 -my-1', card: 'size-9' };
+
+const POPOVER =
+  'z-50 rounded-xl border border-gray-200 bg-white shadow-xl dark:border-ink-800 dark:bg-ink-900';
 
 async function copyToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -125,34 +171,25 @@ async function copyToClipboard(value: string): Promise<void> {
   if (!copied) throw new Error('浏览器未允许复制，请手动复制');
 }
 
-function memberExpiryDisplay(expiry?: MemberExpiryView): { primary: string; grace?: string } {
-  if (!expiry) return { primary: 'N/A' };
+function memberExpiryDisplay(expiry?: MemberExpiryView): { primary: string; grace?: string; graceTitle?: string } {
+  if (!expiry) return { primary: '—' };
   if (!expiry.expires_at) return { primary: '永不' };
   const primary = expiry.expires_at_local || expiry.expires_at;
   if (!expiry.effective_kick_at || expiry.effective_kick_at === expiry.expires_at) {
     return { primary };
   }
-  const label = expiry.kick_label && expiry.kick_label !== '到期' ? expiry.kick_label : '系统宽限';
-  return { primary, grace: `${label} (系统宽限)` };
+  const rule = expiry.kick_label && expiry.kick_label !== '到期' ? `（${expiry.kick_label}）` : '';
+  return {
+    primary,
+    grace: expiry.effective_kick_at_local ? `宽限到 ${expiry.effective_kick_at_local}` : `系统宽限${rule}`,
+    graceTitle: `到期后按系统宽限规则${rule}移出`,
+  };
 }
 
 function formatShortDate(dateStr: string | null): string {
   if (!dateStr) return '—';
   const d = new Date(dateStr);
   return `${d.getMonth() + 1}/${d.getDate()}`;
-}
-
-function formatBillingCycle(cycle: BillingCycle | string | null | undefined): string {
-  if (!cycle) return '—';
-  if (typeof cycle === 'string') return cycle;
-  const range = `${formatShortDate(cycle.active_start)} - ${formatShortDate(cycle.active_until)}`;
-  const days = cycle.days_remaining != null ? ` (${cycle.days_remaining}d)` : '';
-  const renew = cycle.subscription_status === 'expired'
-    ? ' · 已到期'
-    : cycle.subscription_status === 'stale'
-      ? ' · 数据未同步'
-      : cycle.will_renew ? '' : ' · 到期不续费';
-  return `${range}${days}${renew}`;
 }
 
 function parseTimestamp(value: string | null | undefined): number | null {
@@ -190,21 +227,18 @@ function sortByTimestamp<T>(
   });
 }
 
-function isForbiddenError(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err ?? '');
-  return /\b403\b/i.test(message) || /forbidden/i.test(message);
-}
+// 加入时间那一列的展示时区。到期/踢人时间的计算口径统一在 lib/expiry.ts。
+const APP_TIME_ZONE = 'Asia/Shanghai';
 
-function seatUpdateErrorMessage(
-  err: unknown,
-  nextSeatType: SeatType,
-  isCodexEnabled?: boolean | number
-): string {
-  const codexKnownOff = isCodexEnabled === false || isCodexEnabled === 0;
-  if (nextSeatType === 'usage_based' && codexKnownOff && isForbiddenError(err)) {
-    return 'Codex 席位未开启，请先开启 Codex 席位';
-  }
-  return '修改席位类型失败';
+function formatJoinedAt(value: string | null | undefined): string {
+  if (!value) return '—';
+  return new Date(value).toLocaleString('zh-CN', {
+    timeZone: APP_TIME_ZONE,
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 function StatusFilterToggle({
@@ -227,27 +261,29 @@ function StatusFilterToggle({
 
   return (
     <div
-      className="inline-flex items-center gap-1 p-1 rounded-lg border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+      className="inline-flex h-9 shrink-0 divide-x divide-gray-200 overflow-hidden rounded-lg border border-gray-200 bg-white dark:divide-ink-800 dark:border-ink-800 dark:bg-ink-900"
       role="group"
-      aria-label="成员状态筛选"
+      aria-label="按状态筛选"
     >
-      {MEMBER_STATUS_FILTERS.map(({ value, dotClass, ringClass, title }) => {
+      {MEMBER_STATUS_ORDER.map((value) => {
+        const { label, dotClass } = MEMBER_STATUS[value];
         const active = enabled.has(value);
         return (
           <button
             key={value}
             type="button"
-            title={title}
-            aria-label={title}
             aria-pressed={active}
+            title={active && enabled.size === 1 ? '至少保留一种状态' : undefined}
             onClick={() => toggle(value)}
-            className={`p-2 rounded-md transition-all ${
+            className={cn(
+              'inline-flex items-center gap-1.5 whitespace-nowrap px-2.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500/50',
               active
-                ? `bg-gray-100 dark:bg-slate-800 ring-2 ${ringClass}`
-                : 'opacity-35 hover:opacity-70 hover:bg-gray-100 dark:hover:bg-slate-800/80 dark:bg-slate-800/50'
-            }`}
+                ? 'bg-gray-100 font-medium text-gray-900 dark:bg-ink-800 dark:text-gray-100'
+                : 'text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-ink-500 dark:hover:bg-ink-800/60 dark:hover:text-ink-200'
+            )}
           >
-            <span className={`block w-3 h-3 rounded-full ${dotClass}`} />
+            <span className={cn('size-2 rounded-full', dotClass, !active && 'opacity-40')} />
+            {label}
           </button>
         );
       })}
@@ -270,21 +306,14 @@ function FilterDropdown({
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        <button
-          type="button"
-          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-gray-800 dark:text-slate-200 hover:bg-gray-100 dark:hover:bg-slate-800 hover:border-gray-400 dark:hover:border-slate-600 transition-all"
-        >
-          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${selected.dotClass}`} />
-          <span>{selected.label}</span>
-          <ChevronDown className={`w-3.5 h-3.5 text-gray-500 dark:text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <button type="button" aria-label="按席位筛选" className={cn(BUTTON.secondary, 'h-9 px-3 py-0 font-normal')}>
+          <span className={cn('size-2 rounded-full', selected.dotClass)} />
+          {selected.label}
+          <ChevronDown className={cn('size-3.5 text-gray-400 transition-transform dark:text-ink-500', open && 'rotate-180')} />
         </button>
       </Popover.Trigger>
       <Popover.Portal>
-        <Popover.Content
-          className="z-50 min-w-[140px] p-1 rounded-lg bg-white dark:bg-slate-900 border border-gray-300 dark:border-slate-700 shadow-xl"
-          sideOffset={4}
-          align="start"
-        >
+        <Popover.Content className={cn(POPOVER, 'min-w-40 p-1')} sideOffset={6} align="start" collisionPadding={16}>
           {options.map((opt) => (
             <button
               key={opt.value}
@@ -293,18 +322,18 @@ function FilterDropdown({
                 onChange(opt.value);
                 setOpen(false);
               }}
-              className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-md transition-colors ${
+              className={cn(
+                'flex h-9 w-full items-center gap-2.5 whitespace-nowrap rounded-md px-2.5 text-sm transition-colors',
                 value === opt.value
-                  ? 'bg-gray-100 dark:bg-slate-800 text-gray-900 dark:text-slate-100'
-                  : 'text-gray-700 dark:text-slate-300 hover:bg-gray-100 dark:hover:bg-slate-800 hover:text-gray-900 dark:hover:text-slate-100'
-              }`}
+                  ? 'bg-gray-100 text-gray-900 dark:bg-ink-800 dark:text-gray-100'
+                  : 'text-gray-700 hover:bg-gray-100 hover:text-gray-900 dark:text-ink-300 dark:hover:bg-ink-800 dark:hover:text-gray-100'
+              )}
             >
-              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${opt.dotClass}`} />
+              <span className={cn('size-2 shrink-0 rounded-full', opt.dotClass)} />
               <span className="flex-1 text-left">{opt.label}</span>
-              {value === opt.value && <Check className="w-3.5 h-3.5 text-indigo-400" />}
+              {value === opt.value && <Check className="size-4 text-blue-600 dark:text-blue-400" />}
             </button>
           ))}
-          <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -324,11 +353,12 @@ function SortToggle({
     <button
       type="button"
       onClick={onToggle}
-      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-gray-800 dark:text-slate-200 hover:bg-gray-100 dark:hover:bg-slate-800 hover:border-gray-400 dark:hover:border-slate-600 transition-all"
+      title="点击切换排序方向"
+      className={cn(BUTTON.secondary, 'h-9 gap-1.5 px-3 py-0 font-normal')}
     >
-      <ArrowUpDown className="w-3.5 h-3.5 text-gray-500 dark:text-slate-400" />
+      <ArrowUpDown className="size-3.5 text-gray-400 dark:text-ink-500" />
       {label}
-      <span className="text-indigo-400 font-medium">{order === 'asc' ? '正序' : '倒序'}</span>
+      <span className="font-medium text-blue-600 dark:text-blue-400">{order === 'asc' ? '近→远' : '远→近'}</span>
     </button>
   );
 }
@@ -343,32 +373,96 @@ function SearchInput({
   placeholder: string;
 }) {
   return (
-    <div className="relative w-48 sm:w-56">
-      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 dark:text-slate-400" />
+    <div className="relative w-full sm:w-64">
+      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-gray-400 dark:text-ink-500" />
       <input
         type="text"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full pl-8 pr-3 py-1.5 bg-white dark:bg-slate-900 border border-gray-300 dark:border-slate-700 hover:border-gray-400 dark:hover:border-slate-600 rounded-lg text-sm text-gray-800 dark:text-slate-200 placeholder:text-gray-400 dark:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+        aria-label="搜索"
+        className={cn(INPUT, 'h-9 py-0 pl-9')}
       />
     </div>
   );
 }
 
-// 加入时间那一列的展示时区。到期/踢人时间的计算口径统一在 lib/expiry.ts。
-const APP_TIME_ZONE = 'Asia/Shanghai';
+function LoadErrorBanner({
+  children,
+  busy,
+  onRetry,
+}: {
+  children: ReactNode;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300"
+    >
+      <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{children}</span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onRetry}
+        className="h-8 shrink-0 rounded-md border border-current px-3 text-xs font-medium transition-colors hover:bg-red-100 disabled:opacity-50 dark:hover:bg-red-500/15"
+      >
+        重试
+      </button>
+    </div>
+  );
+}
 
-function ExpiryCell({
+function ListState({ children }: { children: ReactNode }) {
+  return (
+    <div className={cn(CARD, 'flex flex-col items-center gap-3 px-6 py-14 text-center text-sm text-gray-500 dark:text-ink-400')}>
+      {children}
+    </div>
+  );
+}
+
+function ListCount({ shown, total }: { shown: number; total: number }) {
+  return (
+    <p className="px-1 text-xs text-gray-500 dark:text-ink-400">
+      {shown === total ? `共 ${total} 条` : `显示 ${shown} 条，共 ${total} 条`}
+    </p>
+  );
+}
+
+/** Label / value grid used inside stacked cards. */
+function CardField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">{label}</dt>
+      <dd className="min-w-0 text-gray-800 dark:text-ink-200">{children}</dd>
+    </>
+  );
+}
+
+const CARD_FIELDS =
+  'mt-3 grid grid-cols-[4.5rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-3 border-t border-gray-100 pt-3 text-sm dark:border-ink-800';
+
+const TABLE_HEAD =
+  'border-b border-gray-200 bg-gray-50/80 text-xs text-gray-500 dark:border-ink-800 dark:bg-ink-950/30 dark:text-ink-400';
+const TH = 'whitespace-nowrap px-3 py-2.5 font-medium first:pl-4 last:pr-4';
+const TD = 'whitespace-nowrap px-3 py-3 last:pr-4';
+const TR = 'align-top transition-colors hover:bg-gray-50 dark:hover:bg-ink-800/40';
+
+function ExpiryControl({
+  variant,
   display,
   grace,
+  graceTitle,
   editable,
   joinedAt,
   policy,
   onSubmit,
 }: {
+  variant: Variant;
   display: string;
   grace?: string;
+  graceTitle?: string;
   editable: boolean;
   joinedAt?: string | null;
   policy: KickPolicy;
@@ -377,77 +471,72 @@ function ExpiryCell({
   const [dateOpen, setDateOpen] = useState(false);
   const [durationOpen, setDurationOpen] = useState(false);
 
-  return (
-    <td className="px-6 py-4">
-      <div className="flex items-start gap-1.5">
-        <div className="flex flex-col gap-0.5">
-          <span className="text-gray-700 dark:text-slate-300">{display}</span>
-          {grace && (
-            <span className="whitespace-nowrap text-[10px] text-amber-600 dark:text-amber-400">
-              {grace}
-            </span>
-          )}
-        </div>
-        {editable && (
-          <>
-            {/* 两个入口各管一件事，不合并：日历改到哪一天，加号加多少时长。 */}
-            <Popover.Root open={dateOpen} onOpenChange={setDateOpen}>
-              <Popover.Trigger asChild>
-                <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="修改日期">
-                  <Edit2 className="w-3.5 h-3.5" />
-                </button>
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  className="z-50 w-[19rem] p-3 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
-                  sideOffset={5}
-                >
-                  <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">修改日期</div>
-                  <ExpiryPicker
-                    mode="date"
-                    tone="indigo"
-                    policy={policy}
-                    joinedAt={joinedAt}
-                    onSubmit={(selection) => {
-                      onSubmit(selection);
-                      setDateOpen(false);
-                    }}
-                  />
-                  <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
+  const trigger = (icon: ReactNode, label: string) => (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      className={variant === 'card' ? cn(BUTTON.secondary, 'size-9 p-0') : cn(ICON_BUTTON, ICON_BUTTON_SIZE.row)}
+    >
+      {icon}
+    </button>
+  );
 
-            <Popover.Root open={durationOpen} onOpenChange={setDurationOpen}>
-              <Popover.Trigger asChild>
-                <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors" title="增加时长">
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  className="z-50 w-[19rem] p-3 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
-                  sideOffset={5}
-                >
-                  <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">增加时长</div>
-                  <ExpiryPicker
-                    mode="duration"
-                    tone="indigo"
-                    policy={policy}
-                    joinedAt={joinedAt}
-                    onSubmit={(selection) => {
-                      onSubmit(selection);
-                      setDurationOpen(false);
-                    }}
-                  />
-                  <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
-          </>
+  return (
+    <div className={variant === 'card' ? 'flex flex-wrap items-center gap-x-3 gap-y-2' : 'flex items-start gap-1.5'}>
+      <div>
+        <div className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200">{display}</div>
+        {grace && (
+          <div className="whitespace-nowrap text-[11px] text-amber-600 dark:text-amber-400" title={graceTitle}>
+            {grace}
+          </div>
         )}
       </div>
-    </td>
+      {editable && (
+        <div className={cn('flex items-center', variant === 'card' ? 'gap-1.5' : 'gap-0.5')}>
+          {/* 两个入口各管一件事，不合并：日历改到哪一天，加号加多少时长。 */}
+          <Popover.Root open={dateOpen} onOpenChange={setDateOpen}>
+            <Popover.Trigger asChild>
+              {trigger(<CalendarDays className="size-3.5" />, '修改日期')}
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content className={cn(POPOVER, 'w-[19rem] p-3')} sideOffset={6} collisionPadding={16}>
+                <div className="mb-2 text-sm font-medium text-gray-900 dark:text-gray-100">修改到期日期</div>
+                <ExpiryPicker
+                  mode="date"
+                  policy={policy}
+                  joinedAt={joinedAt}
+                  onSubmit={(selection) => {
+                    onSubmit(selection);
+                    setDateOpen(false);
+                  }}
+                />
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+
+          <Popover.Root open={durationOpen} onOpenChange={setDurationOpen}>
+            <Popover.Trigger asChild>
+              {trigger(<Plus className="size-3.5" />, '增加时长')}
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content className={cn(POPOVER, 'w-[19rem] p-3')} sideOffset={6} collisionPadding={16}>
+                <div className="mb-2 text-sm font-medium text-gray-900 dark:text-gray-100">增加时长</div>
+                <ExpiryPicker
+                  mode="duration"
+                  policy={policy}
+                  joinedAt={joinedAt}
+                  onSubmit={(selection) => {
+                    onSubmit(selection);
+                    setDurationOpen(false);
+                  }}
+                />
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -455,61 +544,66 @@ function CodexBadge({ isCodexEnabled }: { isCodexEnabled?: boolean | number }) {
   if (isCodexEnabled === undefined) return null;
   const enabled = Boolean(isCodexEnabled);
   return (
-    <span className={`flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium w-fit ${enabled ? 'bg-purple-100 text-purple-600 dark:bg-purple-500/20 dark:text-purple-400' : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'}`} title={`Codex ${enabled ? 'ON' : 'OFF'}`}>
-      <Zap size={10} /> {enabled ? 'Codex ON' : 'Codex OFF'}
+    <span
+      className={cn(PILL, enabled ? TONE.codex : TONE.neutral)}
+      title={enabled ? '这个 Team 已开启 Codex 席位' : '这个 Team 未开启 Codex 席位'}
+    >
+      <Zap className="size-2.5" />
+      {enabled ? 'Codex 已开' : 'Codex 未开'}
     </span>
   );
 }
 
 function SeatTypeCell({
+  variant,
   seatType,
   editable,
   onChange,
 }: {
+  variant: Variant;
   seatType: string | null | undefined;
   editable: boolean;
   onChange?: (value: SeatType) => void;
 }) {
+  if (!seatType && !editable) {
+    return <span className="text-gray-400 dark:text-ink-500">—</span>;
+  }
   return (
-    <div className="flex items-center gap-1.5">
-      <span
-        className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium ${seatTypeBadgeClass(seatType, 'admin')}`}
-      >
+    <div className="flex items-center gap-1">
+      <span className={cn(PILL, isCodexSeat(seatType) ? TONE.codex : TONE.info)}>
         {formatSeatTypeLabel(seatType)}
       </span>
       {editable && onChange && (
         <Popover.Root>
           <Popover.Trigger asChild>
-            <button className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors">
-              <Edit2 className="w-3 h-3" />
+            <button
+              type="button"
+              title="修改席位类型"
+              aria-label="修改席位类型"
+              className={cn(ICON_BUTTON, ICON_BUTTON_SIZE[variant])}
+            >
+              <Pencil className="size-3.5" />
             </button>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content
-              className="z-50 w-48 p-2 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl"
-              sideOffset={5}
-            >
-              <div className="flex flex-col gap-1">
-                {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
+            <Popover.Content className={cn(POPOVER, 'w-44 p-1')} sideOffset={6} collisionPadding={16}>
+              {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
+                <Popover.Close asChild key={value}>
                   <button
-                    key={value}
                     type="button"
                     onClick={() => onChange(value)}
-                    className="text-left px-3 py-2 text-sm text-gray-700 dark:text-slate-300 hover:bg-gray-200 dark:bg-slate-700 hover:text-gray-900 dark:text-slate-100 rounded-lg flex items-center justify-between"
+                    className="flex h-9 w-full items-center justify-between rounded-md px-2.5 text-sm text-gray-700 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-ink-300 dark:hover:bg-ink-800 dark:hover:text-gray-100"
                   >
                     <span className="flex items-center gap-2">
-                      <span
-                        className={`w-2 h-2 rounded-full ${value === 'usage_based' ? 'bg-purple-500' : 'bg-indigo-400'}`}
-                      />
+                      <span className={cn('size-2 rounded-full', value === 'usage_based' ? 'bg-purple-500' : 'bg-blue-500')} />
                       {label}
                     </span>
                     {normalizeSeatType(seatType) === value && (
-                      <Check className="w-4 h-4 text-indigo-400" />
+                      <Check className="size-4 text-blue-600 dark:text-blue-400" />
                     )}
                   </button>
-                ))}
-              </div>
-              <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
+                </Popover.Close>
+              ))}
             </Popover.Content>
           </Popover.Portal>
         </Popover.Root>
@@ -519,13 +613,18 @@ function SeatTypeCell({
 }
 
 function UserIdentityCell({
+  variant,
   email,
   name,
   systemDisplayName,
+  badge,
   onSave,
   onError,
 }: {
+  variant: Variant;
   email: string;
+  /** Rendered after the edit button on the first line (e.g. the multi-Team badge). */
+  badge?: ReactNode;
   name?: string | null;
   systemDisplayName?: string | null;
   onSave: (value: string | null) => Promise<void>;
@@ -538,6 +637,7 @@ function UserIdentityCell({
   const customName = systemDisplayName?.trim() || '';
   const hasCustomName = Boolean(customName);
   const profileName = name?.trim() || '';
+  const primary = customName || email;
 
   const openEditor = () => {
     setDraft(customName);
@@ -552,80 +652,103 @@ function UserIdentityCell({
       setOpen(false);
     } catch (err) {
       console.error(err);
-      onError?.('保存系统显示名称失败');
+      onError?.('保存显示名称失败');
     } finally {
       setSaving(false);
     }
   };
 
-  const editControl = (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          onClick={openEditor}
-          className="p-0.5 rounded text-gray-400 dark:text-slate-500 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors shrink-0"
-          title="设置系统显示名称"
-        >
-          <Edit2 className="w-3.5 h-3.5" />
-        </button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          className="z-50 w-72 p-4 rounded-xl bg-gray-100 dark:bg-slate-800 border border-gray-300 dark:border-slate-700 shadow-2xl animate-in fade-in zoom-in-95"
-          sideOffset={5}
-        >
-          <div className="mb-2 text-sm font-medium text-gray-800 dark:text-slate-200">系统显示名称</div>
-          <input
-            type="text"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="留空使用邮箱"
-            className="w-full px-3 py-2 bg-white dark:bg-slate-900 border border-gray-300 dark:border-slate-700 rounded-lg text-sm text-gray-800 dark:text-slate-200 placeholder:text-gray-400 dark:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            maxLength={120}
-          />
-          <div className="mt-3 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="px-3 py-1.5 rounded-lg bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-slate-300 hover:bg-gray-300 dark:hover:bg-slate-600 text-xs font-medium transition-colors"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="px-3 py-1.5 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 text-xs font-medium transition-colors disabled:opacity-60"
-            >
-              {saving ? '保存中...' : '保存'}
-            </button>
-          </div>
-          <Popover.Arrow className="fill-gray-200 dark:fill-slate-700" />
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
-  );
-
   return (
-    <div className="space-y-0.5">
-      {hasCustomName ? (
-        <>
-          <div className="font-medium text-gray-800 dark:text-slate-200">{customName}</div>
-          <div className="flex items-center gap-1 text-gray-500 dark:text-slate-400 text-xs">
-            <span className="break-all">{email}</span>
-            {editControl}
-          </div>
-        </>
-      ) : (
-        <div className="flex items-center gap-1 font-medium text-gray-800 dark:text-slate-200">
-          <span className="break-all">{email}</span>
-          {editControl}
+    <div className="min-w-0">
+      <div className="flex min-w-0 items-center gap-1">
+        <span className="truncate font-medium text-gray-900 dark:text-gray-100" title={primary}>
+          {primary}
+        </span>
+        <Popover.Root open={open} onOpenChange={setOpen}>
+          <Popover.Trigger asChild>
+            <button
+              type="button"
+              onClick={openEditor}
+              className={cn(ICON_BUTTON, ICON_BUTTON_SIZE[variant])}
+              title="设置显示名称"
+              aria-label="设置显示名称"
+            >
+              <Pencil className="size-3.5" />
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content className={cn(POPOVER, 'w-72 p-4')} sideOffset={6} collisionPadding={16}>
+              <div className="text-sm font-medium text-gray-900 dark:text-gray-100">显示名称</div>
+              <p className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">只在 TeamBoss 里显示，留空则显示邮箱。</p>
+              <input
+                type="text"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder="留空则显示邮箱"
+                className={cn(INPUT, 'mt-3')}
+                maxLength={120}
+              />
+              <div className="mt-3 flex justify-end gap-2">
+                <button type="button" onClick={() => setOpen(false)} className={cn(BUTTON.secondary, 'h-8 px-3 py-0')}>
+                  取消
+                </button>
+                <button type="button" onClick={handleSave} disabled={saving} className={cn(BUTTON.primary, 'h-8 px-3 py-0')}>
+                  {saving ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+        {badge}
+      </div>
+      {hasCustomName && (
+        <div className="truncate text-xs text-gray-500 dark:text-ink-400" title={email}>
+          {email}
         </div>
       )}
       {profileName && (
-        <div className="text-gray-400 dark:text-slate-500 text-xs">{profileName}</div>
+        <div className="truncate text-xs text-gray-400 dark:text-ink-500" title={profileName}>
+          {profileName}
+        </div>
       )}
+    </div>
+  );
+}
+
+function BillingCycleCell({ cycle, className }: { cycle: BillingCycle | string | null | undefined; className?: string }) {
+  if (!cycle) return <span className="text-gray-400 dark:text-ink-500">—</span>;
+  if (typeof cycle === 'string') return <span>{cycle}</span>;
+  const status =
+    cycle.subscription_status === 'expired'
+      ? { label: '已到期', tone: TONE.danger }
+      : cycle.subscription_status === 'stale'
+        ? { label: '数据未同步', tone: TONE.neutral }
+        : cycle.will_renew
+          ? null
+          : { label: '到期不续费', tone: TONE.warning };
+  const days = cycle.days_remaining;
+  return (
+    <div className={cn('flex items-center gap-x-2 gap-y-1', className)}>
+      <span className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200">
+        {formatShortDate(cycle.active_start)} – {formatShortDate(cycle.active_until)}
+      </span>
+      {days != null && (
+        <span className="whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
+          {days >= 0 ? `剩 ${days} 天` : `已过 ${-days} 天`}
+        </span>
+      )}
+      {status && <span className={cn(PILL, status.tone)}>{status.label}</span>}
+    </div>
+  );
+}
+
+function TeamName({ name, children }: { name: string; children?: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      <span className="truncate font-medium text-gray-800 dark:text-ink-100" title={name}>
+        {name || '—'}
+      </span>
+      {children}
     </div>
   );
 }
@@ -669,7 +792,7 @@ function OwnerList({
     isCodexEnabled?: boolean | number
   ) => {
     if (!userId) {
-      showToast('无法获取管理员 ID，请刷新后重试', 'error');
+      showToast('无法获取 Owner ID，请刷新后重试', 'error');
       return;
     }
     try {
@@ -702,66 +825,255 @@ function OwnerList({
     );
   }, [owners, search, sortOrder]);
 
+  const identity = (owner: OwnerRow, variant: Variant) => (
+    <UserIdentityCell
+      variant={variant}
+      email={owner.email}
+      name={owner.name}
+      systemDisplayName={owner.system_display_name}
+      onSave={(value) => handleUpdateDisplayName(owner.email, value)}
+      onError={(message) => showToast(message, 'error')}
+    />
+  );
+
+  const seat = (owner: OwnerRow, variant: Variant) => (
+    <SeatTypeCell
+      variant={variant}
+      seatType={owner.seat_type}
+      editable
+      onChange={(value) => handleUpdateSeat(owner.team_id, owner.user_id, value, owner.is_codex_enabled)}
+    />
+  );
+
+  const card4 = (owner: OwnerRow) =>
+    owner.card_last4 ? (
+      <span className="whitespace-nowrap font-mono text-gray-600 dark:text-ink-300">•••• {owner.card_last4}</span>
+    ) : (
+      <span className="text-gray-400 dark:text-ink-500">—</span>
+    );
+
   return (
-    <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-slate-800">
+    <section className="space-y-3">
       {loadError && (
-        <div role="alert" className="flex items-center gap-3 border-b border-red-200 bg-red-50 px-6 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
-          <span>管理员数据加载失败：{loadError}{owners.length > 0 ? '。以下为上次成功加载的数据。' : ''}</span>
-          <button type="button" disabled={loading} onClick={() => setRefreshTrigger((v) => v + 1)} className="ml-auto shrink-0 rounded border border-current px-3 py-1 disabled:opacity-50">重试</button>
-        </div>
+        <LoadErrorBanner busy={loading} onRetry={() => setRefreshTrigger((v) => v + 1)}>
+          Owner 数据加载失败：{loadError}{owners.length > 0 ? '。下面是上次成功加载的数据。' : ''}
+        </LoadErrorBanner>
       )}
-      <table className="w-full text-left text-sm text-gray-700 dark:text-slate-300">
-        <thead className="bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-400">
-          <tr>
-            <th className="px-6 py-4 font-medium">邮箱</th>
-            <th className="px-6 py-4 font-medium">姓名</th>
-            <th className="px-6 py-4 font-medium">队伍 (状态)</th>
-            <th className="px-6 py-4 font-medium">席位类型</th>
-            <th className="px-6 py-4 font-medium">卡号后四位</th>
-            <th className="px-6 py-4 font-medium">计费周期</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200 dark:divide-slate-800/50 bg-gray-50 dark:bg-slate-950/50">
-          {loading ? (
-            <tr><td colSpan={6} className="px-6 py-8 text-center">加载中...</td></tr>
-          ) : loadError && owners.length === 0 ? (
-            <tr><td colSpan={6} className="px-6 py-8 text-center text-red-600 dark:text-red-400">管理员数据未能加载，请重试</td></tr>
-          ) : filteredOwners.length === 0 ? (
-            <tr><td colSpan={6} className="px-6 py-8 text-center text-gray-400 dark:text-slate-500">暂无匹配的管理员</td></tr>
-          ) : (
-            filteredOwners.map((owner, i) => (
-              <tr key={`${owner.team_id}-${owner.email}-${i}`} className="transition-colors hover:bg-gray-100 dark:hover:bg-slate-800">
-                <td className="px-6 py-4">
-                  <UserIdentityCell
-                    email={owner.email}
-                    name={owner.name}
-                    systemDisplayName={owner.system_display_name}
-                    onSave={(value) => handleUpdateDisplayName(owner.email, value)}
-                    onError={(message) => showToast(message, 'error')}
-                  />
-                </td>
-                <td className="px-6 py-4">{owner.name}</td>
-                <td className="px-6 py-4">
-                  <div className="flex flex-col items-start gap-1">
-                    <span className="font-medium text-gray-700 dark:text-slate-300">{owner.team_name}</span>
-                    <CodexBadge isCodexEnabled={owner.is_codex_enabled} />
-                  </div>
-                </td>
-                <td className="px-6 py-4">
-                  <SeatTypeCell
-                    seatType={owner.seat_type}
-                    editable
-                    onChange={(value) => handleUpdateSeat(owner.team_id, owner.user_id, value, owner.is_codex_enabled)}
-                  />
-                </td>
-                <td className="px-6 py-4 font-mono text-gray-500 dark:text-slate-400">{owner.card_last4 || '-'}</td>
-                <td className="px-6 py-4">{formatBillingCycle(owner.billing_cycle)}</td>
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
+      {loading ? (
+        <ListState>
+          <LoadingSpinner size={22} />
+          正在加载 Owner…
+        </ListState>
+      ) : loadError && owners.length === 0 ? null : filteredOwners.length === 0 ? (
+        <ListState>
+          {owners.length === 0
+            ? '还没有 Team。在「Team 列表」添加 Team 后，它的 Owner 会显示在这里。'
+            : '没有符合搜索条件的 Owner。'}
+        </ListState>
+      ) : (
+        <>
+          <div className={cn(CARD, 'hidden overflow-x-auto lg:block')}>
+            <table className="w-full text-left text-sm text-gray-700 dark:text-ink-300">
+              <thead className={TABLE_HEAD}>
+                <tr>
+                  <th className={TH}>Owner</th>
+                  <th className={TH}>Team</th>
+                  <th className={TH}>席位</th>
+                  <th className={TH}>卡号后四位</th>
+                  <th className={TH}>计费周期</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-ink-800">
+                {filteredOwners.map((owner, i) => (
+                  <tr key={`${owner.team_id}-${owner.email}-${i}`} className={TR}>
+                    <td className="py-3 pl-4 pr-3">
+                      <div className="max-w-[20rem]">{identity(owner, 'row')}</div>
+                    </td>
+                    <td className={cn(TD, 'max-w-[18rem]')}>
+                      <TeamName name={owner.team_name}>
+                        <CodexBadge isCodexEnabled={owner.is_codex_enabled} />
+                      </TeamName>
+                    </td>
+                    <td className={TD}>{seat(owner, 'row')}</td>
+                    <td className={TD}>{card4(owner)}</td>
+                    <td className={TD}>
+                      <BillingCycleCell cycle={owner.billing_cycle} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 lg:hidden">
+            {filteredOwners.map((owner, i) => (
+              <article key={`${owner.team_id}-${owner.email}-${i}`} className={cn(CARD, 'min-w-0 p-4')}>
+                {identity(owner, 'card')}
+                <dl className={CARD_FIELDS}>
+                  <CardField label="Team">
+                    <TeamName name={owner.team_name}>
+                      <CodexBadge isCodexEnabled={owner.is_codex_enabled} />
+                    </TeamName>
+                  </CardField>
+                  <CardField label="席位">{seat(owner, 'card')}</CardField>
+                  <CardField label="卡号后四位">{card4(owner)}</CardField>
+                  <CardField label="计费周期">
+                    <BillingCycleCell cycle={owner.billing_cycle} className="flex-wrap" />
+                  </CardField>
+                </dl>
+              </article>
+            ))}
+          </div>
+
+          <ListCount shown={filteredOwners.length} total={owners.length} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function MemberStatusPills({ member }: { member: AdminMemberRow }) {
+  const status = MEMBER_STATUS[member.status];
+  const source =
+    member.status === 'joined'
+      ? JOIN_SOURCE[member.expiry?.source || 'system'] ?? JOIN_SOURCE.system
+      : member.status === 'kicked' && member.expiry?.kick_source
+        ? KICK_SOURCE[member.expiry.kick_source]
+        : undefined;
+  return (
+    <>
+      <span className={cn(PILL, status?.tone ?? TONE.neutral)}>
+        <span className={cn('size-1.5 rounded-full', status?.dotClass ?? 'bg-gray-400')} />
+        {status?.label ?? member.status_label ?? member.status}
+      </span>
+      {source && <span className={cn(PILL, source.tone)}>{source.label}</span>}
+    </>
+  );
+}
+
+function MemberTeamInfo({ member }: { member: AdminMemberRow }) {
+  return (
+    <div className="flex min-w-0 flex-col items-start gap-0.5">
+      <TeamName name={member.team_name}>
+        <CodexBadge isCodexEnabled={member.is_codex_enabled} />
+      </TeamName>
+      <span className="flex min-w-0 max-w-full items-center gap-1 text-xs text-gray-500 dark:text-ink-400">
+        <span className="shrink-0 text-gray-400 dark:text-ink-500">Owner</span>
+        <span className="truncate" title={member.owner_email}>{member.owner_email || '—'}</span>
+      </span>
     </div>
+  );
+}
+
+function TgBindingCell({
+  variant,
+  member,
+  copying,
+  copied,
+  onCopy,
+}: {
+  variant: Variant;
+  member: AdminMemberRow;
+  copying: boolean;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  const bound = Boolean(member.tg_binding?.bound);
+  if (member.status === 'kicked') {
+    return (
+      <span className="whitespace-nowrap text-xs text-gray-400 dark:text-ink-500">
+        {bound ? '已绑定（其他成员）' : '已解绑'}
+      </span>
+    );
+  }
+  const action = bound ? '重新绑定指令' : '绑定指令';
+  return (
+    <div className="flex items-center gap-1.5">
+      <span
+        className={cn(PILL, bound ? TONE.success : TONE.neutral)}
+        title={member.tg_binding?.username ? `@${member.tg_binding.username}` : undefined}
+      >
+        <MessageCircle className="size-3" />
+        {bound ? '已绑定' : '未绑定'}
+      </span>
+      <button
+        type="button"
+        onClick={onCopy}
+        disabled={copying}
+        title={`复制${action}`}
+        aria-label={`复制 ${member.email} 的${action}`}
+        className={
+          variant === 'card'
+            ? cn(BUTTON.secondary, 'h-9 gap-1.5 px-2.5 py-0 text-xs disabled:cursor-wait')
+            : cn(ICON_BUTTON, ICON_BUTTON_SIZE.row)
+        }
+      >
+        {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
+        {variant === 'card' && (copied ? '已复制' : `复制${action}`)}
+      </button>
+    </div>
+  );
+}
+
+function KickMemberButton({
+  variant,
+  member,
+  onConfirm,
+}: {
+  variant: Variant;
+  member: AdminMemberRow;
+  onConfirm: () => void;
+}) {
+  const pending = member.status === 'pending';
+  const actionLabel = pending ? '撤销邀请' : '踢出成员';
+  return (
+    <Dialog.Root>
+      <Dialog.Trigger asChild>
+        {variant === 'card' ? (
+          <button
+            type="button"
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 text-sm font-medium text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 dark:text-red-400 dark:hover:bg-red-500/10"
+          >
+            <UserX className="size-4" />
+            {pending ? '撤销邀请' : '踢出'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            title={actionLabel}
+            aria-label={`${actionLabel}：${member.email}`}
+            className="-my-1 inline-flex size-8 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 dark:text-ink-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+          >
+            <Trash2 className="size-4" />
+          </button>
+        )}
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-gray-900/40 backdrop-blur-sm dark:bg-ink-950/80" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border border-gray-200 bg-white p-6 shadow-2xl dark:border-ink-800 dark:bg-ink-900">
+          <Dialog.Title className="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-gray-100">
+            <UserX className="size-5 shrink-0 text-red-500" />
+            {actionLabel}
+          </Dialog.Title>
+          <Dialog.Description className="mt-2 text-sm leading-6 text-gray-600 dark:text-ink-300">
+            {pending ? '撤销发给 ' : '把 '}
+            <strong className="font-medium text-gray-900 [overflow-wrap:anywhere] dark:text-gray-100">{member.email}</strong>
+            {pending ? ` 的 Team 邀请（${member.team_name}）？` : ` 从 ${member.team_name} 中踢出？`}
+            此操作无法撤销。
+          </Dialog.Description>
+          <div className="mt-6 flex flex-wrap justify-end gap-2">
+            <Dialog.Close asChild>
+              <button type="button" className={BUTTON.secondary}>取消</button>
+            </Dialog.Close>
+            <Dialog.Close asChild>
+              <button type="button" onClick={onConfirm} className={BUTTON.danger}>
+                {pending ? '撤销邀请' : '确认踢出'}
+              </button>
+            </Dialog.Close>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
@@ -819,7 +1131,7 @@ function MemberList({
         const failed = (res.errors ?? []) as Array<{ team_name?: string | null; team_id?: string }>;
         if (failed.length) {
           const names = failed.map((e) => e.team_name || e.team_id).filter(Boolean).join('、');
-          showToast(`${failed.length} 个车队数据载入失败（${names}）`, 'error');
+          showToast(`${failed.length} 个 Team 的数据加载失败（${names}）`, 'error');
         }
       })
       .catch((err) => {
@@ -968,261 +1280,210 @@ function MemberList({
     }
   };
 
+  const multiTeamBadge = (member: AdminMemberRow) => {
+    // 已踢出的行不挂角标：角标数的是"当前在册"的车队数，
+    // 挂在一条已经不在册的行上只会两边对不上。
+    if (member.status === 'kicked') return null;
+    const emailKey = (member.email || '').trim().toLowerCase();
+    const teamCount = memberTeamCounts.get(emailKey) ?? 0;
+    const ownerCount = ownerTeamsByEmail.get(emailKey) ?? 0;
+    if (teamCount <= 1 && ownerCount === 0) return null;
+    const title = ownerCount
+      ? `该邮箱在 ${teamCount} 个 Team 是成员，另在 ${ownerCount} 个 Team 是 Owner（Owner 不在本列表中）；点击只看这个邮箱`
+      : `该邮箱同时在 ${teamCount} 个 Team，点击只看这个邮箱`;
+    return (
+      <button
+        type="button"
+        onClick={() => setFocusEmail(emailKey)}
+        title={title}
+        className={cn(
+          PILL,
+          TONE.warning,
+          'relative cursor-pointer ring-1 ring-inset ring-amber-300/70 transition-colors after:absolute after:-inset-2 hover:bg-amber-100 dark:ring-amber-500/30 dark:hover:bg-amber-500/25'
+        )}
+      >
+        ×{teamCount} Team{ownerCount ? ` · Owner×${ownerCount}` : ''}
+      </button>
+    );
+  };
+
+  const memberParts = (member: AdminMemberRow, variant: Variant) => {
+    const emailKey = (member.email || '').trim().toLowerCase();
+    const expiryView = memberExpiryDisplay(member.expiry);
+    return {
+      identity: (
+        <UserIdentityCell
+          variant={variant}
+          email={member.email}
+          name={member.name}
+          systemDisplayName={member.system_display_name}
+          badge={multiTeamBadge(member)}
+          onSave={(value) => handleUpdateDisplayName(member.email, value)}
+          onError={(message) => showToast(message, 'error')}
+        />
+      ),
+      team: <MemberTeamInfo member={member} />,
+      joinedAt: (
+        <span className="whitespace-nowrap tabular-nums text-gray-700 dark:text-ink-300" title="系统首次发现该成员的时间">
+          {formatJoinedAt(member.expiry?.first_seen_at)}
+        </span>
+      ),
+      expiry: (
+        <ExpiryControl
+          variant={variant}
+          display={expiryView.primary}
+          grace={expiryView.grace}
+          graceTitle={expiryView.graceTitle}
+          editable={member.status === 'joined'}
+          joinedAt={member.expiry?.first_seen_at}
+          policy={kickPolicy}
+          onSubmit={(selection) =>
+            handleUpdateExpiry(
+              member.team_id,
+              member.user_id,
+              member.email,
+              selection
+            )
+          }
+        />
+      ),
+      seat: (
+        <SeatTypeCell
+          variant={variant}
+          seatType={member.seat_type}
+          editable={member.status === 'joined' && Boolean(member.user_id)}
+          onChange={(value) => handleUpdateSeat(member.team_id, member.user_id, value, member.is_codex_enabled)}
+        />
+      ),
+      tg: (
+        <TgBindingCell
+          variant={variant}
+          member={member}
+          copying={copyingBindingEmail === emailKey}
+          copied={copiedBindingEmail === emailKey}
+          onCopy={() => handleCopyTgBinding(member.email)}
+        />
+      ),
+      kick:
+        member.status === 'joined' || member.status === 'pending' ? (
+          <KickMemberButton
+            variant={variant}
+            member={member}
+            onConfirm={() => handleKick(member.team_id, member.status === 'pending' ? member.email : member.user_id, member.status === 'pending')}
+          />
+        ) : null,
+    };
+  };
+
+  const rowKey = (member: AdminMemberRow, i: number) => `${member.team_id}-${member.email}-${member.status}-${i}`;
+
   return (
-    <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-slate-800">
+    <section className="space-y-3">
       {loadError && (
-        <div role="alert" className="flex items-center gap-3 border-b border-red-200 bg-red-50 px-6 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300">
-          <span>成员数据加载失败：{loadError}{members.length > 0 ? '。以下为上次成功加载的数据。' : ''}</span>
-          <button type="button" disabled={loading} onClick={() => setRefreshTrigger((v) => v + 1)} className="ml-auto shrink-0 rounded border border-current px-3 py-1 disabled:opacity-50">重试</button>
-        </div>
+        <LoadErrorBanner busy={loading} onRetry={() => setRefreshTrigger((v) => v + 1)}>
+          成员数据加载失败：{loadError}{members.length > 0 ? '。下面是上次成功加载的数据。' : ''}
+        </LoadErrorBanner>
       )}
       {focusEmail && (
-        <div className="flex items-center gap-2 border-b border-gray-200 dark:border-slate-800 bg-amber-50 dark:bg-amber-950/30 px-6 py-2 text-xs text-amber-800 dark:text-amber-200">
-          <span>只看邮箱</span>
-          <span className="font-mono font-medium">{focusEmail}</span>
-          <span className="text-amber-700/70 dark:text-amber-300/70">（已忽略搜索与筛选）</span>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+          <span className="min-w-0 flex-1">
+            只看 <span className="font-medium [overflow-wrap:anywhere]">{focusEmail}</span> 在各 Team 的记录
+            <span className="text-amber-700/80 dark:text-amber-300/70">（搜索和筛选暂不生效）</span>
+          </span>
           <button
             type="button"
             onClick={() => setFocusEmail(null)}
-            className="ml-auto rounded-full border border-amber-300 dark:border-amber-700/60 px-2 py-px font-medium transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/50"
+            className="h-8 shrink-0 rounded-md border border-amber-300 px-3 text-xs font-medium transition-colors hover:bg-amber-100 dark:border-amber-500/40 dark:hover:bg-amber-500/15"
           >
-            取消
+            显示全部
           </button>
         </div>
       )}
-      <table className="w-full text-left text-sm text-gray-700 dark:text-slate-300">
-        <thead className="bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-400">
-          <tr>
-            <th className="px-6 py-4 font-medium">邮箱 / 姓名</th>
-            <th className="px-6 py-4 font-medium">队伍 & Owner (状态)</th>
-            <th className="px-6 py-4 font-medium whitespace-nowrap min-w-[7.5rem]">状态</th>
-            <th className="px-6 py-4 font-medium">发现</th>
-            <th className="px-6 py-4 font-medium">到期</th>
-            <th className="px-6 py-4 font-medium">席位类型</th>
-            <th className="px-6 py-4 font-medium whitespace-nowrap">TG 绑定</th>
-            <th className="px-6 py-4 font-medium text-right">操作</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200 dark:divide-slate-800/50 bg-gray-50 dark:bg-slate-950/50">
-          {loading ? (
-            <tr><td colSpan={8} className="px-6 py-8 text-center">加载中...</td></tr>
-          ) : loadError && members.length === 0 ? (
-            <tr><td colSpan={8} className="px-6 py-8 text-center text-red-600 dark:text-red-400">成员数据未能加载，请重试</td></tr>
-          ) : filteredMembers.length === 0 ? (
-            <tr><td colSpan={8} className="px-6 py-8 text-center text-gray-400 dark:text-slate-500">暂无匹配的成员</td></tr>
-          ) : (
-            filteredMembers.map((member, i) => (
-              <tr key={`${member.team_id}-${member.email}-${member.status}-${i}`} className="transition-colors hover:bg-gray-100 dark:hover:bg-slate-800">
-                <td className="px-6 py-4">
-                  <UserIdentityCell
-                    email={member.email}
-                    name={member.name}
-                    systemDisplayName={member.system_display_name}
-                    onSave={(value) => handleUpdateDisplayName(member.email, value)}
-                    onError={(message) => showToast(message, 'error')}
-                  />
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex flex-col items-start gap-1">
-                    <span className="flex items-center gap-1.5">
-                      <span className="font-medium text-gray-700 dark:text-slate-300">{member.team_name}</span>
-                      {(() => {
-                        // 已踢出的行不挂角标：角标数的是"当前在册"的车队数，
-                        // 挂在一条已经不在册的行上只会两边对不上。
-                        if (member.status === 'kicked') return null;
-                        const emailKey = (member.email || '').trim().toLowerCase();
-                        const teamCount = memberTeamCounts.get(emailKey) ?? 0;
-                        const ownerCount = ownerTeamsByEmail.get(emailKey) ?? 0;
-                        if (teamCount <= 1 && ownerCount === 0) return null;
-                        const title = ownerCount
-                          ? `该邮箱在 ${teamCount} 个车队为成员，另有 ${ownerCount} 个车队的 Owner 身份（Owner 行不在本列表中）；点击只看这个邮箱`
-                          : `该邮箱同时在 ${teamCount} 个车队，点击只看这个邮箱`;
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => setFocusEmail(emailKey)}
-                            title={title}
-                            className="rounded-full border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-px text-[11px] font-medium leading-4 text-amber-700 dark:text-amber-300 transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/50"
-                          >
-                            ×{teamCount} 队{ownerCount ? ` · Owner×${ownerCount}` : ''}
-                          </button>
-                        );
-                      })()}
-                    </span>
-                    <span className="text-gray-400 dark:text-slate-500 text-xs">{member.owner_email}</span>
-                    <CodexBadge isCodexEnabled={member.is_codex_enabled} />
+      {loading ? (
+        <ListState>
+          <LoadingSpinner size={22} />
+          正在加载成员…
+        </ListState>
+      ) : loadError && members.length === 0 ? null : filteredMembers.length === 0 ? (
+        <ListState>
+          {members.length === 0
+            ? '还没有成员。在「Team 列表」邀请成员，或让用户用兑换码自助加入。'
+            : '没有符合当前搜索和筛选的成员。'}
+        </ListState>
+      ) : (
+        <>
+          <div className={cn(CARD, 'hidden overflow-hidden xl:block')}>
+            <table className="w-full text-left text-sm text-gray-700 dark:text-ink-300">
+              <thead className={TABLE_HEAD}>
+                <tr>
+                  <th className={TH}>成员</th>
+                  <th className={TH}>Team / Owner</th>
+                  <th className={TH}>状态</th>
+                  <th className={TH}>加入时间</th>
+                  <th className={TH}>到期</th>
+                  <th className={TH}>席位</th>
+                  <th className={TH}>TG 绑定</th>
+                  <th className={TH}><span className="sr-only">操作</span></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-ink-800">
+                {filteredMembers.map((member, i) => {
+                  const parts = memberParts(member, 'row');
+                  return (
+                    <tr key={rowKey(member, i)} className={TR}>
+                      <td className="w-full max-w-0 py-3 pl-4 pr-3">{parts.identity}</td>
+                      <td className={cn(TD, 'max-w-[14rem]')}>{parts.team}</td>
+                      <td className={TD}>
+                        <div className="flex flex-col items-start gap-1">
+                          <MemberStatusPills member={member} />
+                        </div>
+                      </td>
+                      <td className={TD}>{parts.joinedAt}</td>
+                      <td className={TD}>{parts.expiry}</td>
+                      <td className={TD}>{parts.seat}</td>
+                      <td className={TD}>{parts.tg}</td>
+                      <td className={cn(TD, 'pl-0 text-right')}>{parts.kick}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2 xl:hidden">
+            {filteredMembers.map((member, i) => {
+              const parts = memberParts(member, 'card');
+              return (
+                <article key={rowKey(member, i)} className={cn(CARD, 'min-w-0 p-4')}>
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1">{parts.identity}</div>
+                    {parts.kick && <div className="-mr-1.5 -mt-1.5">{parts.kick}</div>}
                   </div>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap min-w-[7.5rem]">
-                  <div className="flex flex-col gap-1 items-start">
-                  <span className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-medium border whitespace-nowrap
-                    ${member.status === 'joined' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : ''}
-                    ${member.status === 'pending' ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' : ''}
-                    ${member.status === 'kicked' ? 'bg-rose-500/10 text-rose-400 border-rose-500/20' : ''}
-                  `}>
-                    <span className={`w-2 h-2 rounded-full shrink-0
-                      ${member.status === 'joined' ? 'bg-emerald-500' : ''}
-                      ${member.status === 'pending' ? 'bg-amber-500' : ''}
-                      ${member.status === 'kicked' ? 'bg-rose-500' : ''}
-                    `} />
-                    {member.status_label || member.status}
-                  </span>
-                  {member.status === 'joined' && (() => {
-                    const src = member.expiry?.source || 'system';
-                    const styles: Record<string, string> = {
-                      system: 'bg-slate-500/10 text-gray-500 dark:text-slate-400 border border-slate-500/20',
-                      detected: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
-                      self_service: 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20',
-                    };
-                    const labels: Record<string, string> = {
-                      system: '系统邀请',
-                      detected: '手动拉入',
-                      self_service: '自助加入',
-                    };
-                    return (
-                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium w-fit ${styles[src] || styles.system}`}>
-                        {labels[src] || '系统邀请'}
-                      </span>
-                    );
-                  })()}
-                  {member.status === 'kicked' && member.expiry?.kick_source && (
-                    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium w-fit
-                      ${member.expiry.kick_source === 'auto_expire' ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20' : ''}
-                      ${member.expiry.kick_source === 'admin' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' : ''}
-                      ${member.expiry.kick_source === 'detected' ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : ''}
-                    `}>
-                      {member.expiry.kick_source === 'auto_expire' && '自动过期'}
-                      {member.expiry.kick_source === 'admin' && '手动踢出'}
-                      {member.expiry.kick_source === 'detected' && '检测移除'}
-                    </span>
-                  )}
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <MemberStatusPills member={member} />
                   </div>
-                </td>
+                  <dl className={CARD_FIELDS}>
+                    <CardField label="Team">{parts.team}</CardField>
+                    <CardField label="加入时间">{parts.joinedAt}</CardField>
+                    <CardField label="到期">{parts.expiry}</CardField>
+                    <CardField label="席位">{parts.seat}</CardField>
+                    <CardField label="TG 绑定">{parts.tg}</CardField>
+                  </dl>
+                </article>
+              );
+            })}
+          </div>
 
-                <td className="px-6 py-4">
-                  <span className="text-gray-700 dark:text-slate-300 text-xs">
-                    {member.expiry?.first_seen_at
-                      ? new Date(member.expiry.first_seen_at).toLocaleString('zh-CN', {
-                          timeZone: APP_TIME_ZONE,
-                          month: 'numeric',
-                          day: 'numeric',
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })
-                      : '—'}
-                  </span>
-                </td>
-
-                <ExpiryCell
-                  display={memberExpiryDisplay(member.expiry).primary}
-                  grace={memberExpiryDisplay(member.expiry).grace}
-                  editable={member.status === 'joined'}
-                  joinedAt={member.expiry?.first_seen_at}
-                  policy={kickPolicy}
-                  onSubmit={(selection) =>
-                    handleUpdateExpiry(
-                      member.team_id,
-                      member.user_id,
-                      member.email,
-                      selection
-                    )
-                  }
-                />
-
-                <td className="px-6 py-4">
-                  <SeatTypeCell
-                    seatType={member.seat_type}
-                    editable={member.status === 'joined' && Boolean(member.user_id)}
-                    onChange={(value) => handleUpdateSeat(member.team_id, member.user_id, value, member.is_codex_enabled)}
-                  />
-                </td>
-
-                <td className="px-6 py-4 whitespace-nowrap">
-                  {member.status === 'kicked' ? (
-                    <span className="text-xs text-gray-400 dark:text-slate-600">
-                      {member.tg_binding?.bound ? '已绑定（其他成员）' : '已解绑'}
-                    </span>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-xs font-medium ${
-                          member.tg_binding?.bound
-                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
-                            : 'border-slate-300 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400'
-                        }`}
-                        title={member.tg_binding?.username ? `@${member.tg_binding.username}` : undefined}
-                      >
-                        <MessageCircle className="h-3.5 w-3.5" />
-                        {member.tg_binding?.bound ? '已绑定' : '未绑定'}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleCopyTgBinding(member.email)}
-                        disabled={copyingBindingEmail === (member.email || '').trim().toLowerCase()}
-                        className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-indigo-500/10 hover:text-indigo-500 disabled:cursor-wait disabled:opacity-50 dark:text-slate-500 dark:hover:text-indigo-400"
-                        title={member.tg_binding?.bound ? '复制重新绑定指令' : '复制绑定指令'}
-                        aria-label={member.tg_binding?.bound ? `复制 ${member.email} 的重新绑定指令` : `复制 ${member.email} 的绑定指令`}
-                      >
-                        {copiedBindingEmail === (member.email || '').trim().toLowerCase()
-                          ? <Check className="h-4 w-4 text-emerald-500" />
-                          : <Copy className="h-4 w-4" />}
-                      </button>
-                    </div>
-                  )}
-                </td>
-
-                <td className="px-6 py-4 text-right">
-                  {(member.status === 'joined' || member.status === 'pending') && (
-                    <Dialog.Root>
-                      <Dialog.Trigger asChild>
-                        <button className="p-2 rounded-lg text-gray-400 dark:text-slate-500 hover:bg-rose-500/10 hover:text-rose-400 transition-colors">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </Dialog.Trigger>
-                      <Dialog.Portal>
-                        <Dialog.Overlay className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 animate-in fade-in" />
-                        <Dialog.Content className="fixed left-[50%] top-[50%] translate-x-[-50%] translate-y-[-50%] w-full max-w-md bg-white dark:bg-slate-900 border border-gray-200 dark:border-slate-800 rounded-2xl p-6 z-50 shadow-2xl animate-in fade-in zoom-in-95">
-                          <Dialog.Title className="text-lg font-semibold text-gray-900 dark:text-slate-100 flex items-center gap-2 mb-2">
-                            <UserX className="w-5 h-5 text-rose-500" />
-                            确认踢出该成员
-                          </Dialog.Title>
-                          <Dialog.Description className="text-gray-500 dark:text-slate-400 mb-6 text-sm">
-                            您确定要{member.status === 'pending' ? '撤销对' : '踢出'}{' '}
-                            <strong className="text-gray-800 dark:text-slate-200">{member.email}</strong> 吗？
-                            此操作不可逆转。
-                          </Dialog.Description>
-                          <div className="flex justify-end gap-3">
-                            <Dialog.Close asChild>
-                              <button className="px-4 py-2 rounded-lg bg-gray-100 dark:bg-slate-800 text-gray-700 dark:text-slate-300 hover:bg-gray-200 dark:bg-slate-700 font-medium transition-colors">
-                                取消
-                              </button>
-                            </Dialog.Close>
-                            <Dialog.Close asChild>
-                              <button
-                                onClick={() => handleKick(member.team_id, member.status === 'pending' ? member.email : member.user_id, member.status === 'pending')}
-                                className="px-4 py-2 rounded-lg bg-rose-500 text-white hover:bg-rose-600 font-medium transition-colors shadow-lg shadow-rose-500/20"
-                              >
-                                确认踢出
-                              </button>
-                            </Dialog.Close>
-                          </div>
-                        </Dialog.Content>
-                      </Dialog.Portal>
-                    </Dialog.Root>
-                  )}
-                </td>
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
-    </div>
+          <ListCount shown={filteredMembers.length} total={members.length} />
+        </>
+      )}
+    </section>
   );
 }
 
 export default function UserManagement() {
   // 日常主要在看加入成员，开页就落在这个 tab。
-  const [activeTab, setActiveTab] = useState<'owner' | 'members' | 'logs'>('members');
+  const [activeTab, setActiveTab] = useState<TabValue>('members');
   const [search, setSearch] = useState('');
   const [ownerSortOrder, setOwnerSortOrder] = useState<SortOrder>('asc');
   // 正序 = 到期近的排前面，最该处理的人在第一屏。
@@ -1252,7 +1513,7 @@ export default function UserManagement() {
 
   const seatFilterOptions = useMemo(
     () => [
-      { value: 'all', label: '全部席位', dotClass: 'bg-slate-500' },
+      { value: 'all', label: '全部席位', dotClass: 'bg-gray-400 dark:bg-ink-500' },
       ...SEAT_TYPE_OPTIONS.map(({ value, label }) => ({
         value,
         label,
@@ -1263,94 +1524,84 @@ export default function UserManagement() {
   );
 
   return (
-    <div className="p-8 max-w-7xl mx-auto space-y-8 animate-in fade-in duration-500">
+    <PageShell title="用户管理" description="所有 Team 的 Owner 和成员：调整到期时间和席位，踢出成员，复制 TG 绑定指令。">
       {toasts.length > 0 && (
-        <div className="fixed right-5 top-20 z-[100] flex w-[min(22rem,calc(100vw-2rem))] flex-col gap-2">
+        <div
+          aria-live="polite"
+          className="fixed bottom-4 right-4 z-[100] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2"
+        >
           {toasts.map((toast) => (
             <Toast key={toast.id} text={toast.text} type={toast.type} />
           ))}
         </div>
       )}
 
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100 mb-1">用户管理</h1>
-        <p className="text-gray-500 dark:text-slate-400 text-sm">管理队伍管理员与所有加入的成员。</p>
+      <div role="tablist" aria-label="用户管理视图" className="flex gap-6 border-b border-gray-200 dark:border-ink-800">
+        {TABS.map((tab) => {
+          const active = activeTab === tab.value;
+          return (
+            <button
+              key={tab.value}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setActiveTab(tab.value)}
+              className={cn(
+                '-mb-px whitespace-nowrap border-b-2 px-1 pb-2.5 pt-1 text-sm font-medium transition-colors',
+                active
+                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  : 'border-transparent text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100'
+              )}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
 
-      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-gray-200 dark:border-slate-800 pb-px">
-        <div className="flex gap-4">
-          <button
-            onClick={() => setActiveTab('owner')}
-            className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'owner' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:text-slate-300'
-            }`}
-          >
-            队伍管理员
-          </button>
-          <button
-            onClick={() => setActiveTab('members')}
-            className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'members' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:text-slate-300'
-            }`}
-          >
-            加入成员
-          </button>
-          <button
-            onClick={() => setActiveTab('logs')}
-            className={`pb-3 px-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === 'logs' ? 'border-indigo-500 text-indigo-400' : 'border-transparent text-gray-500 dark:text-slate-400 hover:text-gray-700 dark:text-slate-300'
-            }`}
-          >
-            日志
-          </button>
-        </div>
+      <div className="mb-4 mt-4 flex flex-wrap items-center gap-2">
+        <SearchInput
+          value={search}
+          onChange={setSearch}
+          placeholder={activeTab === 'logs' ? '搜索日志、Team 或邮箱' : '搜索邮箱、姓名或 Team'}
+        />
 
-        <div className="flex flex-wrap items-center gap-2 pb-2">
-          <SearchInput
-            value={search}
-            onChange={setSearch}
-            placeholder={activeTab === 'logs' ? '搜索人员日志、Team 或邮箱...' : '搜索邮箱/姓名/队伍...'}
-          />
-
-          {activeTab === 'owner' ? (
-            <SortToggle
-              label="计费"
-              order={ownerSortOrder}
-              onToggle={() => setOwnerSortOrder((v) => (v === 'asc' ? 'desc' : 'asc'))}
-            />
-          ) : activeTab === 'members' ? (
-            <>
-              <StatusFilterToggle enabled={statusFilters} onChange={setStatusFilters} />
-              <FilterDropdown
-                value={seatFilter}
-                onChange={(v) => setSeatFilter(v as SeatFilter)}
-                options={seatFilterOptions}
-              />
-              <SortToggle
-                label="到期"
-                order={memberSortOrder}
-                onToggle={() => setMemberSortOrder((v) => (v === 'asc' ? 'desc' : 'asc'))}
-              />
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="pt-2">
         {activeTab === 'owner' ? (
-          <OwnerList search={search} sortOrder={ownerSortOrder} showToast={showToast} />
-        ) : activeTab === 'members' ? (
-          <MemberList
-            search={search}
-            sortOrder={memberSortOrder}
-            seatFilter={seatFilter}
-            statusFilters={statusFilters}
-            showToast={showToast}
+          <SortToggle
+            label="计费到期"
+            order={ownerSortOrder}
+            onToggle={() => setOwnerSortOrder((v) => (v === 'asc' ? 'desc' : 'asc'))}
           />
-        ) : (
-          <SystemLogs embedded scope="members" search={search} />
-        )}
+        ) : activeTab === 'members' ? (
+          <>
+            <StatusFilterToggle enabled={statusFilters} onChange={setStatusFilters} />
+            <FilterDropdown
+              value={seatFilter}
+              onChange={(v) => setSeatFilter(v as SeatFilter)}
+              options={seatFilterOptions}
+            />
+            <SortToggle
+              label="到期"
+              order={memberSortOrder}
+              onToggle={() => setMemberSortOrder((v) => (v === 'asc' ? 'desc' : 'asc'))}
+            />
+          </>
+        ) : null}
       </div>
-    </div>
+
+      {activeTab === 'owner' ? (
+        <OwnerList search={search} sortOrder={ownerSortOrder} showToast={showToast} />
+      ) : activeTab === 'members' ? (
+        <MemberList
+          search={search}
+          sortOrder={memberSortOrder}
+          seatFilter={seatFilter}
+          statusFilters={statusFilters}
+          showToast={showToast}
+        />
+      ) : (
+        <SystemLogs embedded scope="members" search={search} />
+      )}
+    </PageShell>
   );
 }

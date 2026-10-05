@@ -19,8 +19,9 @@ export const BUTTON = {
   icon: `${BUTTON_BASE} size-9 text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-ink-400 dark:hover:bg-ink-800 dark:hover:text-gray-100`,
 } as const;
 
+/** 16px text on phones so iOS Safari does not zoom in when the field gets focus. */
 export const INPUT =
-  'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-ink-800 dark:bg-ink-950 dark:text-gray-100 dark:placeholder:text-ink-500';
+  'w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-base text-gray-900 sm:text-sm placeholder:text-gray-400 transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 dark:border-ink-800 dark:bg-ink-950 dark:text-gray-100 dark:placeholder:text-ink-500';
 
 /** Small status pill; add a tone from TONE. */
 export const PILL = 'inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-medium';

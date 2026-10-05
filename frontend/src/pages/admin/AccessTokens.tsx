@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { type ReactNode, useState, useEffect, useRef } from 'react';
 import {
   listAccessTokens,
   createAccessToken,
@@ -11,8 +11,12 @@ import type {
   AccessTokenResponse,
   PendingConfirmationItem,
 } from '../../api/client';
-import { Trash2, RotateCw, AlertTriangle, Plus, Copy, Check, X } from 'lucide-react';
+import { AlertTriangle, Ban, Check, Copy, Plus, RotateCw, Ticket, X } from 'lucide-react';
+import PageShell from '../../components/PageShell';
+import PageLoading from '../../components/PageLoading';
 import Toast from '../../components/Toast';
+import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
+import { cn } from '../../lib/utils';
 
 interface ToastMessage {
   id: number;
@@ -36,22 +40,22 @@ function formatDate(dateStr: string | null): string {
   }
 }
 
-function formatStatus(token: AccessTokenListItem): { label: string; badge: string } {
-  if (token.disabled) {
-    return { label: '已停用', badge: 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200' };
-  }
-  if (token.used_count > 0) {
-    return { label: '已使用', badge: 'bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200' };
-  }
-  const expiresAt = token.token_expires_at ? new Date(token.token_expires_at) : null;
-  if (expiresAt && expiresAt <= new Date()) {
-    return { label: '已过期', badge: 'bg-gray-100 dark:bg-slate-700 text-gray-800 dark:text-slate-300' };
-  }
-  return { label: '未使用', badge: 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-200' };
-}
+const STATUSES = ['未使用', '已使用', '已过期', '已停用'] as const;
+type TokenStatus = (typeof STATUSES)[number];
 
-function statusLabel(token: AccessTokenListItem): string {
-  return formatStatus(token).label;
+const STATUS_TONE: Record<TokenStatus, string> = {
+  未使用: TONE.success,
+  已使用: TONE.info,
+  已过期: TONE.neutral,
+  已停用: TONE.danger,
+};
+
+function tokenStatus(token: AccessTokenListItem): TokenStatus {
+  if (token.disabled) return '已停用';
+  if (token.used_count > 0) return '已使用';
+  const expiresAt = token.token_expires_at ? new Date(token.token_expires_at) : null;
+  if (expiresAt && expiresAt <= new Date()) return '已过期';
+  return '未使用';
 }
 
 const GRANT_PRESETS = ['7d', '30d', '90d', '360d', 'never'];
@@ -65,6 +69,57 @@ function durationLabel(value: string): string {
   if (unit === 'h') return `${amount} 小时`;
   if (unit === 'm') return `${amount} 分钟`;
   return value;
+}
+
+function redeemDeadline(dateStr: string | null): string {
+  return dateStr ? formatDate(dateStr) : '永不过期';
+}
+
+const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
+const LABEL_HINT = 'font-normal text-gray-400 dark:text-ink-500';
+
+interface DurationFieldProps {
+  label: string;
+  hint: string;
+  presets: string[];
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}
+
+function DurationField({ label, hint, presets, value, onChange, placeholder }: DurationFieldProps) {
+  return (
+    <div>
+      <div className={LABEL}>
+        {label} <span className={LABEL_HINT}>· {hint}</span>
+      </div>
+      <div className="mb-2 flex flex-wrap gap-1.5">
+        {presets.map((preset) => (
+          <button
+            key={preset}
+            type="button"
+            aria-pressed={value === preset}
+            onClick={() => onChange(preset)}
+            className={cn(
+              'h-9 whitespace-nowrap rounded-md px-3 text-xs font-medium transition-colors sm:h-7 sm:px-2.5',
+              value === preset
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-ink-800 dark:text-ink-200 dark:hover:bg-ink-700',
+            )}
+          >
+            {durationLabel(preset)}
+          </button>
+        ))}
+      </div>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-label={`${label}（自定义）`}
+        className={INPUT}
+      />
+    </div>
+  );
 }
 
 export default function AccessTokens() {
@@ -193,330 +248,334 @@ export default function AccessTokens() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">一次性兑换码</h1>
-        <div className="flex items-center justify-center h-96 bg-white dark:bg-slate-900 rounded-lg border border-gray-300 dark:border-slate-700">
-          <div className="text-center">
-            <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-indigo-100 dark:bg-indigo-900/30 mb-3">
-              <RotateCw className="w-6 h-6 text-indigo-500 animate-spin" />
-            </div>
-            <p className="text-gray-600 dark:text-slate-400">加载中...</p>
-          </div>
-        </div>
+  const disableButton = (token: AccessTokenListItem) =>
+    !token.disabled && (
+      <button
+        onClick={() => handleDisable(token.id)}
+        title="停用"
+        aria-label={`停用兑换码 ${token.token_prefix}`}
+        className={cn(BUTTON.icon, 'text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-500/10 dark:hover:text-red-300')}
+      >
+        <Ban className="size-4" />
+      </button>
+    );
+
+  const statusCounts = STATUSES.map((status) => ({
+    status,
+    count: tokens.filter((t) => tokenStatus(t) === status).length,
+  }));
+
+  let list: ReactNode;
+  if (loading && tokens.length === 0) {
+    list = <PageLoading />;
+  } else if (error) {
+    list = (
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+        <p>{error}</p>
+        <button onClick={loadTokens} className={cn(BUTTON.secondary, 'mt-3')}>
+          重新加载
+        </button>
       </div>
     );
-  }
-
-  if (error) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">一次性兑换码</h1>
-        <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-300">
-          <p>{error}</p>
-          <button
-            onClick={loadTokens}
-            className="mt-3 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            重新加载
-          </button>
+  } else if (tokens.length === 0) {
+    list = (
+      <div className={cn(CARD, 'flex flex-col items-center px-6 py-14 text-center')}>
+        <div className="mb-3 flex size-10 items-center justify-center rounded-full bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400">
+          <Ticket className="size-5" />
         </div>
+        <p className="font-medium text-gray-900 dark:text-gray-100">还没有兑换码</p>
+        <p className="mt-1 max-w-sm text-sm leading-6 text-gray-500 dark:text-ink-400">
+          点击上方「生成兑换码」创建一个。用户在
+          <a href="/" target="_blank" rel="noreferrer" className="mx-0.5 text-blue-600 hover:underline dark:text-blue-400">
+            自助页
+          </a>
+          输入兑换码，即可自行加入或续期 Team。
+        </p>
       </div>
+    );
+  } else {
+    list = (
+      <section className={cn(CARD, 'overflow-hidden')}>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-gray-200 px-4 py-3 dark:border-ink-800">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+            全部兑换码
+            <span className="ml-1.5 text-sm font-normal tabular-nums text-gray-500 dark:text-ink-400">{tokens.length}</span>
+          </h2>
+          <div className="flex flex-wrap gap-1.5">
+            {statusCounts.map(({ status, count }) => (
+              <span key={status} className={cn(PILL, STATUS_TONE[status])}>
+                {status} <span className="tabular-nums">{count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <ul className="divide-y divide-gray-200 md:hidden dark:divide-ink-800">
+          {tokens.map((token) => {
+            const status = tokenStatus(token);
+            return (
+              <li key={token.id} className="px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <code className="truncate rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-800 dark:bg-ink-800 dark:text-ink-200">
+                      {token.token_prefix}…
+                    </code>
+                    <span className={cn(PILL, STATUS_TONE[status])}>{status}</span>
+                  </div>
+                  {disableButton(token)}
+                </div>
+                {token.note && (
+                  <p className="mt-0.5 truncate text-sm text-gray-700 dark:text-ink-200" title={token.note}>
+                    {token.note}
+                  </p>
+                )}
+                <dl className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-gray-800 dark:text-ink-200">
+                  {[
+                    ['授予', durationLabel(token.grant_expires_in)],
+                    ['截止', redeemDeadline(token.token_expires_at)],
+                    ['创建', formatDate(token.created_at)],
+                    ['兑换', formatDate(token.last_used_at)],
+                  ].map(([term, value]) => (
+                    <div key={term} className="flex min-w-0 gap-1.5">
+                      <dt className="shrink-0 text-gray-500 dark:text-ink-400">{term}</dt>
+                      <dd className="min-w-0 tabular-nums">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </li>
+            );
+          })}
+        </ul>
+
+        <div className="hidden overflow-x-auto md:block">
+          <table className="w-full min-w-[52rem] text-sm">
+            <thead className="bg-gray-50 text-left text-xs font-medium text-gray-500 dark:bg-ink-950/40 dark:text-ink-400">
+              <tr className="[&>th]:whitespace-nowrap [&>th]:px-4 [&>th]:py-2.5 [&>th]:font-medium">
+                <th>兑换码</th>
+                <th>授予时长</th>
+                <th>状态</th>
+                <th>备注</th>
+                <th>兑换截止</th>
+                <th>创建时间</th>
+                <th>兑换时间</th>
+                <th className="text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200 dark:divide-ink-800">
+              {tokens.map((token) => {
+                const status = tokenStatus(token);
+                return (
+                  <tr key={token.id} className="transition-colors hover:bg-gray-50 dark:hover:bg-ink-800/40">
+                    <td className="whitespace-nowrap px-4 py-2.5">
+                      <code className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-800 dark:bg-ink-800 dark:text-ink-200">
+                        {token.token_prefix}…
+                      </code>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-gray-700 dark:text-ink-200">
+                      {durationLabel(token.grant_expires_in)}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <span className={cn(PILL, STATUS_TONE[status])}>{status}</span>
+                    </td>
+                    <td className="max-w-[16rem] px-4 py-2.5 text-gray-700 dark:text-ink-200">
+                      {token.note ? (
+                        <span className="block truncate" title={token.note}>{token.note}</span>
+                      ) : (
+                        <span className="text-gray-400 dark:text-ink-500">—</span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-xs tabular-nums text-gray-600 dark:text-ink-300">
+                      {redeemDeadline(token.token_expires_at)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-xs tabular-nums text-gray-600 dark:text-ink-300">
+                      {formatDate(token.created_at)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-xs tabular-nums text-gray-600 dark:text-ink-300">
+                      {formatDate(token.last_used_at)}
+                    </td>
+                    <td className="px-4 py-1 text-right">{disableButton(token)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">一次性兑换码</h1>
-        </div>
-        <div className="flex items-center gap-2">
+    <PageShell
+      title="兑换码"
+      description="一次性兑换码：用户在自助页输入后，自行加入或续期 Team。"
+      actions={
+        <>
           <button
             onClick={() => setShowCreate((v) => !v)}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg font-medium transition-colors"
+            aria-expanded={showCreate}
+            className={BUTTON.primary}
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="size-4" />
             生成兑换码
           </button>
           <button
             onClick={loadTokens}
+            disabled={loading}
             title="刷新"
-            className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 rounded-lg font-medium transition-colors"
+            aria-label="刷新"
+            className={cn(BUTTON.secondary, 'px-2.5')}
           >
-            <RotateCw className="w-4 h-4" />
+            <RotateCw className={cn('size-4', loading && 'animate-spin')} />
           </button>
-        </div>
-      </div>
+        </>
+      }
+    >
+      <div className="space-y-6">
+        {showCreate && (
+          <section className={cn(CARD, 'p-4 sm:p-5')}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">生成兑换码</h2>
+                <p className="mt-0.5 text-sm text-gray-500 dark:text-ink-400">
+                  每个兑换码只能兑换一次，完整兑换码只在生成后显示一次。
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowCreate(false);
+                  setCreated(null);
+                }}
+                aria-label="关闭"
+                className={cn(BUTTON.icon, '-mr-2 -mt-1.5')}
+              >
+                <X className="size-4" />
+              </button>
+            </div>
 
-      {showCreate && (
-        <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-300 dark:border-slate-700 p-4 space-y-4">
-          <div className="flex items-start justify-between">
-            <div>
-              <div className="text-sm font-medium text-gray-900 dark:text-slate-100">生成一个兑换码</div>
-              <p className="text-xs text-gray-600 dark:text-slate-400 mt-0.5">
-                兑换成功即失效。生成后仅显示一次。
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <DurationField
+                label="授予时长"
+                hint="兑换后可用多久"
+                presets={GRANT_PRESETS}
+                value={grant}
+                onChange={setGrant}
+                placeholder="自定义，如 45d / 12h / never"
+              />
+              <DurationField
+                label="兑换有效期"
+                hint="过期未兑换即作废"
+                presets={TTL_PRESETS}
+                value={ttl}
+                onChange={setTtl}
+                placeholder="自定义，留空为 7d"
+              />
+            </div>
+
+            <label className="mt-4 block">
+              <span className={LABEL}>
+                备注 <span className={LABEL_HINT}>· 仅内部可见</span>
+              </span>
+              <input
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="给谁的 / 什么用途"
+                className={INPUT}
+              />
+            </label>
+
+            <button onClick={handleCreate} disabled={creating} className={cn(BUTTON.primary, 'mt-4')}>
+              {creating ? <RotateCw className="size-4 animate-spin" /> : <Plus className="size-4" />}
+              {creating ? '生成中…' : '生成'}
+            </button>
+
+            {created && (
+              <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-500/30 dark:bg-emerald-500/10">
+                <div className="text-sm font-medium text-emerald-800 dark:text-emerald-300">
+                  已生成，请立即复制
+                </div>
+                <div className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300/80">
+                  授予 {durationLabel(created.grant_expires_in)} ·{' '}
+                  {created.token_expires_at ? `${formatDate(created.token_expires_at)} 前有效` : '永不过期'}
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-emerald-200 bg-white px-3 py-2 font-mono text-sm text-gray-900 dark:border-emerald-500/20 dark:bg-ink-950 dark:text-gray-100">
+                    {created.token}
+                  </code>
+                  <button
+                    onClick={handleCopyToken}
+                    title="复制完整兑换码"
+                    aria-label="复制完整兑换码"
+                    className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg bg-emerald-600 text-white transition-colors hover:bg-emerald-700"
+                  >
+                    {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {pending.length > 0 && (
+          <section className={cn(CARD, 'overflow-hidden border-amber-300 dark:border-amber-500/40')}>
+            <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-500/20 dark:bg-amber-500/10">
+              <h2 className="flex items-center gap-2 text-base font-semibold text-amber-900 dark:text-amber-200">
+                <AlertTriangle className="size-4 shrink-0" />
+                待确认的兑换
+                <span className="tabular-nums">{pending.length}</span>
+              </h2>
+              <p className="mt-1 text-sm text-amber-800 dark:text-amber-300/80">
+                兑换时邀请结果未能确认，兑换码已锁定。请核对该邮箱在 Team 里的真实状态后再处理。
               </p>
             </div>
-            <button
-              onClick={() => {
-                setShowCreate(false);
-                setCreated(null);
-              }}
-              className="p-1 text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 rounded transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1.5">
-                授予时长
-              </label>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {GRANT_PRESETS.map((preset) => (
-                  <button
-                    key={preset}
-                    onClick={() => setGrant(preset)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                      grant === preset
-                        ? 'bg-indigo-500 text-white'
-                        : 'bg-gray-100 dark:bg-slate-800 text-gray-700 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700'
-                    }`}
-                  >
-                    {durationLabel(preset)}
-                  </button>
-                ))}
-              </div>
-              <input
-                value={grant}
-                onChange={(e) => setGrant(e.target.value)}
-                placeholder="或自定义，如 45d / 12h / never"
-                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 placeholder-gray-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1.5">
-                兑换有效期
-              </label>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {TTL_PRESETS.map((preset) => (
-                  <button
-                    key={preset}
-                    onClick={() => setTtl(preset)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-                      ttl === preset
-                        ? 'bg-indigo-500 text-white'
-                        : 'bg-gray-100 dark:bg-slate-800 text-gray-700 dark:text-slate-300 hover:bg-gray-200 dark:hover:bg-slate-700'
-                    }`}
-                  >
-                    {durationLabel(preset)}
-                  </button>
-                ))}
-              </div>
-              <input
-                value={ttl}
-                onChange={(e) => setTtl(e.target.value)}
-                placeholder="默认 7d"
-                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 placeholder-gray-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-700 dark:text-slate-300 mb-1.5">
-              备注（仅内部可见）
-            </label>
-            <input
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="给谁的 / 什么用途"
-              className="w-full px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-gray-900 dark:text-slate-100 placeholder-gray-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-          </div>
-
-          <button
-            onClick={handleCreate}
-            disabled={creating}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            {creating ? <RotateCw className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            {creating ? '生成中...' : '生成'}
-          </button>
-
-          {created && (
-            <div className="rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-900/20 p-3">
-              <div className="text-xs text-emerald-900 dark:text-emerald-200 mb-2">
-                授予 {durationLabel(created.grant_expires_in)} ·{' '}
-                {created.token_expires_at
-                  ? `${formatDate(created.token_expires_at)} 前有效`
-                  : 'Code 永不过期'}
-              </div>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 min-w-0 px-3 py-2 bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-800 rounded-lg font-mono text-sm text-gray-900 dark:text-slate-100 break-all select-all">
-                  {created.token}
-                </code>
-                <button
-                  onClick={handleCopyToken}
-                  title="复制完整 Code"
-                  className="shrink-0 p-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white transition-colors"
-                >
-                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {pending.length > 0 && (
-        <div className="bg-white dark:bg-slate-900 rounded-lg border border-amber-300 dark:border-amber-700 overflow-hidden">
-          <div className="px-4 py-3 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800">
-            <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-medium">
-              <AlertTriangle className="w-4 h-4" />
-              待确认的兑换（{pending.length}）
-            </div>
-            <p className="text-xs text-amber-800 dark:text-amber-300/80 mt-1">
-              邀请状态未确认，兑换码已锁定。请核对真实状态后手动确认。
-            </p>
-          </div>
-          <div className="divide-y divide-gray-200 dark:divide-slate-700">
-            {pending.map((item) => (
-              <div key={item.id} className="px-4 py-3 flex flex-wrap items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm text-gray-900 dark:text-slate-100 font-medium truncate">
-                    {item.email}
+            <ul className="divide-y divide-gray-200 dark:divide-ink-800">
+              {pending.map((item) => (
+                <li key={item.id} className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100" title={item.email}>
+                      {item.email}
+                    </div>
+                    <div className="mt-0.5 text-xs text-gray-600 dark:text-ink-300">
+                      {item.team_name || item.team_id} · 授予 {durationLabel(item.grant_expires_in)} ·{' '}
+                      <code className="font-mono">{item.token_prefix}…</code> · {formatDate(item.created_at)}
+                    </div>
+                    <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">
+                      最新成员快照：{item.seen_in_cached_snapshot ? '已找到' : '未找到'}
+                      {item.cache_updated_at ? `（${formatDate(item.cache_updated_at)}）` : ''}
+                      {item.error_message ? ` · ${item.error_message}` : ''}
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-600 dark:text-slate-400 mt-0.5">
-                    {item.team_name || item.team_id} · {item.grant_expires_in} ·{' '}
-                    <code className="font-mono">{item.token_prefix}</code> · {formatDate(item.created_at)}
-                  </div>
-                  <div className="text-xs text-gray-500 dark:text-slate-500 mt-0.5">
-                    最新快照：{item.seen_in_cached_snapshot ? '已找到' : '未找到'}
-                    {item.cache_updated_at ? `（${formatDate(item.cache_updated_at)}）` : ''}
-                    {item.error_message ? ` · ${item.error_message}` : ''}
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    disabled={resolving === item.id}
-                    onClick={() => handleResolve(item, 'success')}
-                    className="px-3 py-1.5 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white transition-colors"
-                  >
-                    确认成功
-                  </button>
-                  <button
-                    disabled={resolving === item.id}
-                    onClick={() => handleResolve(item, 'released')}
-                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-slate-300 hover:bg-gray-50 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors"
-                  >
-                    确认失败并退码
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {tokens.length === 0 ? (
-        <div className="flex items-center justify-center h-64 bg-white dark:bg-slate-900 rounded-lg border border-gray-300 dark:border-slate-700">
-          <div className="text-center">
-            <p className="text-gray-600 dark:text-slate-400">暂无兑换码</p>
-            <p className="text-sm text-gray-500 dark:text-slate-500 mt-1">
-              在 Telegram 中使用 /token &lt;天数&gt; 生成新兑换码
-            </p>
-          </div>
-        </div>
-      ) : (
-        <div className="bg-white dark:bg-slate-900 rounded-lg border border-gray-300 dark:border-slate-700 overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 dark:bg-slate-800 border-b border-gray-200 dark:border-slate-700">
-                <tr>
-                  <th className="px-4 py-3 text-left font-medium text-gray-800 dark:text-slate-200">Code 前缀</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-800 dark:text-slate-200">授予时长</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-800 dark:text-slate-200">状态</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-800 dark:text-slate-200">Code 有效期</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-800 dark:text-slate-200">创建时间</th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-800 dark:text-slate-200">最后使用</th>
-                  <th className="px-4 py-3 text-center font-medium text-gray-800 dark:text-slate-200">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 dark:divide-slate-700">
-                {tokens.map((token) => {
-                  const { label, badge } = formatStatus(token);
-                  return (
-                    <tr
-                      key={token.id}
-                      className="hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors"
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <button
+                      disabled={resolving === item.id}
+                      onClick={() => handleResolve(item, 'success')}
+                      className={BUTTON.primary}
                     >
-                      <td className="px-4 py-3">
-                        <code className="px-2 py-1 bg-gray-100 dark:bg-slate-800 rounded text-gray-800 dark:text-slate-200 font-mono text-xs">
-                          {token.token_prefix}
-                        </code>
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-slate-300">
-                        {token.grant_expires_in === 'never' ? '永不' : token.grant_expires_in}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`px-2 py-1 rounded-full text-xs font-medium ${badge}`}>
-                          {label}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-slate-300 text-xs">
-                        {formatDate(token.token_expires_at)}
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-slate-300 text-xs">
-                        {formatDate(token.created_at)}
-                      </td>
-                      <td className="px-4 py-3 text-gray-700 dark:text-slate-300 text-xs">
-                        {token.last_used_at ? formatDate(token.last_used_at) : '—'}
-                      </td>
-                      <td className="px-4 py-3 text-center">
-                        <div className="inline-flex items-center gap-2">
-                          {!token.disabled && (
-                            <button
-                              onClick={() => handleDisable(token.id)}
-                              title="停用此 Code"
-                              className="p-1.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+                      确认成功
+                    </button>
+                    <button
+                      disabled={resolving === item.id}
+                      onClick={() => handleResolve(item, 'released')}
+                      className={BUTTON.secondary}
+                    >
+                      确认失败并退码
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
-
-      <div className="flex gap-2 text-xs text-gray-600 dark:text-slate-400">
-        <div className="px-3 py-2 bg-gray-100 dark:bg-slate-800 rounded">
-          共 {tokens.length} 个 Code
-        </div>
-        <div className="px-3 py-2 bg-gray-100 dark:bg-slate-800 rounded">
-          未使用：{tokens.filter((t) => statusLabel(t) === '未使用').length}
-        </div>
-        <div className="px-3 py-2 bg-gray-100 dark:bg-slate-800 rounded">
-          已使用：{tokens.filter((t) => statusLabel(t) === '已使用').length}
-        </div>
-        <div className="px-3 py-2 bg-gray-100 dark:bg-slate-800 rounded">
-          已停用：{tokens.filter((t) => statusLabel(t) === '已停用').length}
-        </div>
+        {list}
       </div>
 
-      {toasts.map((toast) => (
-        <Toast key={toast.id} text={toast.text} type={toast.type} />
-      ))}
-    </div>
+      {toasts.length > 0 && (
+        <div className="fixed bottom-4 right-4 z-[100] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2">
+          {toasts.map((toast) => (
+            <Toast key={toast.id} text={toast.text} type={toast.type} />
+          ))}
+        </div>
+      )}
+    </PageShell>
   );
 }

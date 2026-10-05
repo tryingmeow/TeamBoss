@@ -6,6 +6,7 @@ import {
   CalendarClock,
   Clock,
   CreditCard,
+  Loader2,
   PieChart,
   RefreshCw,
   Server,
@@ -22,9 +23,11 @@ import {
   type FinanceTimelineItem,
   type UsageData,
 } from '../../api/client';
-import { formatSeatTypeLabel, seatTypeBadgeClass } from '../../lib/seatType';
-
-type StatColor = 'indigo' | 'emerald' | 'blue' | 'amber' | 'rose' | 'purple' | 'orange' | 'cyan';
+import PageShell from '../../components/PageShell';
+import { BUTTON, CARD, PILL, TONE } from '../../components/ui';
+import { formatMoney } from '../../lib/money';
+import { formatSeatTypeLabel, isCodexSeat } from '../../lib/seatType';
+import { cn } from '../../lib/utils';
 
 interface DashboardMember {
   status: string;
@@ -44,56 +47,34 @@ interface ExpiringMember extends DashboardMember {
   daysUntil: number;
 }
 
-const statColorClasses: Record<StatColor, string> = {
-  indigo: 'bg-indigo-500/10 text-indigo-500 dark:text-indigo-400',
-  emerald: 'bg-emerald-500/10 text-emerald-500 dark:text-emerald-400',
-  blue: 'bg-blue-500/10 text-blue-500 dark:text-blue-400',
-  amber: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
-  rose: 'bg-rose-500/10 text-rose-500 dark:text-rose-400',
-  purple: 'bg-purple-500/10 text-purple-500 dark:text-purple-400',
-  orange: 'bg-orange-500/10 text-orange-500 dark:text-orange-400',
-  cyan: 'bg-cyan-500/10 text-cyan-500 dark:text-cyan-400',
-};
-
 function StatCard({
   title,
   value,
   detail,
   icon: Icon,
-  color,
+  iconClassName,
+  children,
 }: {
   title: string;
   value: ReactNode;
   detail: ReactNode;
   icon: typeof Shield;
-  color: StatColor;
+  iconClassName?: string;
+  children?: ReactNode;
 }) {
   return (
-    <div className="flex min-w-0 flex-col items-start gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none sm:flex-row sm:items-center sm:gap-4 sm:p-5">
-      <div className={`shrink-0 rounded-lg p-2.5 sm:p-3 ${statColorClasses[color]}`}>
-        <Icon className="h-5 w-5 sm:h-6 sm:w-6" />
+    <div className={cn(CARD, 'flex min-w-0 flex-col p-4 sm:p-5')}>
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{title}</p>
+        <Icon className={cn('size-4 shrink-0 text-gray-400 dark:text-ink-500', iconClassName)} />
       </div>
-      <div className="min-w-0 w-full">
-        <p className="truncate text-xs font-medium text-gray-500 dark:text-slate-400 sm:text-sm">{title}</p>
-        <p className="mt-0.5 whitespace-nowrap text-xl font-bold tabular-nums text-gray-900 dark:text-slate-100 sm:truncate sm:text-2xl">{value}</p>
-        <div className="mt-1 min-h-8 text-xs leading-4 text-gray-400 dark:text-slate-500 sm:min-h-0 sm:truncate">{detail}</div>
-      </div>
+      <p className="mt-2 break-words text-lg font-semibold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50">
+        {value}
+      </p>
+      {children}
+      <p className="mt-1 text-xs leading-snug text-gray-500 dark:text-ink-400">{detail}</p>
     </div>
   );
-}
-
-function formatMoney(amount: number | null | undefined, currency = 'USD') {
-  if (amount === null || amount === undefined) return '—';
-  try {
-    return new Intl.NumberFormat('zh-CN', {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(amount);
-  } catch {
-    return `${amount.toFixed(2)} ${currency}`;
-  }
 }
 
 function daysUntil(value: string) {
@@ -110,15 +91,23 @@ function dueLabel(days: number) {
   if (days < 0) return `已逾期 ${Math.abs(days)} 天`;
   if (days === 0) return '今天';
   if (days === 1) return '明天';
-  return `${days}天后`;
+  return `${days} 天后`;
 }
 
 function dueBadgeClass(days: number) {
-  if (days < 0) return 'bg-rose-600 text-white ring-1 ring-rose-700 dark:bg-rose-600 dark:text-white dark:ring-rose-400/60';
-  if (days <= 1) return 'bg-rose-50 text-rose-700 dark:bg-rose-500/20 dark:text-rose-300';
-  if (days <= 3) return 'bg-orange-50 text-orange-700 dark:bg-orange-500/20 dark:text-orange-300';
-  if (days <= 7) return 'bg-amber-50 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300';
-  return 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-300';
+  if (days < 0) return 'bg-red-600 text-white dark:bg-red-600 dark:text-white';
+  if (days <= 1) return TONE.danger;
+  if (days <= 7) return TONE.warning;
+  return TONE.neutral;
+}
+
+function DueCell({ value, days }: { value: string; days: number }) {
+  return (
+    <div className="w-[5.5rem] shrink-0">
+      <div className="text-xs tabular-nums text-gray-500 dark:text-ink-400">{format(parseISO(value), 'MM-dd')}</div>
+      <span className={cn(PILL, 'mt-1', dueBadgeClass(days))}>{dueLabel(days)}</span>
+    </div>
+  );
 }
 
 function SectionHeader({
@@ -133,25 +122,36 @@ function SectionHeader({
   to: string;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-5 py-4 dark:border-slate-800">
-      <div>
+    <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-4 py-4 sm:px-5 dark:border-ink-800">
+      <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <h2 className="font-semibold text-gray-900 dark:text-slate-100">{title}</h2>
-          <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-gray-600 dark:bg-slate-800 dark:text-slate-300">
-            {count}
-          </span>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">{title}</h2>
+          <span className={cn(PILL, TONE.neutral, 'tabular-nums')}>{count}</span>
         </div>
-        <p className="mt-1 text-xs text-gray-500 dark:text-slate-500">{description}</p>
+        <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">{description}</p>
       </div>
       <Link
         to={to}
-        className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-indigo-600 transition-colors hover:text-indigo-500 dark:text-indigo-400 dark:hover:text-indigo-300"
+        className="inline-flex min-h-9 shrink-0 items-center gap-1 whitespace-nowrap text-sm font-medium text-blue-600 transition-colors hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
       >
         查看全部
-        <ArrowRight className="h-3.5 w-3.5" />
+        <ArrowRight className="size-3.5" />
       </Link>
     </div>
   );
+}
+
+function EmptyState({ title, hint }: { title: string; hint: string }) {
+  return (
+    <div className="px-6 py-14 text-center">
+      <p className="text-sm font-medium text-gray-700 dark:text-ink-200">{title}</p>
+      <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">{hint}</p>
+    </div>
+  );
+}
+
+function sameCurrency(a: string | null | undefined, b: string | null | undefined) {
+  return Boolean(a && b && a.trim().toUpperCase() === b.trim().toUpperCase());
 }
 
 export default function TeamManagement() {
@@ -184,7 +184,7 @@ export default function TeamManagement() {
           .map((item) => item.team_name || item.team_id)
           .join('、');
         failures.push(
-          `${usageResult.value.errors.length} 个队伍刷新失败（${names}）`
+          `${usageResult.value.errors.length} 个 Team 刷新失败（${names}）`
         );
       }
     } else {
@@ -264,189 +264,184 @@ export default function TeamManagement() {
   const baseCurrency = finance?.base_currency || 'USD';
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 px-0 py-4 animate-in fade-in duration-500 sm:p-8">
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-slate-100">队伍概览</h1>
-        </div>
+    <PageShell
+      title="数据概览"
+      description="席位用量、续费支出和即将到期的成员，一页看完。"
+      actions={(
         <button
           type="button"
           onClick={() => fetchUsage(true)}
           disabled={refreshing || loading}
-          className="flex shrink-0 items-center gap-2 rounded-lg border border-gray-300 bg-gray-100 px-4 py-2 text-gray-800 transition-colors hover:bg-gray-200 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+          className={BUTTON.secondary}
         >
-          <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin text-indigo-400' : ''}`} />
-          {refreshing ? '刷新中...' : '刷新'}
+          <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} />
+          {refreshing ? '刷新中…' : '刷新'}
         </button>
-      </div>
-
-      {error && (
-        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
-          {error}
-        </div>
       )}
-
-      {loading ? (
-        <div className="flex justify-center py-20">
-          <RefreshCw className="h-8 w-8 animate-spin text-indigo-500" />
-        </div>
-      ) : data ? (
-        <>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
-            <StatCard
-              title="活跃队伍"
-              value={`${data.active_team} / ${data.total_team}`}
-              detail={`${data.total_team - data.active_team} 个非活跃队伍`}
-              icon={Server}
-              color="indigo"
-            />
-            <StatCard
-              title="GPT 席位利用率"
-              value={`${seatUtilization}%`}
-              detail={`${data.inuse_gpt} / ${data.total_gpt_seats} · 剩余 ${data.free_gpt_seats}`}
-              icon={PieChart}
-              color="blue"
-            />
-            <StatCard
-              title="使用中 Codex"
-              value={data.inuse_codex}
-              detail="Usage-based 席位"
-              icon={Users}
-              color="purple"
-            />
-            <StatCard
-              title="可接入队伍"
-              value={data.free_team_count}
-              detail={`待接受邀请 ${data.pending_gpt_invites}`}
-              icon={Shield}
-              color="cyan"
-            />
-            <StatCard
-              title="月预计支出"
-              value={formatMoney(finance?.monthly_total_base, baseCurrency)}
-              detail={finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常队伍` : '仅计入活跃续费队伍'}
-              icon={Wallet}
-              color="emerald"
-            />
-            <StatCard
-              title="闲置席位折算"
-              value={finance ? `约 ${formatMoney(idleCost, baseCurrency)}` : '—'}
-              detail={`${data.free_gpt_seats} 个空闲席位 `}
-              icon={CreditCard}
-              color="amber"
-            />
-            <StatCard
-              title="近期续费团队"
-              value={renewalItems.length}
-              detail={`七天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
-              icon={CalendarClock}
-              color="orange"
-            />
-            <StatCard
-              title="近期到期成员"
-              value={expiringMembers.length}
-              detail="按服务到期时间排序"
-              icon={UserRound}
-              color="rose"
-            />
+    >
+      <div className="space-y-6">
+        {error && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">
+            {error}
           </div>
+        )}
 
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-            <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none">
-              <SectionHeader
-                title="近期续费团队"
-                count={renewalItems.length}
-                description={`七天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
-                to="/admin/finance"
+        {loading ? (
+          <div className="flex justify-center py-20">
+            <Loader2 className="size-7 animate-spin text-blue-500" />
+          </div>
+        ) : data ? (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+              <StatCard
+                title="活跃 Team"
+                value={`${data.active_team} / ${data.total_team}`}
+                detail={`${data.total_team - data.active_team} 个非活跃 Team`}
+                icon={Server}
               />
-              <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-slate-800/70">
-                {renewalItems.length === 0 ? (
-                  <div className="px-5 py-12 text-center text-sm text-gray-400 dark:text-slate-500">暂无待续费团队</div>
-                ) : renewalItems.map(({ item, daysUntil: remaining }) => (
-                  <div key={`${item.team_id}:${item.date}`} className="flex items-start gap-3 px-5 py-4 transition-colors hover:bg-gray-50 dark:hover:bg-slate-800/40">
-                    <div className="w-20 shrink-0 sm:w-24">
-                      <div className="text-xs tabular-nums text-gray-500 dark:text-slate-400">{format(parseISO(item.date), 'MM-dd')}</div>
-                      <span className={`mt-1 inline-flex whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium ${dueBadgeClass(remaining)}`}>
-                        {dueLabel(remaining)}
-                      </span>
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-gray-900 dark:text-slate-100">{item.team_name}</div>
-                      <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-slate-500">
-                        <CreditCard className="h-3.5 w-3.5 shrink-0" />
-                        {item.card_last4 ? (
-                          <>
-                            <span className="shrink-0">{item.card_brand?.toUpperCase() || 'CARD'}</span>
-                            <span className="shrink-0 font-mono">•••• {item.card_last4}</span>
-                            {item.card_note && <span className="truncate">· {item.card_note}</span>}
-                          </>
-                        ) : (
-                          <span>未绑定卡片</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <div className="text-sm font-semibold tabular-nums text-gray-900 dark:text-slate-100">
-                        {formatMoney(item.amount_base, baseCurrency)}
-                      </div>
-                      <div className="mt-1 text-[11px] tabular-nums text-gray-400 dark:text-slate-500">
-                        {item.amount_native !== null
-                          ? `${item.currency} ${item.amount_native.toFixed(2)}`
-                          : `${item.currency} —`}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:shadow-none">
-              <SectionHeader
+              <StatCard
+                title="ChatGPT 席位"
+                value={`${seatUtilization}%`}
+                detail={`已用 ${data.inuse_gpt} / ${data.total_gpt_seats} · 剩余 ${data.free_gpt_seats}`}
+                icon={PieChart}
+                iconClassName="text-blue-500 dark:text-blue-400"
+              >
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-100 dark:bg-ink-800">
+                  <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.min(seatUtilization, 100)}%` }} />
+                </div>
+              </StatCard>
+              <StatCard
+                title="Codex 席位"
+                value={data.inuse_codex}
+                detail="使用中 · 按用量计费"
+                icon={Users}
+                iconClassName="text-purple-500 dark:text-purple-400"
+              />
+              <StatCard
+                title="有空位的 Team"
+                value={data.free_team_count}
+                detail={`待接受邀请 ${data.pending_gpt_invites}`}
+                icon={Shield}
+              />
+              <StatCard
+                title="月预计支出"
+                value={formatMoney(finance?.monthly_total_base, baseCurrency)}
+                detail={finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常 Team` : '只计入活跃且自动续费的 Team'}
+                icon={Wallet}
+              />
+              <StatCard
+                title="闲置席位折算"
+                value={finance ? `约 ${formatMoney(idleCost, baseCurrency)}` : '—'}
+                detail={`${data.free_gpt_seats} 个空闲席位按月费分摊`}
+                icon={CreditCard}
+              />
+              <StatCard
+                title="近期续费 Team"
+                value={renewalItems.length}
+                detail={<>7 天内预计支出 <span className="whitespace-nowrap">{formatMoney(renewalAmountNext7, baseCurrency)}</span></>}
+                icon={CalendarClock}
+              />
+              <StatCard
                 title="近期到期成员"
-                count={expiringMembers.length}
-                description="服务到期时间，最近的排在前面"
-                to="/admin/users"
+                value={expiringMembers.length}
+                detail="已设置到期时间的成员"
+                icon={UserRound}
               />
-              <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-slate-800/70">
-                {expiringMembers.length === 0 ? (
-                  <div className="px-5 py-12 text-center text-sm text-gray-400 dark:text-slate-500">暂无到期成员</div>
-                ) : expiringMembers.map((member) => {
-                  const displayName = member.system_display_name?.trim() || member.name?.trim() || member.email;
-                  const showEmail = displayName.toLowerCase() !== member.email.toLowerCase();
-                  return (
-                    <div key={`${member.team_id}:${member.email}`} className="flex items-start gap-3 px-5 py-4 transition-colors hover:bg-gray-50 dark:hover:bg-slate-800/40">
-                      <div className="w-20 shrink-0 sm:w-24">
-                        <div className="text-xs tabular-nums text-gray-500 dark:text-slate-400">{format(parseISO(member.expiresAt), 'MM-dd')}</div>
-                        <span className={`mt-1 inline-flex whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-medium ${dueBadgeClass(member.daysUntil)}`}>
-                          {dueLabel(member.daysUntil)}
-                        </span>
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-gray-900 dark:text-slate-100">{displayName}</div>
-                        {showEmail && <div className="mt-0.5 truncate text-xs text-gray-500 dark:text-slate-500">{member.email}</div>}
-                        <div className="mt-1 truncate text-xs text-gray-500 dark:text-slate-400">{member.team_name}</div>
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <span className={`inline-flex rounded-md px-2 py-1 text-[11px] font-medium ${seatTypeBadgeClass(member.seat_type, 'admin')}`}>
-                          {formatSeatTypeLabel(member.seat_type)}
-                        </span>
-                        <div className="mt-1.5 flex items-center justify-end gap-1 text-[11px] tabular-nums text-gray-400 dark:text-slate-500">
-                          <Clock className="h-3 w-3" />
-                          {format(parseISO(member.expiresAt), 'HH:mm')}
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
+              <section className={cn(CARD, 'min-w-0 overflow-hidden')}>
+                <SectionHeader
+                  title="近期续费 Team"
+                  count={renewalItems.length}
+                  description={`自动续费的 Team，7 天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
+                  to="/admin/finance"
+                />
+                <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
+                  {renewalItems.length === 0 ? (
+                    <EmptyState title="暂无待续费的 Team" hint="Team 同步到账单后，会按续费日排在这里。" />
+                  ) : renewalItems.map(({ item, daysUntil: remaining }) => {
+                    const converted = !sameCurrency(item.currency, baseCurrency);
+                    return (
+                      <div key={`${item.team_id}:${item.date}`} className="flex items-start gap-3 px-4 py-3.5 transition-colors hover:bg-gray-50 sm:px-5 dark:hover:bg-ink-800/40">
+                        <DueCell value={item.date} days={remaining} />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100" title={item.team_name}>{item.team_name}</div>
+                          <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-gray-500 dark:text-ink-400">
+                            <CreditCard className="size-3.5 shrink-0" />
+                            {item.card_last4 ? (
+                              <>
+                                {item.card_brand && <span className="shrink-0">{item.card_brand.toUpperCase()}</span>}
+                                <span className="shrink-0 font-mono">•••• {item.card_last4}</span>
+                                {item.card_note && <span className="truncate" title={item.card_note}>· {item.card_note}</span>}
+                              </>
+                            ) : (
+                              <span>未绑定卡片</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <div className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">
+                            {formatMoney(item.amount_base, baseCurrency)}
+                          </div>
+                          {item.amount_native !== null && (converted || item.amount_base === null) && (
+                            <div className="mt-1 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
+                              {formatMoney(item.amount_native, item.currency)}
+                            </div>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className={cn(CARD, 'min-w-0 overflow-hidden')}>
+                <SectionHeader
+                  title="近期到期成员"
+                  count={expiringMembers.length}
+                  description="按服务到期时间排序，最近的在前"
+                  to="/admin/users"
+                />
+                <div className="max-h-[36rem] divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
+                  {expiringMembers.length === 0 ? (
+                    <EmptyState title="暂无设置了到期时间的成员" hint="给成员设置到期时间后，会按先后排在这里。" />
+                  ) : expiringMembers.map((member) => {
+                    const displayName = member.system_display_name?.trim() || member.name?.trim() || member.email;
+                    const showEmail = displayName.toLowerCase() !== member.email.toLowerCase();
+                    return (
+                      <div key={`${member.team_id}:${member.email}`} className="flex items-start gap-3 px-4 py-3.5 transition-colors hover:bg-gray-50 sm:px-5 dark:hover:bg-ink-800/40">
+                        <DueCell value={member.expiresAt} days={member.daysUntil} />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100" title={displayName}>{displayName}</div>
+                          {showEmail && (
+                            <div className="mt-0.5 truncate text-xs text-gray-500 dark:text-ink-400" title={member.email}>{member.email}</div>
+                          )}
+                          <div className="mt-1 truncate text-xs text-gray-500 dark:text-ink-400" title={member.team_name}>{member.team_name}</div>
+                        </div>
+                        <div className="flex shrink-0 flex-col items-end">
+                          <span className={cn(PILL, isCodexSeat(member.seat_type) ? TONE.codex : TONE.info)}>
+                            {formatSeatTypeLabel(member.seat_type)}
+                          </span>
+                          <div className="mt-1.5 flex items-center gap-1 text-xs tabular-nums text-gray-500 dark:text-ink-400">
+                            <Clock className="size-3" />
+                            {format(parseISO(member.expiresAt), 'HH:mm')}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            </div>
+          </>
+        ) : (
+          <div className={cn(CARD, 'px-6 py-16 text-center')}>
+            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">席位数据加载失败</p>
+            <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">检查后端是否在运行，然后点「刷新」重试。</p>
           </div>
-        </>
-      ) : (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 py-16 text-center text-rose-600 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300">
-          加载资源数据失败。
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+    </PageShell>
   );
 }
