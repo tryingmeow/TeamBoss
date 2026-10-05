@@ -13,7 +13,6 @@ overwrite the imported tokens or change status/auth_state.
 import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import hashlib
-import io
 import json
 import secrets
 import sqlite3
@@ -25,10 +24,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import jwt
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3 import HTTPHeaderDict
-from urllib3.response import HTTPResponse
+from curl_cffi.requests import Headers, Response
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -76,24 +72,24 @@ def _access_token(delta: timedelta, *, finalizer: bool) -> str:
     )
 
 
-def _session_response(status: int, body, set_cookies=()) -> requests.Response:
-    """A real requests.Response on top of a real urllib3 response.
+def _session_response(status: int, body, set_cookies=()) -> Response:
+    """A real curl_cffi Response, filled the way Session._parse_response fills it.
 
-    Multiple Set-Cookie headers stay separate in raw.headers, exactly as they do
-    on the wire, so this exercises the same getlist path as production.
+    Headers are built from raw "Name: value" header lines, so multiple
+    Set-Cookie headers stay separate exactly as they do on the wire and this
+    exercises the same Headers.get_list path as production. HTTP/2 carries no
+    reason phrase, hence the empty reason.
     """
-    headers = HTTPHeaderDict()
-    headers.add("Content-Type", "application/json")
-    for value in set_cookies:
-        headers.add("Set-Cookie", value)
-    raw = HTTPResponse(
-        body=io.BytesIO(json.dumps(body).encode()),
-        headers=headers,
-        status=status,
-        preload_content=False,
-    )
-    request = requests.Request("GET", "https://chatgpt.com/api/auth/session").prepare()
-    return HTTPAdapter().build_response(request, raw)
+    lines = [b"content-type: application/json"]
+    lines += [f"set-cookie: {value}".encode() for value in set_cookies]
+    response = Response()
+    response.url = "https://chatgpt.com/api/auth/session"
+    response.status_code = status
+    response.ok = 200 <= status < 400
+    response.reason = ""
+    response.headers = Headers(lines)
+    response.content = json.dumps(body).encode()
+    return response
 
 
 def _session_body(access_token: str, session_token: str) -> dict:
@@ -191,7 +187,7 @@ class RefreshTokenDiagnosticsTest(unittest.TestCase):
     """ChatGPTClient.refresh_token against a real response object (no network)."""
 
     def _call(self, response, sent_session: str) -> dict:
-        with patch.object(chatgpt_client_module.requests, "get", return_value=response) as get:
+        with patch.object(chatgpt_client_module.curl_requests, "get", return_value=response) as get:
             result = ChatGPTClient.refresh_token(sent_session)
         get.assert_called_once()
         return result
@@ -309,7 +305,7 @@ class RefreshTokenDiagnosticsTest(unittest.TestCase):
 
 
 class LimiterDiagnosticsLoggingTest(_TempDbMixin, unittest.TestCase):
-    """End to end through refresh_team_auth_sync with only requests.get faked."""
+    """End to end through refresh_team_auth_sync with only curl_requests.get faked."""
 
     def setUp(self):
         self.sent_session = _secret()
@@ -319,7 +315,7 @@ class LimiterDiagnosticsLoggingTest(_TempDbMixin, unittest.TestCase):
     def _run(self, response, *, trigger="scheduled_expiry_refresh", force=True, file_update=None):
         file_update = file_update or Mock(return_value=True)
         with (
-            patch.object(chatgpt_client_module.requests, "get", return_value=response),
+            patch.object(chatgpt_client_module.curl_requests, "get", return_value=response),
             patch.object(chatgpt_limiter, "update_session_file_tokens", file_update),
             self.assertLogs("app.chatgpt_limiter", level="WARNING") as captured,
         ):

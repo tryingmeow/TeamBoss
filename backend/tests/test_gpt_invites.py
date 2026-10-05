@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-import requests
+from curl_cffi.const import CurlECode
+from curl_cffi.requests import Response
+from curl_cffi.requests.exceptions import Timeout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -179,8 +181,7 @@ class InviteMutationClassificationTest(unittest.TestCase):
         self.client = ChatGPTClient("access", "team-1", "device-1")
 
     def test_empty_success_response_is_still_confirmed(self):
-        response = Mock()
-        response.raise_for_status.return_value = None
+        response = Mock(status_code=200)
         response.json.side_effect = ValueError("empty")
         self.client.session.post = Mock(return_value=response)
 
@@ -189,16 +190,19 @@ class InviteMutationClassificationTest(unittest.TestCase):
         self.assertEqual(result["_mutation_status"], "confirmed")
 
     def test_timeout_is_uncertain(self):
-        self.client.session.post = Mock(side_effect=requests.Timeout("timed out"))
+        self.client.session.post = Mock(
+            side_effect=Timeout("timed out", CurlECode.OPERATION_TIMEDOUT)
+        )
 
         result = self.client.invite_member("user@example.com")
 
         self.assertEqual(result["_mutation_status"], "uncertain")
 
     def test_clear_400_rejection_can_be_retried(self):
-        response = Mock(status_code=400)
-        error = requests.HTTPError("bad request", response=response)
-        self.client.session.post = Mock(side_effect=error)
+        response = Response()
+        response.status_code = 400
+        response.ok = False
+        self.client.session.post = Mock(return_value=response)
 
         result = self.client.invite_member("user@example.com")
 

@@ -1,10 +1,11 @@
 import asyncio
 
-import requests
+from curl_cffi import requests as curl_requests
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
+from ..chatgpt_client import IMPERSONATE
 from ..database import get_db, log_operation
 from ..models import ProxyCreate, ProxyUpdate
 
@@ -121,8 +122,10 @@ async def check_proxy(proxy_id: int):
         now = _now_iso()
         try:
             def _do_check():
-                return requests.get(
+                # 与 ChatGPTClient 同一套 TLS 指纹，测的才是业务请求真实的可达性。
+                return curl_requests.get(
                     "https://chatgpt.com",
+                    impersonate=IMPERSONATE,
                     proxies={"http": proxy_url, "https": proxy_url},
                     timeout=10,
                 )

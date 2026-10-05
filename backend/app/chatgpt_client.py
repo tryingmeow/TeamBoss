@@ -1,9 +1,18 @@
 import hashlib
 import re
 from datetime import datetime, timezone
+from http import HTTPStatus
 
 import jwt
-import requests
+from curl_cffi import requests as curl_requests
+from curl_cffi.curl import CurlError
+from curl_cffi.requests.exceptions import HTTPError
+
+# chatgpt.com 前面的 Cloudflare 按 TLS 指纹放行：python-requests 的 TLS 握手配上
+# 自称 Chrome 的 User-Agent，会在 subscriptions / seat_type_counts / invites /
+# /api/auth/session 上吃 HTML 403（"Unable to load site"）。所有发往 chatgpt.com 的
+# 请求都走 curl_cffi，并模拟浏览器的 TLS/HTTP2 指纹。
+IMPERSONATE = "chrome"
 
 # 上游异常的字符串形式有可能把请求头原样带出来（例如 requests 在 header 值非法时
 # 会把 `authorization: Bearer <token>` 整段拼进 InvalidHeader 的消息里）。这些文本
@@ -113,20 +122,21 @@ def parse_set_cookie(header) -> tuple[str, str, bool] | None:
 def response_set_cookies(resp) -> list[tuple[str, str, bool]]:
     """按到达顺序取响应里的每条 Set-Cookie。
 
-    ``resp.headers`` 会把多条 Set-Cookie 用逗号并成一条，而 Expires 里本身就有
-    逗号，没法可靠拆开；所以读 urllib3 原始头的 getlist。拿不到原始头时退回
-    cookie jar（名字和值都有，只是看不到 Max-Age）。
+    多条 Set-Cookie 一旦用逗号并成一条就没法可靠拆开（Expires 里本身就有逗号），
+    所以读 curl_cffi ``Headers.get_list``，它逐条保留。拿不到时退回 cookie jar
+    （名字和值都有，只是看不到 Max-Age）。
     """
-    headers = getattr(getattr(resp, "raw", None), "headers", None)
-    getlist = getattr(headers, "getlist", None)
-    if callable(getlist):
+    get_list = getattr(getattr(resp, "headers", None), "get_list", None)
+    if callable(get_list):
         try:
-            parsed = (parse_set_cookie(h) for h in getlist("Set-Cookie"))
+            parsed = (parse_set_cookie(h) for h in get_list("Set-Cookie") if h is not None)
             return [item for item in parsed if item]
         except Exception:
             pass
     try:
-        jar = getattr(resp, "cookies", None) or []
+        cookies = getattr(resp, "cookies", None)
+        # curl_cffi 的 Cookies 是 name -> value 映射，Cookie 对象在 .jar 里。
+        jar = getattr(cookies, "jar", cookies) or []
         return [(c.name, c.value or "", not c.value) for c in jar]
     except Exception:
         return []
@@ -229,6 +239,40 @@ def summarize_session_refresh(
     return diag, sc_session
 
 
+def _raise_for_status(resp) -> None:
+    """与 python-requests 的 ``raise_for_status`` 同判定、同报错文本。
+
+    只有 4xx/5xx 抛 ``HTTPError``，消息形如 ``401 Client Error: Unauthorized for
+    url: …``：鉴权判定（``_is_unauthorized_result``、``is_auth_error``）和告警文本
+    都按这个格式匹配。HTTP/2 没有 reason phrase，缺省时用标准短语补上。异常带
+    curl 错误码 0 和 ``response``，``_error`` 据此认定这是上游真实答复的状态码。
+    """
+    status = resp.status_code
+    if 400 <= status < 600:
+        kind = "Client" if status < 500 else "Server"
+        reason = resp.reason
+        if not reason:
+            try:
+                reason = HTTPStatus(status).phrase
+            except ValueError:
+                reason = ""
+        raise HTTPError(f"{status} {kind} Error: {reason} for url: {resp.url}", 0, resp)
+
+
+def _upstream_status(exc: Exception) -> int | None:
+    """异常对应的上游 HTTP 状态码；传输层失败一律为 None。
+
+    curl_cffi 在超时、断线、HTTP/2 流错误时也会把收了一半的响应挂到
+    ``exc.response`` 上（状态码可能是 0，也可能是已收到的 200/4xx），这不是上游
+    答复。只认 curl 错误码为 0 的异常（即 ``_raise_for_status`` 抛出的那种），
+    保持 requests 时代"超时/断网结果里没有 status_code"的约定——兑换、踢人据此
+    把结果判成"不确定"而不是"已拒绝"。
+    """
+    if isinstance(exc, CurlError) and exc.code:
+        return None
+    return getattr(getattr(exc, "response", None), "status_code", None)
+
+
 def _json_body_or_none(resp):
     if resp is None:
         return None
@@ -244,7 +288,7 @@ class ChatGPTClient:
         self.team_id = team_id
         self.device_id = device_id
         self.base_url = "https://chatgpt.com"
-        self.session = requests.Session()
+        self.session = curl_requests.Session(impersonate=IMPERSONATE)
         if proxy_url:
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
         self.session.headers.update({
@@ -260,8 +304,7 @@ class ChatGPTClient:
 
     @staticmethod
     def _error(exc: Exception) -> dict:
-        response = getattr(exc, "response", None)
-        status_code = getattr(response, "status_code", None)
+        status_code = _upstream_status(exc)
         result = {"error": mask_secrets(str(exc))}
         if status_code is not None:
             result["status_code"] = status_code
@@ -307,8 +350,9 @@ class ChatGPTClient:
         resp = None
         try:
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
-            resp = requests.get(
+            resp = curl_requests.get(
                 "https://chatgpt.com/api/auth/session",
+                impersonate=IMPERSONATE,
                 headers={
                     "cookie": f"__Secure-next-auth.session-token={session_token}",
                     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -316,7 +360,7 @@ class ChatGPTClient:
                 proxies=proxies,
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             body = resp.json()
         except Exception as e:
             result = ChatGPTClient._error(e)
@@ -344,7 +388,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/check/v4-2023-04-27",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -355,7 +399,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/subscriptions?account_id={self.team_id}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -366,7 +410,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/remaining_balance",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -377,7 +421,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/users?offset={offset}&limit={limit}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -394,7 +438,7 @@ class ChatGPTClient:
                 },
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             # 任何 2xx 都代表服务端已经接受了变更。即使响应体为空或 JSON
             # 损坏，也不能把它误判成失败后换另一个 Team 重试。
             try:
@@ -424,7 +468,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/invites?offset={offset}&limit={limit}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -436,7 +480,7 @@ class ChatGPTClient:
                 json={"email_address": email},
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -448,7 +492,7 @@ class ChatGPTClient:
                 json={"seat_type": seat_type},
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -459,7 +503,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/users/{user_id}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -470,7 +514,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/users/seat_type_counts",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -481,7 +525,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/invoices?limit={limit}&account_id={self.team_id}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -492,7 +536,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/payments/payment_methods?account_id={self.team_id}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -503,7 +547,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/checkout_pricing_config/configs/{country_code}",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -517,7 +561,7 @@ class ChatGPTClient:
                 f"{self.base_url}/backend-api/accounts/{self.team_id}/settings",
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
@@ -529,7 +573,7 @@ class ChatGPTClient:
                 json={"value": seat_type},
                 timeout=60
             )
-            resp.raise_for_status()
+            _raise_for_status(resp)
             return resp.json()
         except Exception as e:
             return self._error(e)
