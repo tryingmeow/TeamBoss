@@ -10,7 +10,7 @@ import {
   normalizeSeatType,
   seatUpdateErrorMessage,
 } from '../lib/seatType';
-import { formatAppLocalFull, toAppLocal } from '../lib/expiry';
+import { NO_EXPIRY_LABEL, formatAppLocalFull, noExpiryKind, toAppLocal } from '../lib/expiry';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import MemberRemarkEditor from './MemberRemarkEditor';
 import { useKickPolicy } from '../hooks/useKickPolicy';
@@ -37,9 +37,19 @@ function seatPillClass(seatType: string | null | undefined): string {
   return cn(PILL, isCodexSeat(seatType) ? TONE.codex : TONE.info);
 }
 
-/** 到期日（应用时区的 月/日，跨年时带年份）；已过期标红，3 天内到期标黄。 */
-export function ExpiryLabel({ iso }: { iso: string | null }) {
-  if (!iso) return <span className="text-gray-400 dark:text-ink-500">不过期</span>;
+/**
+ * 到期日（应用时区的 月/日，跨年时带年份）；已过期标红，3 天内到期标黄。
+ * 没有到期时间时按 `source` 区分"永久"和"没记录"，两者不能都叫不过期。
+ */
+export function ExpiryLabel({ iso, source }: { iso: string | null; source?: string | null }) {
+  if (!iso) {
+    const kind = noExpiryKind(source);
+    return (
+      <span className={kind === 'detected' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400 dark:text-ink-500'}>
+        {NO_EXPIRY_LABEL[kind].short}
+      </span>
+    );
+  }
   const date = new Date(iso);
   const left = date.getTime() - Date.now();
   const p = toAppLocal(date);
@@ -130,7 +140,8 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
   const remark = member.system_display_name?.trim() || '';
   const profileName = member.name?.trim() || '';
   const primaryName = remark || profileName || member.email.split('@')[0];
-  const expiryTitle = member.expires_at ? `到期 ${formatAppLocalFull(new Date(member.expires_at))}` : '未设置到期时间';
+  const noExpiry = NO_EXPIRY_LABEL[noExpiryKind(member.source)];
+  const expiryTitle = member.expires_at ? `到期 ${formatAppLocalFull(new Date(member.expires_at))}` : noExpiry.title;
 
   return (
     <li className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-gray-50 dark:hover:bg-ink-850">
@@ -202,7 +213,7 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
                 title={expiryTitle}
                 aria-label={`到期时间 ${expiryTitle}，点击修改`}
               >
-                <ExpiryLabel iso={member.expires_at} />
+                <ExpiryLabel iso={member.expires_at} source={member.source} />
                 <ChevronDown size={11} className="text-gray-400 dark:text-ink-500" />
               </button>
             </Popover.Trigger>
@@ -215,7 +226,7 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
               >
                 <p className="text-sm font-medium text-gray-900 dark:text-gray-100">修改到期时间</p>
                 <p className="mb-2.5 truncate text-xs text-gray-500 dark:text-ink-400" title={member.email}>
-                  {member.email} · {member.expires_at ? `当前 ${formatAppLocalFull(new Date(member.expires_at))}` : '当前不过期'}
+                  {member.email} · {member.expires_at ? `当前 ${formatAppLocalFull(new Date(member.expires_at))}` : noExpiry.current}
                 </p>
                 <ExpiryPicker
                   onSubmit={handleSetExpiry}

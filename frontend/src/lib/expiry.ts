@@ -167,3 +167,32 @@ export function kickPolicyLabel(policy: KickPolicy): string {
   const delay = Math.min(Math.max(Number(policy.delayHours) || 0, 0), 720);
   return delay > 0 ? `系统已选择 +${delay}h 移出` : '系统已选择到期即移出';
 }
+
+/**
+ * 到期时间为空时的三种含义，对应后端 `get_active_expiry_state()`：
+ * - `permanent`：有到期记录、被明确设成永久（source 是 system / self_service 等）。
+ * - `detected`：巡逻发现的面板外加入者，没有任何授权；巡逻自动踢人开启时可能被移出（超员或严格模式）。
+ * - `unrecorded`：本地没有到期记录（面板接管前就在的人，或数据还没同步到 source）。
+ * 只有 `permanent` 才能写成"永久"。
+ */
+export type NoExpiryKind = 'permanent' | 'detected' | 'unrecorded';
+
+export function noExpiryKind(source: string | null | undefined): NoExpiryKind {
+  if (source === 'detected') return 'detected';
+  if (source === null || source === undefined) return 'unrecorded';
+  return 'permanent';
+}
+
+export const NO_EXPIRY_LABEL: Record<NoExpiryKind, { short: string; current: string; title: string }> = {
+  permanent: { short: '永久', current: '当前永久', title: '已设为永久，不会到期移出' },
+  detected: {
+    short: '外部加入',
+    current: '外部加入，未记录到期',
+    title: '在面板外加入，未经授权，也没有到期记录；巡逻自动踢人开启时可能被移出',
+  },
+  unrecorded: {
+    short: '未记录到期',
+    current: '当前未记录到期',
+    title: '本地没有到期记录，不会到期移出，但也不是设定的永久',
+  },
+};

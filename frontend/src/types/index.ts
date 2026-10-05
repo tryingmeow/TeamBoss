@@ -65,6 +65,11 @@ export interface Member {
   seat_type: string;
   is_owner: boolean;
   expires_at: string | null;
+  /**
+   * 本地到期记录的来源（system / self_service / detected …）；null = 没有记录。
+   * 用来区分到期时间为空的成员是"永久"还是"没记录"，见 lib/expiry 的 noExpiryKind。
+   */
+  source?: string | null;
   created_time: string | null;
 }
 

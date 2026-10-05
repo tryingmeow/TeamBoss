@@ -34,7 +34,7 @@ import SegmentedTabs from '../../components/SegmentedTabs';
 import Toast from '../../components/Toast';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { useKickPolicy } from '../../hooks/useKickPolicy';
-import type { KickPolicy } from '../../lib/expiry';
+import { NO_EXPIRY_LABEL, noExpiryKind, type KickPolicy } from '../../lib/expiry';
 import { cn } from '../../lib/utils';
 import SystemLogs from './SystemLogs';
 import {
@@ -171,9 +171,16 @@ async function copyToClipboard(value: string): Promise<void> {
   if (!copied) throw new Error('浏览器未允许复制，请手动复制');
 }
 
-function memberExpiryDisplay(expiry?: MemberExpiryView): { primary: string; grace?: string; graceTitle?: string } {
+function memberExpiryDisplay(
+  expiry: MemberExpiryView | undefined,
+  isOwner = false,
+): { primary: string; title?: string; grace?: string; graceTitle?: string } {
   if (!expiry) return { primary: '—' };
-  if (!expiry.expires_at) return { primary: '永不' };
+  if (!expiry.expires_at) {
+    if (isOwner) return { primary: '—', title: 'Owner 不参与到期管理' };
+    const label = NO_EXPIRY_LABEL[noExpiryKind(expiry.source)];
+    return { primary: label.short, title: label.title };
+  }
   const primary = expiry.expires_at_local || expiry.expires_at;
   if (!expiry.effective_kick_at || expiry.effective_kick_at === expiry.expires_at) {
     return { primary };
@@ -465,6 +472,7 @@ const TR = 'align-top transition-colors hover:bg-gray-50 dark:hover:bg-ink-800/4
 function ExpiryControl({
   variant,
   display,
+  displayTitle,
   urgency,
   grace,
   graceTitle,
@@ -475,6 +483,7 @@ function ExpiryControl({
 }: {
   variant: Variant;
   display: string;
+  displayTitle?: string;
   urgency: { className: string; title: string } | null;
   grace?: string;
   graceTitle?: string;
@@ -502,7 +511,7 @@ function ExpiryControl({
       <div>
         <div
           className={cn('whitespace-nowrap tabular-nums', urgency?.className ?? 'text-gray-800 dark:text-ink-200')}
-          title={urgency?.title}
+          title={urgency?.title ?? displayTitle}
         >
           {display}
         </div>
@@ -1323,7 +1332,7 @@ function MemberList({
 
   const memberParts = (member: AdminMemberRow, variant: Variant) => {
     const emailKey = (member.email || '').trim().toLowerCase();
-    const expiryView = memberExpiryDisplay(member.expiry);
+    const expiryView = memberExpiryDisplay(member.expiry, member.is_owner);
     return {
       identity: (
         <UserIdentityCell
@@ -1346,6 +1355,7 @@ function MemberList({
         <ExpiryControl
           variant={variant}
           display={expiryView.primary}
+          displayTitle={expiryView.title}
           urgency={expiryUrgency(member)}
           grace={expiryView.grace}
           graceTitle={expiryView.graceTitle}
