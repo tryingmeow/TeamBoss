@@ -1,12 +1,27 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Team Manager</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>TeamBoss</title>
+    <script>
+      // Apply the theme before first paint so there is no flash of the wrong one.
+      // Keep in sync with src/lib/theme.ts (same storage key and rule).
+      (function () {
+        var dark = false;
+        try {
+          var stored = localStorage.getItem('teamboss.theme');
+          dark = stored === 'dark' || (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        } catch (e) {
+          dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        }
+        if (dark) document.documentElement.classList.add('dark');
+      })();
+    </script>
   </head>
-  <body class="bg-gray-50 text-gray-900 dark:bg-[#0f1117] dark:text-gray-100 transition-colors duration-300">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

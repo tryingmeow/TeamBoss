@@ -2,6 +2,44 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* The app's neutral ramp. Dark mode surfaces: ink-950 page, ink-900 cards, ink-800 borders/raised. */
+@theme {
+  --color-ink-50: #f6f7f9;
+  --color-ink-100: #eceef2;
+  --color-ink-200: #d9dce3;
+  --color-ink-300: #b9bdc8;
+  --color-ink-400: #8d93a1;
+  --color-ink-500: #676d7c;
+  --color-ink-600: #4a4f5c;
+  --color-ink-700: #3a3d4a;
+  --color-ink-750: #343849;
+  --color-ink-800: #2a2d3a;
+  --color-ink-850: #222533;
+  --color-ink-900: #1a1d27;
+  --color-ink-925: #161923;
+  --color-ink-950: #0f1117;
+}
+
+/* Native controls (scrollbars, selects, date inputs) follow the active theme. */
+html {
+  color-scheme: light;
+}
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900 antialiased dark:bg-ink-950 dark:text-gray-100;
+}
+
+/* Horizontal scrollers (tab bars, chip rows) without a visible scrollbar. */
+.no-scrollbar {
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 .sort-menu-content {
   transform-origin: var(--radix-dropdown-menu-content-transform-origin);
 }
