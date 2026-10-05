@@ -10,7 +10,8 @@
     4. active_chatgpt > seats_entitled（over_by > 0，否则最多是 watch，不踢）
     5. member.seat_type == 'default' 且 member.is_owner is False
     6. member.source == 'detected'（唯一硬规则；'system'/'self_service'/None 永不踢，
-       开启自动踢人时会先把当时的现有成员全部保护起来）
+       每个 Team 第一次建立巡逻基线时会把当时的现有成员全部保护起来，之后重建基线
+       不再重复保护——见 _protect_team_snapshot_sync）
   最多踢 over_by 个，按 first_seen_at（缺失则退回 created_time）新→旧排序，优先踢最新混进来的。
 - dry-run 判定：effective_dry_run = dry_run 参数 OR settings.patrol_kick_enabled != '1'。
 - 真正执行踢人只能通过 `_patrol_kick()` 这一个函数：进函数先重新校验候选资格
@@ -192,8 +193,27 @@ def _protect_team_snapshot_sync(
     conn: sqlite3.Connection,
     team_id: str,
     now: str,
-) -> tuple[int, int]:
-    """Protect one complete cached Team snapshot and record its baseline."""
+) -> tuple[int, int, int]:
+    """为一个 Team 建立巡逻基线（成员快照必须完整），返回 (grandfathered, backfilled, detected_kept)。
+
+    - grandfather（把已有的 detected 行转成 system）只在该 Team **第一次**建立基线时
+      做一次，同时写下 teams.patrol_grandfathered_at。sync 不管巡逻开没开都会给每个
+      未知成员建 detected 行，所以第一次武装时这些人就是"现有成员"，必须保护。
+    - 之后每次重建基线——重复 /patrol on、关了再开、token_expired 恢复后重新初始化——
+      已有的 detected 行一律保持 detected：他们是在第一次基线之后从系统外混进来的人，
+      重建基线不能把他们洗白成永久成员（detected + NULL 到期 = 未授权；system + NULL
+      到期 = 永久）。这类人数作为 detected_kept 返回，供调用方提示管理员。
+    - 无论第几次，完全没有记录的成员/邀请都补一条 system 行（backfill）。
+    标记跟着 teams 行走：token_expired 和重新导入只 UPDATE 这一行，标记保留；删除
+    Team 会删掉整行，重新添加的 Team 视为第一次。
+    """
+    team_row = conn.execute(
+        "SELECT patrol_grandfathered_at FROM teams WHERE id = ?", (team_id,)
+    ).fetchone()
+    if not team_row:
+        raise PatrolActivationError(f"{team_id} 不存在")
+    first_baseline = not (team_row["patrol_grandfathered_at"] or "").strip()
+
     cache_row = conn.execute(
         "SELECT members_json, pending_json FROM member_cache WHERE team_id = ?",
         (team_id,),
@@ -210,12 +230,18 @@ def _protect_team_snapshot_sync(
     if not isinstance(pending, list):
         raise PatrolActivationError(f"{team_id} 邀请快照损坏")
 
-    cursor = conn.execute(
-        "UPDATE member_expiry SET source = 'system' "
-        "WHERE team_id = ? AND source = 'detected' AND kicked = 0",
-        (team_id,),
-    )
-    grandfathered = cursor.rowcount
+    grandfathered = 0
+    if first_baseline:
+        cursor = conn.execute(
+            "UPDATE member_expiry SET source = 'system' "
+            "WHERE team_id = ? AND source = 'detected' AND kicked = 0",
+            (team_id,),
+        )
+        grandfathered = cursor.rowcount
+        conn.execute(
+            "UPDATE teams SET patrol_grandfathered_at = ? WHERE id = ?",
+            (now, team_id),
+        )
 
     tracked_rows = conn.execute(
         "SELECT user_id, email FROM member_expiry WHERE team_id = ? AND kicked = 0",
@@ -260,6 +286,7 @@ def _protect_team_snapshot_sync(
             source_map[str(row["user_id"])] = row
         if row["email"]:
             source_map[str(row["email"]).lower()] = row
+    detected_kept = 0
     for item in members + pending:
         if not isinstance(item, dict):
             continue
@@ -270,6 +297,8 @@ def _protect_team_snapshot_sync(
             item["source"] = source_row["source"]
             item["first_seen_at"] = source_row["first_seen_at"]
             item["expires_at"] = source_row["expires_at"]
+            if source_row["source"] == "detected" and not item.get("is_owner"):
+                detected_kept += 1
     conn.execute(
         "UPDATE member_cache SET members_json = ?, pending_json = ? WHERE team_id = ?",
         (
@@ -284,15 +313,17 @@ def _protect_team_snapshot_sync(
            ON CONFLICT(team_id) DO UPDATE SET baseline_at = excluded.baseline_at""",
         (team_id, now),
     )
-    return grandfathered, backfilled
+    return grandfathered, backfilled, detected_kept
 
 
 def activate_patrol_sync(expected_team_ids: list[str]) -> dict:
-    """原子地保护当前成员并开启巡逻自动踢人。
+    """原子地建立巡逻基线并开启巡逻自动踢人。
 
     调用方必须先实时刷新所有 active team。这里会再次验证 active team 集合和缓存，
-    只有所有快照都完整时，才在同一事务中把当前成员标记为受信任并打开总开关。
-    任一 team 缓存缺失/损坏都会整笔回滚，绝不留下半开启状态。
+    只有所有快照都完整时，才在同一事务中建立基线并打开总开关。第一次纳入巡逻的
+    Team 会把当前成员全部保护起来；已经保护过的 Team 只给没有记录的人补 system 行，
+    之前检测到的外部成员保持 detected（计入 detected_kept），见
+    _protect_team_snapshot_sync。任一 team 缓存缺失/损坏都会整笔回滚，绝不留下半开启状态。
     """
     conn = _get_sync_db()
     now = datetime.now(timezone.utc).isoformat()
@@ -325,10 +356,12 @@ def activate_patrol_sync(expected_team_ids: list[str]) -> dict:
                 raise PatrolActivationError(f"{team_id} 邀请快照损坏")
         grandfathered = 0
         backfilled = 0
+        detected_kept = 0
         for team_id in active_team_ids:
-            protected, inserted = _protect_team_snapshot_sync(conn, team_id, now)
+            protected, inserted, kept = _protect_team_snapshot_sync(conn, team_id, now)
             grandfathered += protected
             backfilled += inserted
+            detected_kept += kept
 
         for key, value in (
             ("patrol_baseline_at", now),
@@ -347,7 +380,7 @@ def activate_patrol_sync(expected_team_ids: list[str]) -> dict:
                VALUES (NULL, 'patrol_activate', NULL, ?, 'success', NULL, 'manual', ?)""",
             (
                 f"teams={len(active_team_ids)}, grandfathered={grandfathered}, "
-                f"backfilled={backfilled}",
+                f"backfilled={backfilled}, detected_kept={detected_kept}",
                 now,
             ),
         )
@@ -357,6 +390,8 @@ def activate_patrol_sync(expected_team_ids: list[str]) -> dict:
             "kick_enabled": True,
             "grandfathered": grandfathered,
             "backfilled": backfilled,
+            # 已保护过的 Team 里仍是"检测到"的外部成员/邀请数：开启后它们照常是巡逻候选。
+            "detected_kept": detected_kept,
             "baseline_at": now,
         }
     except Exception:
@@ -373,8 +408,9 @@ def select_kick_candidates(members: Any) -> list[dict]:
 
     唯一硬规则：source == 'detected'。另外叠加 seat_type == 'default' 且
     is_owner is False（owner/codex 席位永不触碰）。不做任何时间戳门槛判断——
-    现有成员会在开启自动踢人时一次性转成 source='system' 保护住，所以
-    "只踢 detected"就等价于"只踢开启后从系统外新混进来的人"。
+    现有成员会在该 Team 第一次建立巡逻基线时一次性转成 source='system' 保护住，
+    所以"只踢 detected"就等价于"只踢第一次基线之后从系统外混进来的人"（包括巡逻
+    关闭期间、Team token_expired 期间混进来的人）。
     """
     if not isinstance(members, list):
         return []
@@ -399,9 +435,9 @@ def select_invite_revoke_candidates(pending: Any) -> list[dict]:
     """从 pending invite 快照里筛出该自动撤销的候选。
 
     唯一硬规则：source == 'detected'。系统自己发出的邀请 source 是 'system' /
-    'self_service'；基线保护（_protect_team_snapshot_sync）会把武装前已存在的邀请
-    一次性转成 'system'，所以"只撤 detected"就等价于"只撤基线之后新出现的、系统
-    没发过的邀请"——和 select_kick_candidates 对已入队成员的处理方式完全对称。
+    'self_service'；该 Team 第一次建立基线时（_protect_team_snapshot_sync）会把当时已存在
+    的邀请一次性转成 'system'，所以"只撤 detected"就等价于"只撤第一次基线之后新出现的、
+    系统没发过的邀请"——和 select_kick_candidates 对已入队成员的处理方式完全对称。
     撤邀请风险比踢人低（人还没进来，撤错了重发一次即可），不设 over_by 式数量上限。
     """
     if not isinstance(pending, list):
@@ -1199,7 +1235,7 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
             if kick_enabled and baseline_ready and team_id not in initialized_team_ids:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
-                    grandfathered, backfilled = _protect_team_snapshot_sync(
+                    grandfathered, backfilled, detected_kept = _protect_team_snapshot_sync(
                         conn, team_id, datetime.now(timezone.utc).isoformat()
                     )
                     conn.commit()
@@ -1208,7 +1244,8 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                         team_id,
                         "patrol_team_initialize",
                         None,
-                        f"grandfathered={grandfathered}, backfilled={backfilled}",
+                        f"grandfathered={grandfathered}, backfilled={backfilled}, "
+                        f"detected_kept={detected_kept}",
                         "success",
                     )
                 except Exception as exc:
@@ -1247,8 +1284,8 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
 
             # ── 陌生 pending invite 自动撤销：跟随"监控中"状态，不看超员/codex ──
             # "监控中" = 已武装（全局 + 该 team 均已完成基线保护）+ 该 team 未豁免 + active。
-            # 只要该 team 完成过基线保护，武装前已存在的邀请早已被 grandfather 成
-            # source='system'，所以这里不需要再单独判断时间戳。
+            # 该 team 第一次建立基线时已存在的邀请早已被 grandfather 成 source='system'，
+            # 所以这里不需要再单独判断时间戳。
             if team_baseline_ready:
                 invite_candidates = select_invite_revoke_candidates(pending)
                 if invite_candidates:
