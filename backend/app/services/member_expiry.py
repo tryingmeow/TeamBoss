@@ -460,9 +460,9 @@ async def _finalize_token_use(
 ) -> None:
     """把兑换收据与成员到期时间放在同一个 SQLite 事务中提交。
 
-    兑换在这里拿到终态，它名下的巡逻屏障也在同一事务里撤掉（见
-    ``resolve_invite_barrier_in_tx``）：收据和屏障同生同灭，不会出现"已 success、
-    屏障却永远 resolved=0"的状态。
+    兑换在这里拿到终态，它名下的全部兜底行（巡逻屏障、本地写入失败留下的
+    'extend' 行）也在同一事务里撤掉（见 ``resolve_token_use_reconciliations_in_tx``）：
+    收据和这些行同生同灭，不会出现"已 success、行却永远 resolved=0"的状态。
     """
     if token_use_id is None:
         return
@@ -479,7 +479,7 @@ async def _finalize_token_use(
         "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
         (token_use_id,),
     )
-    await resolve_invite_barrier_in_tx(db, token_use_id)
+    await resolve_token_use_reconciliations_in_tx(db, token_use_id)
 
 
 async def _insert_pending_invite_reconciliation(
@@ -587,21 +587,27 @@ async def record_uncertain_invite(
     )
 
 
-async def resolve_invite_barrier_in_tx(db, token_use_id: int) -> None:
-    """在调用方的连接 / 事务里结清某次兑换立下的巡逻屏障行，不提交。
+async def resolve_token_use_reconciliations_in_tx(db, token_use_id: int) -> None:
+    """在调用方的连接 / 事务里撤掉某次兑换名下的全部兜底行（barrier / extend /
+    backfill），不提交。和调度器的 ``_resolve_token_use_reconciliations`` 是同一条更新。
 
-    只撤 ``kind='barrier'`` 的行；同一次兑换留下的 'extend' / 'backfill' 兜底行
-    由调度器认领凭据时处理。必须和"把这次兑换写成终态"（远端确认成功、或管理员
-    判定失败退码）放在同一个事务里：屏障在终态之前是唯一挡住巡逻撤销我们自己那个
-    邀请的东西；终态和撤屏障分两个事务提交时，第二个事务一失败（database is
-    locked、进程在两者之间退出），兑换已结清、对账再也不扫它，屏障就永远停在
-    resolved=0——auto_kick 和巡逻从此永远跳过这个人。
+    兑换有了终态，这些行就都不再代表待办：'barrier' 只在终态之前挡巡逻；'extend' /
+    'backfill' 是"远端已成功、本地写入失败"留下的记账凭证，调度器回填时先认领兑换，
+    认领不到（已 success / failed）就只撤行、绝不记时长，所以在这里撤掉既不会少记
+    也不会多记。留着 resolved=0 却有代价：批量拉人把任何未结行当作"邀请可能已在那个
+    Team"而拒绝把这个邮箱拉进别的 Team，这类行又只有同步在那个 Team 里看到人才会撤
+    ——人已经不在，就永远拉不进来。
+
+    必须和"把这次兑换写成终态"（远端确认成功、或管理员判定失败退码）放在同一个事务
+    里：屏障在终态之前是唯一挡住巡逻撤销我们自己那个邀请的东西；终态和撤行分两个
+    事务提交时，第二个事务一失败（database is locked、进程在两者之间退出），兑换已
+    结清、对账再也不扫它，这些行就永远停在 resolved=0——auto_kick 和巡逻从此永远跳过
+    这个人。
     """
     await db.execute(
         """UPDATE pending_invite_reconciliations
            SET resolved = 1, resolved_at = ?
-           WHERE token_use_id = ? AND resolved = 0
-             AND COALESCE(kind, 'backfill') = 'barrier'""",
+           WHERE token_use_id = ? AND resolved = 0""",
         (utc_now().isoformat(), token_use_id),
     )
 

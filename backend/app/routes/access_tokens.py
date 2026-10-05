@@ -24,7 +24,7 @@ from ..services.member_expiry import (
     get_active_expiry_state,
     insert_pending_invite_reconciliation_row,
     record_confirmed_invite_extension,
-    resolve_invite_barrier_in_tx,
+    resolve_token_use_reconciliations_in_tx,
 )
 from ..services.team_clients import get_proxy_url as _get_proxy_url
 from ..services.open_redemptions import (
@@ -635,6 +635,11 @@ async def _fail_and_release_token_use(
 
     ``clear_expires_at`` 把这行的名义到期抹掉。名义到期是"这张码的面额"，只有
     真正授出去时才有意义；提示行留着它会在历史里显示一个从未发生过的到期时间。
+
+    这里不撤 pending_invite_reconciliations：pending 的兑换名下没有行——屏障和
+    pending→uncertain 同一事务写下，'extend' 行只在远端邀请已确认之后才写，那时码
+    已消耗、请求路径不会再退码，对账的本地回滚也不碰 invite_pending。真有行时它是
+    "远端已有席位"的唯一记录，该挡住的是退码，不能随退码一起抹掉。
     """
     if result_value not in {"failed", "notice"}:
         raise ValueError(f"unsupported result_value: {result_value}")
@@ -1545,8 +1550,9 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
         )
         latest = await _get_latest_token_use_by_id(token_use_id)
         if latest and latest.get("result") == "success":
-            # 屏障已在结清这次兑换的同一事务里撤掉（extend_member_expiry →
-            # _finalize_token_use）：这个人现在有正式的 member_expiry 记录。
+            # 这次兑换名下的屏障和兜底行已在结清它的同一事务里撤掉
+            # （extend_member_expiry → _finalize_token_use）：这个人现在有正式的
+            # member_expiry 记录。
             counts["confirmed"] += 1
             try:
                 await log_operation(
@@ -1827,8 +1833,9 @@ async def resolve_pending_confirmation(
     grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
 
     if req.outcome == "success":
-        # 累加语义：绝不覆盖成员已有的到期时间。屏障在结清兑换的同一事务里撤掉；
-        # 本地写入全部失败时兑换仍是 uncertain、屏障也还在，两者一起等兜底行结清。
+        # 累加语义：绝不覆盖成员已有的到期时间。兑换名下的屏障和兜底行在结清兑换的
+        # 同一事务里撤掉；本地写入全部失败时兑换仍是 uncertain、屏障也还在，再加一条
+        # 'extend' 兜底行，一起等调度器回填或下一次确认结清。
         expires_iso = await record_confirmed_invite_extension(
             team_id,
             attempt.get("user_id") or "",
@@ -1947,9 +1954,10 @@ async def _release_uncertain_token_use(token_use_id: int, *, error_message: str)
                WHERE id = ? AND used_count = 1""",
             (row["token_id"],),
         )
-        # 屏障和退码同一事务提交：撤掉之后巡逻才可以按常规规则处理远端可能残留的
-        # 对象，所以绝不能先于退码撤；分两个事务时第二个一失败屏障就永远留着。
-        await resolve_invite_barrier_in_tx(db, token_use_id)
+        # 这次兑换名下的行（屏障，以及远端曾确认、本地落库失败留下的 'extend' 行）
+        # 和退码同一事务提交：撤掉之后巡逻才可以按常规规则处理远端可能残留的对象，
+        # 所以绝不能先于退码撤；分两个事务时第二个一失败这些行就永远留着。
+        await resolve_token_use_reconciliations_in_tx(db, token_use_id)
         await db.commit()
         return True
 

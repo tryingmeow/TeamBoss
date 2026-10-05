@@ -587,13 +587,14 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
         if not still_open:
             continue
 
-        # 带兑换凭据的行：先认领凭据，再决定写不写到期时间。同一次兑换还有一条
-        # 恢复路径——access_tokens.reconcile_pending_redemptions 经
-        # extend_member_expiry 把时长和收据在同一事务里结清。它先到时，收据已是
-        # success，这一行却可能仍是 resolved=0（那条路径不一定撤 'extend' 行），
-        # 要是照常回填，'extend' 行会把同一笔购买再追加一遍：30 天码变 60 天。
-        # 管理员核实退码（result='failed'）后同理不能再记时长。所以凭据认领不到
-        # （rowcount=0）就只撤掉这次兑换的兜底行，绝不碰 member_expiry。
+        # 带兑换凭据的行：先认领凭据，再决定写不写到期时间。同一次兑换还有别的
+        # 结清路径（access_tokens.reconcile_pending_redemptions 和管理员收尾经
+        # extend_member_expiry 记账，管理员核实退码），它们在结清收据的同一事务里
+        # 撤掉这次兑换名下的全部行。但兜底行可能在收据结清之后才写进来：一次确认的
+        # 本地写入因为兑换已被并发结清而失败，_persist_confirmed_membership 照样
+        # 留一行 'extend'。这种行要是照常回填，会把同一笔购买再追加一遍（30 天码变
+        # 60 天），或给已退的码记时长。所以凭据认领不到（rowcount=0）就只撤掉这次
+        # 兑换的兜底行，绝不碰 member_expiry。
         token_use_id = row["token_use_id"]
         if token_use_id is not None:
             claimed = conn.execute(
