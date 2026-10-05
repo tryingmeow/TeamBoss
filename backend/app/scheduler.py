@@ -453,6 +453,25 @@ def _purchased_duration(row):
     return delta
 
 
+def _resolve_token_use_reconciliations(conn, token_use_id, now):
+    """撤掉某次兑换名下的全部兜底行（barrier / extend / backfill）。
+
+    只在这次兑换已经是终态时调用。同一次兑换可能同时留下好几行：uncertain 分支
+    立的 kind='barrier'，加上每次本地写入失败各留的一行 'extend'。兑换一旦结清，
+    access_tokens.reconcile_pending_redemptions 只扫 pending/uncertain，再也够不到
+    它。屏障若留在 resolved=0：auto_kick_job 永远对这个 (team,email) 返回 defer
+    而跳过踢人，patrol 又因为 source='self_service' 不碰它——一份无限期免费的
+    会员；多出来的 'extend' 行则会在下一轮把同一笔购买再加一遍。谁结清了
+    token_use_id，谁就在同一个事务里把它名下的行一起撤掉。
+    """
+    conn.execute(
+        """UPDATE pending_invite_reconciliations
+           SET resolved = 1, resolved_at = ?
+           WHERE token_use_id = ? AND resolved = 0""",
+        (now, token_use_id),
+    )
+
+
 def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now):
     """Backfill confirmed invites before unknown-member detection runs.
 
@@ -496,6 +515,7 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
     pending_emails.discard("")
 
     reconciled = 0
+    began_here = False
     for row in rows:
         stored_user_id = row["user_id"] or ""
         stored_email = (row["email"] or "").strip().lower()
@@ -515,6 +535,50 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
         # into a patrol target.
         if source == "detected":
             source = "system"
+
+        # 下面是"读现有到期 → 算新值 → 写回"，必须先拿写锁再读：否则读到的基准
+        # 可能已被并发的续期改过，写回时把别人刚加的时长覆盖掉。legacy 事务模式下
+        # 只有 DML 才会隐式开事务，所以这里显式 BEGIN IMMEDIATE；已经在事务里
+        # （本轮前面的行写过）说明写锁早已在手。出错时由 data_sync_job 回滚。
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+            began_here = True
+        # 拿到写锁后重读：同一次兑换的另一条兜底行可能已在本轮前面一并撤掉了。
+        still_open = conn.execute(
+            "SELECT 1 FROM pending_invite_reconciliations WHERE id = ? AND resolved = 0",
+            (row["id"],),
+        ).fetchone()
+        if not still_open:
+            continue
+
+        # 带兑换凭据的行：先认领凭据，再决定写不写到期时间。同一次兑换还有一条
+        # 恢复路径——access_tokens.reconcile_pending_redemptions 经
+        # extend_member_expiry 把时长和收据在同一事务里结清。它先到时，收据已是
+        # success，这一行却可能仍是 resolved=0（那条路径不一定撤 'extend' 行），
+        # 要是照常回填，'extend' 行会把同一笔购买再追加一遍：30 天码变 60 天。
+        # 管理员核实退码（result='failed'）后同理不能再记时长。所以凭据认领不到
+        # （rowcount=0）就只撤掉这次兑换的兜底行，绝不碰 member_expiry。
+        token_use_id = row["token_use_id"]
+        if token_use_id is not None:
+            claimed = conn.execute(
+                """UPDATE access_token_uses
+                   SET action = COALESCE(NULLIF(action, ''), 'invited'),
+                       team_id = ?, user_id = ?,
+                       result = 'success', error_message = NULL
+                   WHERE id = ? AND result IN ('pending', 'uncertain')""",
+                (team_id, live_user_id, token_use_id),
+            ).rowcount
+            if claimed != 1:
+                logger.warning(
+                    "invite reconciliation: token_use_id=%s already settled by "
+                    "another path; resolving fallback row %s without crediting "
+                    "(team=%s)",
+                    token_use_id, row["id"], team_id,
+                )
+                _resolve_token_use_reconciliations(conn, token_use_id, now)
+                reconciled += 1
+                continue
+
         existing = conn.execute(
             """SELECT id, expires_at, source FROM member_expiry
                WHERE team_id = ? AND kicked = 0
@@ -586,38 +650,18 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
                 ),
             )
 
-        # 这条兜底行对应的那次兑换必须在同一个事务里结清。否则它仍是
-        # pending/uncertain，reconcile_pending_redemptions 会再累加一次时长——
-        # 同一张码被两条恢复路径各加一遍。凭据一次性：WHERE 只认还没结清的行。
-        token_use_id = row["token_use_id"]
+        # 凭据已在上面认领（同一事务）；这里把收据上的到期时间补成刚写进
+        # member_expiry 的那个值，并释放邮箱锁。
         if token_use_id is not None:
             conn.execute(
-                """UPDATE access_token_uses
-                   SET action = COALESCE(NULLIF(action, ''), 'invited'),
-                       team_id = ?, user_id = ?, expires_at = ?,
-                       result = 'success', error_message = NULL
-                   WHERE id = ? AND result IN ('pending', 'uncertain')""",
-                (team_id, live_user_id, resolved_expires, token_use_id),
+                "UPDATE access_token_uses SET expires_at = ? WHERE id = ?",
+                (resolved_expires, token_use_id),
             )
             conn.execute(
                 "DELETE FROM redemption_email_claims WHERE token_use_id = ?",
                 (token_use_id,),
             )
-            # 同一次兑换可能同时留下两行：这条 backfill 行，和 uncertain 分支立的
-            # kind='barrier' 行。上面刚把这次兑换置为终态，
-            # access_tokens.reconcile_pending_redemptions 只扫 pending/uncertain，
-            # 以后再也够不到它，唯一的 resolve_invite_barrier 调用点也就永远不会
-            # 触发。屏障若留在 resolved=0：auto_kick_job 永远对这个 (team,email)
-            # 返回 defer 而跳过踢人，patrol 又因为 source='self_service' 不碰它——
-            # 一份无限期免费的会员。谁结清了 token_use_id，谁就必须在同一个事务里
-            # 把它的屏障一起撤掉。
-            conn.execute(
-                """UPDATE pending_invite_reconciliations
-                   SET resolved = 1, resolved_at = ?
-                   WHERE token_use_id = ? AND resolved = 0
-                     AND COALESCE(kind, 'backfill') = 'barrier'""",
-                (now, token_use_id),
-            )
+            _resolve_token_use_reconciliations(conn, token_use_id, now)
 
         conn.execute(
             """UPDATE pending_invite_reconciliations
@@ -627,6 +671,10 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
         )
         reconciled += 1
 
+    if began_here and reconciled == 0:
+        # 开了写事务却一行没动（重读发现都已被撤掉）：调用方只在 reconciled>0
+        # 时提交，这里自己放掉写锁，别让它拖到后面的提交点。
+        conn.commit()
     return reconciled
 
 
