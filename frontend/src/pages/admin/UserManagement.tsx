@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import {
   fetchOwners,
+  fetchTeams,
   fetchAllMembers,
   extendMemberExpiry,
   updateMemberExpiry,
@@ -45,6 +46,7 @@ import {
   seatUpdateErrorMessage,
 } from '../../lib/seatType';
 import { ExpiryExtensionRequestIds } from '../../lib/expiryExtensionRequest';
+import { currentPeriodStart } from '../../lib/billingPeriod';
 
 interface BillingCycle {
   active_start: string | null;
@@ -206,9 +208,9 @@ function expiryUrgency(member: AdminMemberRow): { className: string; title: stri
   return null;
 }
 
-function formatShortDate(dateStr: string | null): string {
-  if (!dateStr) return '—';
-  const d = new Date(dateStr);
+function formatShortDate(value: string | Date | null): string {
+  if (!value) return '—';
+  const d = new Date(value);
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -744,7 +746,16 @@ function UserIdentityCell({
   );
 }
 
-function BillingCycleCell({ cycle, className }: { cycle: BillingCycle | string | null | undefined; className?: string }) {
+function BillingCycleCell({
+  cycle,
+  billingPeriod,
+  className,
+}: {
+  cycle: BillingCycle | string | null | undefined;
+  /** The Team's billing interval ('monthly' / 'yearly'); null or missing when unknown. */
+  billingPeriod?: string | null;
+  className?: string;
+}) {
   if (!cycle) return <span className="text-gray-400 dark:text-ink-500">—</span>;
   if (typeof cycle === 'string') return <span>{cycle}</span>;
   const status =
@@ -756,11 +767,22 @@ function BillingCycleCell({ cycle, className }: { cycle: BillingCycle | string |
           ? null
           : { label: '到期不续费', tone: TONE.warning };
   const days = cycle.days_remaining;
+  // active_start is when the subscription began, not the current period's start.
+  const periodStart = currentPeriodStart(cycle.active_start, cycle.active_until, billingPeriod);
   return (
     <div className={cn('flex items-center gap-x-2 gap-y-1', className)}>
-      <span className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200">
-        {formatShortDate(cycle.active_start)} – {formatShortDate(cycle.active_until)}
-      </span>
+      {periodStart ? (
+        <span className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200" title="本期计费周期">
+          {formatShortDate(periodStart)} – {formatShortDate(cycle.active_until)}
+        </span>
+      ) : (
+        <span
+          className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200"
+          title="计费间隔未知，这里显示的是订阅开始日和本期结束日"
+        >
+          订阅自 {formatShortDate(cycle.active_start)} · 至 {formatShortDate(cycle.active_until)}
+        </span>
+      )}
       {days != null && (
         <span className="whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
           {days >= 0 ? `剩 ${days} 天` : `已过 ${-days} 天`}
@@ -792,6 +814,7 @@ function OwnerList({
   showToast: ShowToast;
 }) {
   const [owners, setOwners] = useState<OwnerRow[]>([]);
+  const [billingPeriods, setBillingPeriods] = useState<Map<string, string | null>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -799,10 +822,13 @@ function OwnerList({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetchOwners()
-      .then((res) => {
+    // The owner rows don't carry the billing interval; the Team list does. Without it the
+    // billing column falls back to an honest "订阅自" label, so a failure there is not fatal.
+    Promise.all([fetchOwners(), fetchTeams().catch(() => null)])
+      .then(([res, teams]) => {
         if (cancelled) return;
         setOwners(res.items);
+        if (teams) setBillingPeriods(new Map(teams.map((team) => [team.id, team.billing_period])));
         setLoadError('');
       })
       .catch((err) => {
@@ -926,7 +952,7 @@ function OwnerList({
                     <td className={TD}>{seat(owner, 'row')}</td>
                     <td className={TD}>{card4(owner)}</td>
                     <td className={TD}>
-                      <BillingCycleCell cycle={owner.billing_cycle} />
+                      <BillingCycleCell cycle={owner.billing_cycle} billingPeriod={billingPeriods.get(owner.team_id)} />
                     </td>
                   </tr>
                 ))}
@@ -947,7 +973,7 @@ function OwnerList({
                   <CardField label="席位">{seat(owner, 'card')}</CardField>
                   <CardField label="卡号后四位">{card4(owner)}</CardField>
                   <CardField label="计费周期">
-                    <BillingCycleCell cycle={owner.billing_cycle} className="flex-wrap" />
+                    <BillingCycleCell cycle={owner.billing_cycle} billingPeriod={billingPeriods.get(owner.team_id)} className="flex-wrap" />
                   </CardField>
                 </dl>
               </article>

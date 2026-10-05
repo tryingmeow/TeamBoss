@@ -13,6 +13,7 @@ import { formatSeatTypeLabel } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
+import { currentPeriodStart } from '../lib/billingPeriod';
 
 interface TeamCardProps {
   team: Team;
@@ -24,9 +25,9 @@ interface TeamCardProps {
   showToast: ShowToast;
 }
 
-function formatShortDate(dateStr: string | null): string {
-  if (!dateStr) return '—';
-  const d = new Date(dateStr);
+function formatShortDate(value: string | Date | null): string {
+  if (!value) return '—';
+  const d = new Date(value);
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -175,6 +176,7 @@ export default function TeamCard({
   const isSubscriptionExpired = team.subscription_status === 'expired';
   const isSubscriptionStale = team.subscription_status === 'stale';
   const isNonRenewing = team.subscription_status === 'nonrenewing';
+  const periodStart = currentPeriodStart(team.active_start, team.active_until, team.billing_period);
   const isWarning = (isNonRenewing || (team.days_remaining !== null && team.days_remaining <= 3))
     && !authBlocked
     && !isSubscriptionExpired;
@@ -709,7 +711,10 @@ export default function TeamCard({
             </div>
             {showExactTime && team.active_until && (
               <div className="col-span-2 -mt-1 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 dark:bg-ink-950/60 dark:text-ink-400">
-                本期 {formatShortDate(team.active_start)} – {formatShortDate(team.active_until)} · {isNonRenewing || isSubscriptionExpired ? '到期' : '续费'}于 {formatBeijingDateTime(team.active_until)}
+                {periodStart
+                  ? `本期 ${formatShortDate(periodStart)} – ${formatShortDate(team.active_until)}`
+                  : `订阅自 ${formatShortDate(team.active_start)}`}
+                {' · '}{isNonRenewing || isSubscriptionExpired ? '到期' : '续费'}于 {formatBeijingDateTime(team.active_until)}
               </div>
             )}
             <div className="min-w-0">
