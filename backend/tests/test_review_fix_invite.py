@@ -2,8 +2,8 @@
 
 1. 管理员（网页 / Telegram /invite）对已在该 Team 的邮箱再发邀请，会把成员已买
    的时长覆盖成这次填的有效期（剩 300 天 → 30 天；永久 → 30 天并装上自动踢）。
-   现在邀请前在 team_invite_lock 里实时拉一次成员 + 待接受邀请：已在则 409，
-   拉不到则失败关闭；批量 GPT 拉人同理，不能拿缓存快照当"不在"的证据。
+   现在邀请前在 team_invite_lock 里实时拉一次成员 + 待接受邀请：已是成员则 409，
+   待接受的邀请按重发处理（到期只合并不缩短），拉不到则失败关闭；批量 GPT 拉人同理，不能拿缓存快照当"不在"的证据。
    record_confirmed_invite 本身也不再缩短 / 替换已有到期（纵深防御）。
 2. 邀请接口回 2xx、但本次邮箱列在 ``errored_emails`` 里：上游没有发出邀请，却被
    标成 confirmed，兑换码被消耗而人没进 Team。现在本次邮箱被明确列出 → rejected
@@ -179,7 +179,8 @@ class AdminReinviteGuardTest(_TempDb, unittest.TestCase):
         self.assertEqual(client.invites, [])
         self.assertEqual(self._expiry_rows(), before)
 
-    def test_pending_invite_is_refused(self):
+    def test_pending_invite_is_resent_without_shortening(self):
+        """待接受的邀请直接重发；详细用例见 test_final_fix_g3_invite。"""
         self._insert_expiry(self.future)
         before = self._expiry_rows()
 
@@ -187,9 +188,8 @@ class AdminReinviteGuardTest(_TempDb, unittest.TestCase):
             {"members": [], "pending_invites": [{"email": "member@EXAMPLE.com"}]},
         )
 
-        self.assertEqual(getattr(exc, "status_code", None), 409)
-        self.assertIn("待接受的邀请", exc.detail)
-        self.assertEqual(client.invites, [])
+        self.assertIsNone(exc)
+        self.assertEqual(client.invites, [(EMAIL, "default")])
         self.assertEqual(self._expiry_rows(), before)
         self.assertEqual(self._reconciliation_rows(), [])
 

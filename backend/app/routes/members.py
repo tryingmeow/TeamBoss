@@ -130,45 +130,46 @@ async def _refresh_members_after_mutation(
         return None
 
 
-def _snapshot_email_kind(snapshot: dict | None, email: str) -> str | None:
-    """邮箱在快照里的身份：``"member"`` / ``"invite"``（待接受邀请）/ None。"""
+def _snapshot_email_entry(snapshot: dict | None, email: str) -> tuple[str | None, dict | None]:
+    """邮箱在快照里的身份与对应条目：``("member", m)`` / ``("invite", inv)``（待接受邀请）/ ``(None, None)``。"""
     if not snapshot:
-        return None
+        return None, None
     email_lower = (email or "").strip().lower()
     for member in snapshot.get("members", []):
         if (member.get("email") or "").strip().lower() == email_lower:
-            return "member"
+            return "member", member
     for invite in snapshot.get("pending_invites", []):
         if (invite.get("email") or "").strip().lower() == email_lower:
-            return "invite"
-    return None
+            return "invite", invite
+    return None, None
 
 
 def _snapshot_contains_email(snapshot: dict | None, email: str) -> bool:
-    return _snapshot_email_kind(snapshot, email) is not None
+    return _snapshot_email_entry(snapshot, email)[0] is not None
 
 
 _INVITE_EXISTING_MEMBER_DETAIL = (
     "该邮箱已是此 Team 的成员，未重复邀请。"
     "如需调整有效期，请在成员列表中使用「续期」或「设置到期」。"
 )
-_INVITE_EXISTING_PENDING_DETAIL = (
-    "该邮箱在此 Team 已有待接受的邀请，未重复邀请。"
-    "如需调整有效期，请在对方加入后使用「续期」或「设置到期」；如需重发邀请，请先撤销原邀请。"
-)
 _INVITE_LOOKUP_FAILED_DETAIL = "无法确认该邮箱是否已在此 Team（成员列表拉取失败），未发送邀请，请稍后重试"
+_INVITE_MEMBER_BUSY_DETAIL = "该邮箱的成员状态正在变更（续期、到期处理或巡逻进行中），未发送邀请，请稍后重试"
 
 
-async def _ensure_email_not_in_team(team_id: str, client, email: str) -> None:
-    """邀请前确认这个邮箱此刻既不是该 Team 的成员，也没有待接受的邀请。
+async def _pending_invite_or_refuse_member(team_id: str, client, email: str) -> dict | None:
+    """邀请前现拉一次该 Team 的成员 + 待接受邀请，决定这次是新邀请还是重发。
 
-    邀请是"基于不存在"的写操作：对已在 Team 的人再发一次，OpenAI 侧只是重发一封
-    邮件，本地却会拿这次填的有效期去碰他已有的到期记录（已付时长、永久授权）。
-    调整时间是续期 / 设置到期的事，这里直接拒绝。
+    * 已是正式成员 → 409。对他再发邀请，OpenAI 侧只是重发一封邮件，调整时间是
+      续期 / 设置到期的事。拒绝发生在任何上游写操作之前，本地记录原样不动。
+    * 已有待接受的邀请 → 返回那条邀请，调用方按"重发"处理：上游 ``resend_emails``
+      重发邮件；本地到期经 ``record_confirmed_invite`` 合并，只延长、不缩短、不把
+      永久变成有限。不能让管理员"先撤销再邀请"：撤销会把本地记录标成 kicked，
+      已付时长 / 永久授权随之丢失，重新邀请只剩这次填的有效期。
+    * 不在 → 返回 None，按新邀请处理。
 
-    必须在 team_invite_lock 内现拉：缓存可能是几分钟前的，"缓存里没有"不能当作
-    "不在"的证据。拉不到（网络失败、残缺名单）就是未知状态，失败关闭、不发邀请。
-    这一步发生在任何上游写操作之前，拒绝时本地成员记录原样不动。
+    必须在 team_invite_lock 和该邮箱的成员操作占用之内现拉：缓存可能是几分钟前的，
+    "缓存里没有"不能当作"不在"的证据。拉不到（网络失败、残缺名单）就是未知状态，
+    失败关闭、不发邀请。
     """
     try:
         snapshot = await fetch_and_cache_members(team_id, client)
@@ -181,12 +182,15 @@ async def _ensure_email_not_in_team(team_id: str, client, email: str) -> None:
         )
         raise HTTPException(status_code=502, detail=_INVITE_LOOKUP_FAILED_DETAIL) from exc
 
-    kind = _snapshot_email_kind(snapshot, email)
-    if kind is None:
-        return
-    detail = _INVITE_EXISTING_MEMBER_DETAIL if kind == "member" else _INVITE_EXISTING_PENDING_DETAIL
-    await log_operation(team_id, "invite_member", email, f"existing={kind}", "skipped", detail)
-    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+    kind, entry = _snapshot_email_entry(snapshot, email)
+    if kind == "member":
+        await log_operation(
+            team_id, "invite_member", email, "existing=member", "skipped", _INVITE_EXISTING_MEMBER_DETAIL
+        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_INVITE_EXISTING_MEMBER_DETAIL)
+    if kind == "invite":
+        return entry
+    return None
 
 
 async def _ensure_default_seat_available(
@@ -259,86 +263,116 @@ async def invite_member(team_id: str, req: InviteMemberRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     async with team_invite_lock(team_id):
-        client = await get_team_client(team_id)
-        # 已在 Team（成员或待接受邀请）就拒绝，拉不到名单就失败关闭，见函数注释。
-        await _ensure_email_not_in_team(team_id, client, req.email)
-        if (req.seat_type or "default") == "default":
-            await _ensure_default_seat_available(
-                client,
-                team_id,
-                email=req.email,
-                allow_overage=req.allow_overage,
-            )
-
-        result = await run_chatgpt_call(client.invite_member, req.email, req.seat_type)
-
-        mutation_status = result.get("_mutation_status") if isinstance(result, dict) else None
-        if mutation_status == "uncertain":
-            try:
-                snapshot = await fetch_and_cache_members(team_id, client)
-            except Exception:
-                snapshot = None
-            if _snapshot_contains_email(snapshot, req.email):
-                result = {"_mutation_status": "confirmed"}
-            else:
-                error = _chatgpt_error(result) or "OpenAI invite result is uncertain"
-                await record_uncertain_invite(
-                    team_id,
-                    "",
-                    req.email,
-                    expires_at,
-                    source="system",
-                    reason=error,
-                )
+        # 重发时这个邮箱已在 Team 里（待接受），续期、到期撤邀请、巡逻都可能正对同一
+        # 个人动手：与它们共用同一份成员操作占用，拿到之后再现拉名单。
+        async with member_operation_claim(
+            team_id,
+            email=req.email,
+            operation="admin_invite",
+        ) as acquired:
+            if not acquired:
                 await log_operation(
                     team_id,
                     "invite_member",
                     req.email,
-                    None,
-                    "uncertain",
-                    error,
+                    "member operation in progress",
+                    "skipped",
+                    _INVITE_MEMBER_BUSY_DETAIL,
                 )
                 raise HTTPException(
-                    status_code=409,
-                    detail="邀请结果确认中，请先刷新成员列表，勿重复提交",
+                    status_code=status.HTTP_409_CONFLICT, detail=_INVITE_MEMBER_BUSY_DETAIL
                 )
+            return await _invite_member_claimed(team_id, req, expires_in, expires_at)
 
-        error = _chatgpt_error(result)
-        if error:
-            await log_operation(team_id, "invite_member", req.email, None, "failed", error)
-            await notify_member_event(
-                "后台拉人", team_id, email=req.email, result="failed", source="admin", detail=error
-            )
-            raise HTTPException(status_code=502, detail=error)
 
-        invited_users = result.get("invited", result.get("items", [])) if isinstance(result, dict) else []
-        user_id = ""
-        if isinstance(invited_users, list) and invited_users:
-            user_id = invited_users[0].get("id") or invited_users[0].get("user_id") or ""
-
-        # OpenAI 邀请已在上面成功，本地记录必须最终落地，见 record_confirmed_invite 注释。
-        await record_confirmed_invite(team_id, user_id, req.email, expires_at)
-
-        await log_operation(
-            team_id,
-            "invite_member",
-            req.email,
-            f"seat_type={req.seat_type}, expires_in={expires_in}, allow_overage={req.allow_overage}",
-            "success",
-        )
-        snapshot = await _refresh_members_after_mutation(team_id, "invite", email=req.email)
-        if (req.seat_type or "default") == "default" and not _snapshot_contains_email(snapshot, req.email):
-            await reserve_default_seat(team_id, req.email)
-
-        await notify_member_event(
-            "后台拉人",
+async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires_in: str, expires_at):
+    """``invite_member`` 在 team_invite_lock 与成员操作占用之内的部分。"""
+    client = await get_team_client(team_id)
+    # 正式成员 409、待接受邀请按重发处理、拉不到名单失败关闭，见函数注释。
+    pending_invite = await _pending_invite_or_refuse_member(team_id, client, req.email)
+    resend = pending_invite is not None
+    seat_type = req.seat_type or "default"
+    # 同类席位的待接受邀请已经计入 pending_default、占着那个席位，重发不新增席位，
+    # 不该再让管理员确认超额。席位类型不同时上游怎么处理不确定，照常检查。
+    same_seat_resend = resend and (pending_invite.get("seat_type") or "default") == seat_type
+    if seat_type == "default" and not same_seat_resend:
+        await _ensure_default_seat_available(
+            client,
             team_id,
             email=req.email,
-            source="admin",
-            detail=f"seat_type={req.seat_type}, expires_in={expires_in}",
+            allow_overage=req.allow_overage,
         )
 
-        return {"status": "ok", "result": result}
+    result = await run_chatgpt_call(client.invite_member, req.email, req.seat_type)
+
+    mutation_status = result.get("_mutation_status") if isinstance(result, dict) else None
+    if mutation_status == "uncertain":
+        try:
+            snapshot = await fetch_and_cache_members(team_id, client)
+        except Exception:
+            snapshot = None
+        if _snapshot_contains_email(snapshot, req.email):
+            result = {"_mutation_status": "confirmed"}
+        else:
+            error = _chatgpt_error(result) or "OpenAI invite result is uncertain"
+            await record_uncertain_invite(
+                team_id,
+                "",
+                req.email,
+                expires_at,
+                source="system",
+                reason=error,
+            )
+            await log_operation(
+                team_id,
+                "invite_member",
+                req.email,
+                None,
+                "uncertain",
+                error,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="邀请结果确认中，请先刷新成员列表，勿重复提交",
+            )
+
+    error = _chatgpt_error(result)
+    if error:
+        await log_operation(team_id, "invite_member", req.email, None, "failed", error)
+        await notify_member_event(
+            "后台拉人", team_id, email=req.email, result="failed", source="admin", detail=error
+        )
+        raise HTTPException(status_code=502, detail=error)
+
+    invited_users = result.get("invited", result.get("items", [])) if isinstance(result, dict) else []
+    user_id = ""
+    if isinstance(invited_users, list) and invited_users:
+        user_id = invited_users[0].get("id") or invited_users[0].get("user_id") or ""
+
+    # OpenAI 邀请已在上面成功，本地记录必须最终落地，见 record_confirmed_invite 注释。
+    await record_confirmed_invite(team_id, user_id, req.email, expires_at)
+
+    await log_operation(
+        team_id,
+        "invite_member",
+        req.email,
+        f"seat_type={req.seat_type}, expires_in={expires_in}, allow_overage={req.allow_overage}, "
+        f"resend={resend}",
+        "success",
+    )
+    snapshot = await _refresh_members_after_mutation(team_id, "invite", email=req.email)
+    if (req.seat_type or "default") == "default" and not _snapshot_contains_email(snapshot, req.email):
+        await reserve_default_seat(team_id, req.email)
+
+    await notify_member_event(
+        "后台拉人",
+        team_id,
+        email=req.email,
+        source="admin",
+        detail=f"{'重发待接受的邀请, ' if resend else ''}seat_type={req.seat_type}, expires_in={expires_in}",
+    )
+
+    return {"status": "ok", "result": result, "resent": resend}
 
 
 @router.delete("/members/{user_id}")

@@ -600,8 +600,9 @@ async def record_confirmed_invite(
     regardless of whether local bookkeeping fully succeeded.
 
     邀请绝不缩短、替换已有到期（语义见 ``_merge_confirmed_invite_expiry``）：
-    调用方虽已确认邮箱不在 Team，本地仍可能留着一条 kicked=0 的旧记录（邀请在
-    OpenAI 侧过期/被撤、成员自己退出而本地没跟上），那条记录里可能是已付时长或
+    管理员可以对待接受的邀请重发，那条邀请的本地记录里是已付时长或永久授权；
+    即使调用方已确认邮箱不在 Team，本地也可能留着一条 kicked=0 的旧记录（邀请在
+    OpenAI 侧过期/被撤、成员自己退出而同步还没跟上），同样可能是已付时长或
     永久授权。兜底行 ``kind='backfill'`` 由调度器按同一套规则结清（max、保持永久），
     两条路径结果一致。返回值是落库后的实际到期时间。
     """
