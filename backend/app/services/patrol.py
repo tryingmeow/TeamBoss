@@ -7,7 +7,8 @@
     1. Team is_codex_enabled == 0（codex 开的 Team 完全跳过踢人，只算风险）
     2. Team id 不在 settings.patrol_exempt_team_ids（豁免名单）里
     3. member_cache 有数据且非空（冷启动/缓存缺失一律跳过整队，绝不动手）
-    4. active_chatgpt > seats_entitled（over_by > 0，否则最多是 watch，不踢）
+    4. active_chatgpt > seats_entitled（over_by > 0，否则最多是 watch，不踢；
+       seats_entitled 不是正整数 = 席位数未知，该 Team 本轮不做超员踢人）
     5. member.seat_type == 'default' 且 member.is_owner is False
     6. member.source == 'detected'（唯一硬规则；'system'/'self_service'/None 永不踢，
        每个 Team 第一次建立巡逻基线时会把当时的现有成员全部保护起来，之后重建基线
@@ -500,8 +501,9 @@ def strict_kick_batch_guard_exceeded(candidate_count: int, team_size: int) -> bo
 
 
 # 非严格模式的绝对保险丝：无论 over_by 算成多少，单轮最多踢这么多人。
-# over_by 一旦因上游数据异常被抬高（历史上 seats_entitled 被写 NULL 就会这样），
-# 这道闸挡住"一趟踢光整队"；超出的下一轮再处理。想更激进/更保守改这一个数即可。
+# over_by 一旦因上游数据异常被抬高，这道闸挡住"一趟踢光整队"；超出的下一轮再处理。
+# （seats_entitled 为 NULL/0 这类未知值已在 run_patrol 里整段跳过，不会走到这里。）
+# 想更激进/更保守改这一个数即可。
 NON_STRICT_KICK_ABS_CAP = 10
 
 
@@ -532,17 +534,31 @@ def _already_flagged_strict_sync(conn: sqlite3.Connection, team_id: str, email: 
     return row is not None
 
 
+def valid_seats_entitled(value: Any) -> Optional[int]:
+    """seats_entitled 只有是正整数才可信，否则返回 None（未知）。
+
+    超员判定是 over_by = active_chatgpt - seats_entitled。把 NULL/0/负数/脏数据当成 0
+    会让每个 default 席位都"超员"，巡逻就把所有 detected 成员都当成候选——未知的
+    席位数绝不能当成"0 个席位"，只能当成"判断不了"。
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
+
+
 def classify_team(*, team_id: str, name: str, codex_enabled: bool,
-                   seats_entitled: int, members: Any) -> dict:
+                   seats_entitled: Any, members: Any) -> dict:
     """纯函数：给定 Team + 成员快照，算出风险等级和"会被踢的候选"，不做任何写操作。
 
     risk：codex 开 = 'ok'（不管超没超）；codex 关且未超 = 'watch'；codex 关且超 = 'over'。
     detected_over 只在 risk == 'over' 时给出（即真正会被 run_patrol 选中踢除的候选）。
+    seats_entitled 不是正整数时无法判断是否超员：over_by 记 0、不给任何候选，
+    codex 关时 risk 记 'watch'，并以 entitlement_valid=False 标出。
     """
     usage = member_seat_usage_from_members(members if isinstance(members, list) else [])
     active_chatgpt = usage.active_chatgpt if usage is not None else 0
-    entitled = seats_entitled or 0
-    over_by = max(0, active_chatgpt - entitled)
+    entitled = valid_seats_entitled(seats_entitled)
+    over_by = max(0, active_chatgpt - entitled) if entitled is not None else 0
 
     if codex_enabled:
         risk = "ok"
@@ -568,7 +584,8 @@ def classify_team(*, team_id: str, name: str, codex_enabled: bool,
         "team_id": team_id,
         "name": name,
         "codex_enabled": codex_enabled,
-        "seats_entitled": entitled,
+        "seats_entitled": entitled or 0,
+        "entitlement_valid": entitled is not None,
         "active_chatgpt": active_chatgpt,
         "over_by": over_by,
         "risk": risk,
@@ -692,11 +709,17 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
         _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
         return False, reason
 
+    # 席位数未知时"是否超员"无从判断，绝不能按 0 个席位算成全员超员。
+    if valid_seats_entitled(team["seats_entitled"]) is None:
+        reason = "rejected: seats_entitled is not a positive integer"
+        _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
+        return False, reason
+
     status = classify_team(
         team_id=team_id,
         name=team_id,
         codex_enabled=False,
-        seats_entitled=team["seats_entitled"] or 0,
+        seats_entitled=team["seats_entitled"],
         members=cached_members,
     )
     if status["risk"] != "over" or status["over_by"] <= 0:
@@ -1223,7 +1246,8 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
             team_id = team["id"]
             name = team["name"] or team_id
             codex_enabled = bool(team["is_codex_enabled"])
-            seats_entitled = team["seats_entitled"] or 0
+            # 未知（NULL/0/负数/非整数）时为 None，超员踢人整段跳过，见下方超员小节。
+            seats_entitled = valid_seats_entitled(team["seats_entitled"])
 
             # 不在本轮白名单里的 team（同步失败、已挂起、或调用方压根没刷新过它）：
             # 完全不碰，不初始化、不判断、不通知。
@@ -1503,6 +1527,21 @@ def run_patrol(dry_run: bool, allow_team_ids: Iterable[str]) -> dict:
                                         if failed_strict_emails:
                                             rows.append("⚠️ 处理失败：" + "、".join(failed_strict_emails))
                                         notify_admins_sync(detail_card(f"🔴 严格模式已处理疑似陌生成员 · {name}", rows))
+
+            # ── 超员踢人：唯一依赖 seats_entitled 的一段 ──────────────────────
+            # 席位数未知时 over_by 无从计算；按 0 算会把所有 detected 成员都当成超员候选。
+            # 本轮跳过该 Team 的超员处理（真踢和空跑都不出候选），只记一条日志；上面的
+            # 撤陌生邀请和严格模式不看席位数，照常执行。Codex 开的 Team 本来就不做超员踢人。
+            if seats_entitled is None and not codex_enabled:
+                _log_operation_sync(
+                    team_id, "patrol_skip_invalid_entitlement", None,
+                    f"seats_entitled={repr(team['seats_entitled'])[:64]}", "skipped",
+                )
+                events.append({
+                    "team_id": team_id, "team_name": name,
+                    "action": "skip_invalid_entitlement",
+                })
+                continue
 
             status = classify_team(
                 team_id=team_id, name=name, codex_enabled=codex_enabled,

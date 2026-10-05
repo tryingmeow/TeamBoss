@@ -109,7 +109,9 @@ async def get_patrol_status(refresh: bool = Query(False)):
                 team_id=team_id,
                 name=team["name"] or team_id,
                 codex_enabled=bool(team["is_codex_enabled"]),
-                seats_entitled=team["seats_entitled"] or 0,
+                # 原样交给 classify_team：席位数未知时它不出任何踢人预览
+                # （entitlement_valid=False），不能在这里先 `or 0` 把未知变成 0。
+                seats_entitled=team["seats_entitled"],
                 members=members,
             )
         )

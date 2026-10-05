@@ -397,5 +397,143 @@ class PatrolGrandfatherOnceTest(_Base):
         )
 
 
+INVALID_ENTITLEMENTS = (None, 0, -3, "abc", 2.5)
+
+
+class PatrolInvalidEntitlementTest(_Base):
+    """seats_entitled 不是正整数时，超员判定无从谈起：不踢、不预演，只记日志。"""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        calls = self.calls
+
+        class RecordingClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def remove_member(self, user_id):
+                calls.append(("remove_member", user_id))
+                return {"status": "ok"}
+
+            def revoke_invite(self, email):
+                calls.append(("revoke_invite", email))
+                return {"status": "ok"}
+
+        p = patch.object(patrol, "ChatGPTClient", new=RecordingClient)
+        p.start()
+        self.addCleanup(p.stop)
+        self.client_cls = RecordingClient
+
+        conn = self._conn()
+        _set_setting(conn, "patrol_kick_enabled", "1")
+        _set_setting(conn, "patrol_baseline_at", "2026-07-01T00:00:00+00:00")
+        conn.close()
+
+    def _armed_team(self, team_id, seats_entitled, *, members=None, pending=()):
+        """一个已武装、已建基线的 Team：默认有两个检测到的外部成员。"""
+        conn = self._conn()
+        _insert_team(conn, team_id, seats_entitled=seats_entitled)
+        if members is None:
+            members = [
+                _owner(),
+                _member(f"a@{team_id}", f"ua-{team_id}", first_seen_at="2026-07-10T00:00:00Z"),
+                _member(f"b@{team_id}", f"ub-{team_id}", first_seen_at="2026-07-11T00:00:00Z"),
+            ]
+        _set_cache(conn, team_id, members, pending)
+        for item in list(members) + list(pending):
+            if item.get("source") == "detected" and not item.get("is_owner"):
+                _insert_expiry(conn, team_id, item["id"] if item["status"] == "active" else "",
+                               item["email"], "detected")
+        conn.execute(
+            "INSERT INTO patrol_team_baselines (team_id, baseline_at) VALUES (?, ?)",
+            (team_id, "2026-07-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "UPDATE teams SET patrol_grandfathered_at = ? WHERE id = ?",
+            ("2026-07-01T00:00:00+00:00", team_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_invalid_entitlement_skips_over_quota_kicks_live_and_dry_run(self):
+        for index, value in enumerate(INVALID_ENTITLEMENTS):
+            team_id = f"team-invalid-{index}"
+            with self.subTest(seats_entitled=value):
+                self._armed_team(team_id, value)
+
+                live = patrol.run_patrol(dry_run=False, allow_team_ids=[team_id])
+                dry = patrol.run_patrol(dry_run=True, allow_team_ids=[team_id])
+
+                self.assertEqual(self.calls, [])
+                for result in (live, dry):
+                    self.assertEqual(result["kicked"], 0)
+                    self.assertEqual(result["would_kick"], 0)
+                    self.assertFalse([
+                        e for e in result["events"]
+                        if e.get("action") in ("kick", "would_kick", "exempt_skip")
+                    ])
+                skip_logs = [
+                    log for log in self._logs("patrol_skip_invalid_entitlement")
+                    if log["team_id"] == team_id
+                ]
+                self.assertEqual(len(skip_logs), 2)
+                self.assertEqual(self._logs("patrol_job_error"), [])
+                self.assertEqual(
+                    set(self._sources(team_id).values()), {"detected"}
+                )
+
+    def test_valid_entitlement_still_kicks_newest_over_quota_member(self):
+        self._armed_team("team-valid", 1)
+
+        result = patrol.run_patrol(dry_run=False, allow_team_ids=["team-valid"])
+
+        self.assertEqual(result["kicked"], 1)
+        self.assertEqual(self.calls, [("remove_member", "ub-team-valid")])
+        self.assertEqual(self._logs("patrol_skip_invalid_entitlement"), [])
+
+    def test_central_kick_gate_rejects_invalid_entitlement(self):
+        for index, value in enumerate(INVALID_ENTITLEMENTS):
+            team_id = f"team-gate-{index}"
+            with self.subTest(seats_entitled=value):
+                self._armed_team(team_id, value)
+                candidate = _member(f"b@{team_id}", f"ub-{team_id}")
+                conn = self._conn()
+                ok, reason = patrol._patrol_kick(conn, self.client_cls(), team_id, candidate)
+                conn.close()
+
+                self.assertFalse(ok)
+                self.assertIn("seats_entitled", reason)
+                self.assertEqual(self.calls, [])
+
+    def test_status_preview_lists_no_kick_candidates_for_invalid_entitlement(self):
+        self._armed_team("team-null", None)
+        self._armed_team("team-valid", 1)
+
+        status = asyncio.run(patrol_routes.get_patrol_status(refresh=False))
+
+        teams = {team["team_id"]: team for team in status["teams"]}
+        self.assertEqual(teams["team-null"]["over_by"], 0)
+        self.assertEqual(teams["team-null"]["detected_over"], [])
+        self.assertEqual(teams["team-null"]["risk"], "watch")
+        self.assertFalse(teams["team-null"]["entitlement_valid"])
+        self.assertEqual(teams["team-valid"]["risk"], "over")
+        self.assertEqual(teams["team-valid"]["over_by"], 1)
+        self.assertTrue(teams["team-valid"]["entitlement_valid"])
+
+    def test_invalid_entitlement_still_revokes_stranger_invites(self):
+        self._armed_team(
+            "team-null-invite",
+            None,
+            members=[_owner()],
+            pending=[_pending("stray@x.com")],
+        )
+
+        result = patrol.run_patrol(dry_run=False, allow_team_ids=["team-null-invite"])
+
+        self.assertEqual(result["invites_revoked"], 1)
+        self.assertEqual(self.calls, [("revoke_invite", "stray@x.com")])
+
+
 if __name__ == "__main__":
     unittest.main()

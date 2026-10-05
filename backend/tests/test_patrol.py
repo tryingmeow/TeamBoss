@@ -255,9 +255,10 @@ class PatrolTest(unittest.TestCase):
 
     def test_run_patrol_forced_dry_run_when_kick_disabled_in_settings(self):
         conn = self._conn()
-        _insert_team(conn, "team-kick-off", seats_entitled=0)
+        _insert_team(conn, "team-kick-off", seats_entitled=1)
         _insert_member_cache(conn, "team-kick-off", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid@x.com", "u-paid", source="system"),
             _member("candidate@x.com", "u-det", source="detected", first_seen_at="2026-07-10T00:00:00Z"),
         ])
         _set_setting(conn, "patrol_kick_enabled", "0")  # 关键：踢人总开关是关的
@@ -284,9 +285,10 @@ class PatrolTest(unittest.TestCase):
 
     def test_run_patrol_never_touches_exempt_team(self):
         conn = self._conn()
-        _insert_team(conn, "team-exempt", seats_entitled=0)
+        _insert_team(conn, "team-exempt", seats_entitled=1)
         _insert_member_cache(conn, "team-exempt", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid@x.com", "u-paid", source="system"),
             _member("candidate@x.com", "u-det", source="detected", first_seen_at="2026-07-10T00:00:00Z"),
         ])
         _set_setting(conn, "patrol_kick_enabled", "1")
@@ -470,9 +472,10 @@ class PatrolTest(unittest.TestCase):
 
     def test_run_patrol_live_kick_marks_member_expiry_kicked(self):
         conn = self._conn()
-        _insert_team(conn, "team-live", seats_entitled=0)
+        _insert_team(conn, "team-live", seats_entitled=1)
         _insert_member_cache(conn, "team-live", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid@x.com", "u-paid", source="system"),
             _member("candidate@x.com", "u-det", source="detected", first_seen_at="2026-07-10T00:00:00Z"),
         ])
         conn.execute(
@@ -516,9 +519,12 @@ class PatrolTest(unittest.TestCase):
     def test_central_kick_gate_rejects_persisted_system_even_if_cache_says_detected(self):
         """保护基线更新 DB 后即使缓存尚未刷新，system 成员也绝不能被踢。"""
         conn = self._conn()
-        _insert_team(conn, "team-system-gate", seats_entitled=0)
+        _insert_team(conn, "team-system-gate", seats_entitled=1)
         candidate = _member("protected@x.com", "u-system", source="detected")
-        _insert_member_cache(conn, "team-system-gate", [candidate])
+        _insert_member_cache(conn, "team-system-gate", [
+            _member("paid@x.com", "u-paid", source="system"),
+            candidate,
+        ])
         conn.execute(
             """INSERT INTO member_expiry (team_id, user_id, email, kicked, source, created_at)
                VALUES ('team-system-gate', 'u-system', 'protected@x.com', 0, 'system', '2026-07-10')"""
@@ -843,9 +849,10 @@ class PatrolInviteRevokeTest(_PatrolNewFeaturesTestBase):
             source="detected",
             first_seen_at="2020-01-01T00:00:00Z",
         )
-        _insert_team(conn, "team-pending-member", seats_entitled=0)
+        _insert_team(conn, "team-pending-member", seats_entitled=1)
         _insert_member_cache(conn, "team-pending-member", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid@x.com", "u-paid", source="system"),
             normal_member,
         ])
         _insert_expiry_row(
@@ -1124,9 +1131,10 @@ class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
 
     def test_run_patrol_allow_list_isolates_unrefreshed_team_only(self):
         conn = self._conn()
-        _insert_team(conn, "team-healthy", seats_entitled=0)
+        _insert_team(conn, "team-healthy", seats_entitled=1)
         _insert_member_cache(conn, "team-healthy", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid@x.com", "u-paid", source="system"),
             _member("candidate@x.com", "u-healthy", source="detected",
                      first_seen_at="2026-07-10T00:00:00Z"),
         ])
@@ -1134,9 +1142,10 @@ class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
                             source="detected", first_seen_at="2026-07-10T00:00:00Z")
         _insert_team_baseline(conn, "team-healthy")
 
-        _insert_team(conn, "team-failed", seats_entitled=0)
+        _insert_team(conn, "team-failed", seats_entitled=1)
         _insert_member_cache(conn, "team-failed", [
             _member("owner2@x.com", "u-owner2", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid2@x.com", "u-paid2", source="system"),
             _member("candidate2@x.com", "u-failed", source="detected",
                      first_seen_at="2026-07-10T00:00:00Z"),
         ])
@@ -1192,9 +1201,10 @@ class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
         人。白名单的空集合意味着什么都不做。
         """
         conn = self._conn()
-        _insert_team(conn, "team-a", seats_entitled=0)
+        _insert_team(conn, "team-a", seats_entitled=1)
         _insert_member_cache(conn, "team-a", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            _member("paid@x.com", "u-paid", source="system"),
             _member("candidate@x.com", "u-a", source="detected",
                      first_seen_at="2026-07-10T00:00:00Z"),
         ])
