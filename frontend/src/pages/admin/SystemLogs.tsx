@@ -54,7 +54,8 @@ function teamDisplayName(log: OperationLog): string {
   if (log.team_name && log.team_remark) return `${log.team_name}（${log.team_remark}）`;
   if (log.team_name) return log.team_name;
   if (log.team_id) return `Team ${shortTeamId(log.team_id)}`;
-  return '全局任务';
+  // Not tied to a Team: settings, logins, member remarks (kept per email across Teams), …
+  return '全局';
 }
 
 export default function SystemLogs({ embedded = false, scope, search: externalSearch }: SystemLogsProps = {}) {
@@ -164,7 +165,11 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
 
   const teamCell = (log: OperationLog) => (
     <>
-      <div className="truncate font-medium text-gray-800 dark:text-gray-100" title={teamDisplayName(log)}>{teamDisplayName(log)}</div>
+      {log.team_id ? (
+        <div className="truncate font-medium text-gray-800 dark:text-gray-100" title={teamDisplayName(log)}>{teamDisplayName(log)}</div>
+      ) : (
+        <div className="truncate text-gray-400 dark:text-ink-500" title="不属于某个 Team">{teamDisplayName(log)}</div>
+      )}
       {(log.team_owner_email || (log.team_status && log.team_status !== 'active')) && (
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-gray-400 dark:text-ink-500">
           {log.team_owner_email && <span className="truncate" title={log.team_owner_email}>{log.team_owner_email}</span>}
