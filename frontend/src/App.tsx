@@ -1,45 +1,47 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
-import JoinPage from './components/JoinPage';
-import AdminGate from './components/AdminGate';
-import TermsGate from './components/TermsGate';
-import ErrorBoundary from './components/ErrorBoundary';
-import Layout from './components/Layout';
-import TeamManagement from './pages/admin/TeamManagement';
-import UserManagement from './pages/admin/UserManagement';
-import AccessTokens from './pages/admin/AccessTokens';
-import TgPatrol from './pages/admin/TgPatrol';
-import SystemLogs from './pages/admin/SystemLogs';
-import Finance from './pages/admin/Finance';
+import { lazy, Suspense } from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import PageLoading from './components/PageLoading';
+import {
+  loadAccessTokens,
+  loadFinance,
+  loadSystemLogs,
+  loadTeamManagement,
+  loadTgPatrol,
+  loadUserManagement,
+} from './adminPages';
+
+// Every route is its own chunk: the public self-service page never downloads admin code,
+// and the admin login screen does not download the console behind it.
+const JoinPage = lazy(() => import('./components/JoinPage'));
+const AdminRoot = lazy(() => import('./components/AdminRoot'));
+const TeamManagement = lazy(loadTeamManagement);
+const UserManagement = lazy(loadUserManagement);
+const AccessTokens = lazy(loadAccessTokens);
+const TgPatrol = lazy(loadTgPatrol);
+const SystemLogs = lazy(loadSystemLogs);
+const Finance = lazy(loadFinance);
 
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        {/* User Route */}
-        <Route path="/" element={<JoinPage />} />
-        
-        {/* Admin Routes */}
-        {/* TermsGate 包在 AdminGate 外面：条款要在输密码之前看到，而不是登进去才弹 */}
-        <Route path="/admin" element={
-          <TermsGate>
-            <AdminGate>
-              <ErrorBoundary>
-                <Layout />
-              </ErrorBoundary>
-            </AdminGate>
-          </TermsGate>
-        }>
-          {/* Sub routes inside Layout */}
-          <Route index element={<Navigate to="/admin/dashboard" replace />} />
-          <Route path="teams" element={<TeamManagement />} />
-          <Route path="users" element={<UserManagement />} />
-          <Route path="access-tokens" element={<AccessTokens />} />
-          <Route path="tg-patrol" element={<TgPatrol />} />
-          <Route path="logs" element={<SystemLogs />} />
-          <Route path="finance" element={<Finance />} />
-          <Route path="dashboard" element={null} />
-        </Route>
-      </Routes>
+      <Suspense fallback={<PageLoading fullScreen />}>
+        <Routes>
+          <Route path="/" element={<JoinPage />} />
+
+          {/* AdminRoot = terms → login → console layout; pages render in its <Outlet />. */}
+          <Route path="/admin" element={<AdminRoot />}>
+            <Route index element={<Navigate to="/admin/dashboard" replace />} />
+            {/* The dashboard is drawn by the layout itself (it shares the team list with the header). */}
+            <Route path="dashboard" element={null} />
+            <Route path="teams" element={<TeamManagement />} />
+            <Route path="users" element={<UserManagement />} />
+            <Route path="access-tokens" element={<AccessTokens />} />
+            <Route path="logs" element={<SystemLogs />} />
+            <Route path="finance" element={<Finance />} />
+            <Route path="tg-patrol" element={<TgPatrol />} />
+          </Route>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }
