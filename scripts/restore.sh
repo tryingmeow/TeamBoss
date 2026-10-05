@@ -115,19 +115,37 @@ if [[ "$BACKUP_FILE" == *.db ]]; then
     # 用 SQLite backup API 生成自包含的临时库：备份文件若是 WAL 模式，直接 cp 过来的
     # 文件头仍声明 WAL，打开时会在旁边生成 -wal/-shm。这里统一转成 DELETE 日志模式，
     # 并做完整性检查；临时库旁边不留任何日志文件。
+    # 备份文件按 mode=ro 打开：它旁边若本来就有 -wal，那是备份内容的一部分，要读进来。
+    # 只读打开 WAL 头的文件（scripts/backup.py 产出的就是）会在旁边新建 -shm 和空 -wal，
+    # 关闭后只删本次新建的，原有的不动。不用 immutable=1：它会无视旁边已有的 -wal，
+    # 静默丢掉其中的提交。SQLite 按解析掉符号链接后的路径建这些文件，所以按真实路径记。
     if ! python3 - "$BACKUP_FILE" "$RESTORE_TEMP" <<'PY'
+import os
 import sqlite3
 import sys
+from urllib.parse import quote
 
-src = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-dst = sqlite3.connect(sys.argv[2])
+source = os.path.realpath(sys.argv[1])
+created = [source + ext for ext in ("-wal", "-shm") if not os.path.lexists(source + ext)]
+result = None
 try:
-    src.backup(dst)
-    dst.execute("PRAGMA journal_mode=DELETE")
-    result = dst.execute("PRAGMA integrity_check").fetchone()
+    src = sqlite3.connect(f"file:{quote(source)}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(sys.argv[2])
+        try:
+            src.backup(dst)
+            dst.execute("PRAGMA journal_mode=DELETE")
+            result = dst.execute("PRAGMA integrity_check").fetchone()
+        finally:
+            dst.close()
+    finally:
+        src.close()
 finally:
-    dst.close()
-    src.close()
+    for path in created:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 if not result or str(result[0]).lower() != "ok":
     raise SystemExit(1)
 PY
@@ -140,27 +158,37 @@ PY
     chmod 600 "$RESTORE_TEMP"
 
     # 备份现有数据库。服务已停但 app.db 旁可能还有未检查点的 -wal，单独 cp app.db
-    # 会丢掉这部分提交；所以用 backup API 读出包含 WAL 的一致快照。
-    # 现有库损坏到无法打开时，退化为把 app.db 与 -wal/-shm 原样一并保存，不阻断恢复。
+    # 会丢掉这部分提交；所以用 backup API 读出包含 WAL 的一致快照，并做完整性检查。
+    # 读不出来或快照不完整时，退化为把 app.db 与 -wal/-shm 原样一并保存，不阻断恢复。
+    # 现有库必须按 mode=ro 打开：读写连接作为最后一个连接关闭时，会把 WAL 检查点进
+    # （可能已损坏的）app.db 再删掉 -wal，退化路径拿到的就不再是原样现场。只读连接
+    # 不写主文件也不删 -wal；它新建的 -shm/空 -wal 在下面替换前会和旧的一起清掉。
     if [ -f "$DB_PATH" ]; then
         if python3 - "$DB_PATH" "$BACKUP_COPY" <<'PY'
 import sqlite3
 import sys
+from urllib.parse import quote
 
-src = sqlite3.connect(sys.argv[1])
-dst = sqlite3.connect(sys.argv[2])
+src = sqlite3.connect(f"file:{quote(sys.argv[1])}?mode=ro", uri=True)
 try:
-    src.backup(dst)
-    dst.execute("PRAGMA journal_mode=DELETE")
+    dst = sqlite3.connect(sys.argv[2])
+    try:
+        src.backup(dst)
+        dst.execute("PRAGMA journal_mode=DELETE")
+        result = dst.execute("PRAGMA integrity_check").fetchone()
+    finally:
+        dst.close()
 finally:
-    dst.close()
     src.close()
+if not result or str(result[0]).lower() != "ok":
+    raise SystemExit(1)
 PY
         then
-            rm -f "${BACKUP_COPY}-wal" "${BACKUP_COPY}-shm"
+            rm -f "${BACKUP_COPY}-wal" "${BACKUP_COPY}-shm" "${BACKUP_COPY}-journal"
         else
-            print_warning "无法用 SQLite 备份接口读取现有数据库，改为原样复制 app.db 及其 -wal/-shm"
-            rm -f "$BACKUP_COPY"
+            print_warning "现有数据库无法完整读取或完整性检查未通过，改为原样复制 app.db 及其 -wal/-shm"
+            # 失败的快照可能在副本旁留下日志文件；不清掉的话会被重放到原样副本上。
+            rm -f "$BACKUP_COPY" "${BACKUP_COPY}-wal" "${BACKUP_COPY}-shm" "${BACKUP_COPY}-journal"
             cp "$DB_PATH" "$BACKUP_COPY"
             for ext in -wal -shm; do
                 if [ -f "${DB_PATH}${ext}" ]; then

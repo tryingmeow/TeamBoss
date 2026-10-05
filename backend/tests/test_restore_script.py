@@ -149,6 +149,125 @@ class RestoreScriptTest(unittest.TestCase):
         finally:
             safety.close()
 
+    def _crash_image(self, path: Path, base_rows, wal_rows, sidecars=("-wal",)) -> int:
+        """在 path 留下一份"写进程崩溃"的现场：wal_rows 只存在于 -wal，之后没有任何连接打开。
+
+        不能直接在 path 上留一个打开的连接：本进程持有的共享锁会让被测脚本的连接在关闭时
+        无法检查点并删除 -wal，正好把要测的问题掩盖掉。所以在别处写，再把文件原样复制过来。
+        另建一张表 u，它的页只在主文件里；返回该页在主文件中的字节偏移。
+        """
+        writer = self.tmp / f"writer-{path.name}" / "w.db"
+        writer.parent.mkdir()
+        conn = self._make_db(writer, base_rows, wal=True)
+        try:
+            conn.execute("CREATE TABLE u (v TEXT)")
+            conn.execute("INSERT INTO u VALUES ('main-file-only')")
+            conn.commit()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.executemany("INSERT INTO t VALUES (?)", [(r,) for r in wal_rows])
+            conn.commit()
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            root = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'u'").fetchone()[0]
+            for ext in ("", *sidecars):
+                shutil.copyfile(f"{writer}{ext}", f"{path}{ext}")
+        finally:
+            conn.close()
+        self.assertGreater(Path(f"{path}-wal").stat().st_size, 0)
+        return (root - 1) * page_size
+
+    def _rows(self, path: Path):
+        conn = sqlite3.connect(path)
+        try:
+            return sorted(r[0] for r in conn.execute("SELECT v FROM t"))
+        finally:
+            conn.close()
+
+    def _safety_copy(self) -> Path:
+        copies = [p for p in self.data_dir.iterdir() if p.name.startswith("app.db.restore-backup-") and not p.name.endswith(("-wal", "-shm"))]
+        self.assertEqual(len(copies), 1)
+        return copies[0]
+
+    def _assert_damaged_live_db_is_copied_raw_with_its_wal(self, offset, garbage: bytes):
+        live = self.data_dir / "app.db"
+        u_page = self._crash_image(live, ["old-base"], ["old-wal-only"])
+        if offset is None:
+            offset = u_page
+        header = bytearray(live.read_bytes())
+        original = bytes(header[offset:offset + len(garbage)])
+        header[offset:offset + len(garbage)] = garbage
+        live.write_bytes(bytes(header))
+        before_db = live.read_bytes()
+        before_wal = Path(f"{live}-wal").read_bytes()
+
+        backup = self.tmp / "app-backup.db"
+        self._make_db(backup, ["restored"]).close()
+        result = self._restore(backup)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("原样复制", result.stdout)
+        self.assertEqual(self._rows(live), ["restored"])
+
+        # 退化路径的副本必须是原现场：主文件没被脚本自己的读取尝试检查点改写，-wal 一并保存。
+        copy = self._safety_copy()
+        copy_wal = Path(f"{copy}-wal")
+        self.assertEqual(copy.read_bytes(), before_db)
+        self.assertEqual(copy_wal.read_bytes(), before_wal)
+        self.assertEqual(copy.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(copy_wal.stat().st_mode & 0o777, 0o600)
+
+        # 修好被破坏的字节后，只在 WAL 里的提交能从副本里读回来。
+        repaired = self.tmp / "repaired.db"
+        data = bytearray(before_db)
+        data[offset:offset + len(garbage)] = original
+        repaired.write_bytes(bytes(data))
+        shutil.copyfile(copy_wal, f"{repaired}-wal")
+        self.assertEqual(self._rows(repaired), ["old-base", "old-wal-only"])
+
+    def test_unreadable_live_db_is_copied_raw_with_its_wal(self):
+        # 文件头魔数被破坏：SQLite 报 "file is not a database"，备份接口直接失败。
+        self._assert_damaged_live_db_is_copied_raw_with_its_wal(0, b"not sqlite at all")
+
+    def test_malformed_live_db_is_copied_raw_with_its_wal(self):
+        # 只在主文件里的 b-tree 页被写坏：备份接口照样"成功"（它只搬页不解析），
+        # 快照是坏的，得靠完整性检查拦下来走原样复制。
+        self._assert_damaged_live_db_is_copied_raw_with_its_wal(None, b"\xff" * 16)
+
+    def test_db_restore_leaves_no_new_sidecars_beside_backup_file(self):
+        self._make_db(self.data_dir / "app.db", ["old"]).close()
+        # scripts/backup.py 用备份接口从 WAL 库导出，文件头仍声明 WAL；只读打开这种文件
+        # 会在旁边建出 -shm 和空 -wal。
+        source = self._make_db(self.tmp / "backup-source.db", ["restored"], wal=True)
+        backup = self.tmp / "app-backup.db"
+        try:
+            dst = sqlite3.connect(backup)
+            try:
+                source.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            source.close()
+        self.assertEqual(backup.read_bytes()[18:20], b"\x02\x02")
+
+        result = self._restore(backup)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self._rows(self.data_dir / "app.db"), ["restored"])
+        self.assertEqual(sorted(p.name for p in self.tmp.iterdir() if p.name.startswith(backup.name)), [backup.name])
+
+    def test_db_restore_keeps_preexisting_sidecars_beside_backup_file(self):
+        self._make_db(self.data_dir / "app.db", ["old"]).close()
+        for sidecars in (("-wal",), ("-wal", "-shm")):
+            with self.subTest(sidecars=sidecars):
+                backup = self.tmp / f"app-backup{len(sidecars)}.db"
+                self._crash_image(backup, ["restored-base"], ["restored-wal-only"], sidecars)
+                before_wal = Path(f"{backup}-wal").read_bytes()
+
+                result = self._restore(backup)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                # 备份旁原有的 -wal 是备份内容的一部分：要被读进恢复结果，且原样留着。
+                self.assertEqual(self._rows(self.data_dir / "app.db"), ["restored-base", "restored-wal-only"])
+                names = sorted(p.name for p in self.tmp.iterdir() if p.name.startswith(backup.name))
+                self.assertEqual(names, sorted(backup.name + ext for ext in ("", *sidecars)))
+                self.assertEqual(Path(f"{backup}-wal").read_bytes(), before_wal)
+
     def test_db_restore_rejects_corrupt_backup_and_leaves_live_db(self):
         live = self.data_dir / "app.db"
         self._make_db(live, ["keep"]).close()
