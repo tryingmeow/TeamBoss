@@ -1,3 +1,5 @@
+from datetime import datetime
+from typing import Optional
 from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, status
@@ -7,13 +9,15 @@ from ..database import log_operation
 from ..member_cache_service import add_member_watch, fetch_and_cache_members, get_cached_members, update_cached_member_expiry
 from ..models import ChangeSeatRequest, ExtendExpiryRequest, InviteMemberRequest, SetExpiryRequest
 from ..services.member_expiry import (
+    APP_LOCAL_TZ,
+    ConfirmedInviteExpiry,
     ExtensionReceiptMismatchError,
     PermanentMembershipError,
     delete_member_expiry,
     extend_member_expiry,
     expires_in_to_datetime,
     mark_member_kicked,
-    record_confirmed_invite,
+    record_confirmed_invite_expiry,
     record_uncertain_invite,
     upsert_member_expiry,
 )
@@ -193,6 +197,31 @@ async def _pending_invite_or_refuse_member(team_id: str, client, email: str) -> 
     return None
 
 
+def _invite_expiry_display(
+    outcome: ConfirmedInviteExpiry, requested: Optional[datetime], expires_in: str
+) -> str:
+    """邀请落库后实际生效的有效期，给管理员看（接口响应、Telegram 卡片）。
+
+    合并规则会保留更晚的已有到期和已授权的永久记录，这时照抄申请的 ``expires_in``
+    就是在告诉管理员一个并不存在的到期时间。
+    """
+    if not outcome.recorded:
+        return f"{expires_in}（本地记录写入失败，已记入待对账，最终到期以对账结果为准）"
+    stored = outcome.expires_at
+    if stored is None:
+        text = "永久"
+    else:
+        parsed = parse_optional_datetime(stored)
+        text = (
+            f"{parsed.astimezone(APP_LOCAL_TZ):%Y-%m-%d %H:%M}（北京时间）" if parsed else stored
+        )
+    requested_iso = requested.isoformat() if requested is not None else None
+    if stored != requested_iso:
+        kept = "原有的永久授权" if stored is None else "原有更晚的到期"
+        text += f"，已保留{kept}，本次填写的 {expires_in} 未生效"
+    return text
+
+
 async def _ensure_default_seat_available(
     client,
     team_id: str,
@@ -350,14 +379,17 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
         user_id = invited_users[0].get("id") or invited_users[0].get("user_id") or ""
 
     # OpenAI 邀请已在上面成功，本地记录必须最终落地，见 record_confirmed_invite 注释。
-    await record_confirmed_invite(team_id, user_id, req.email, expires_at)
+    # 报给管理员的有效期以合并后实际落库的为准，不是这次填写的 expires_in。
+    outcome = await record_confirmed_invite_expiry(team_id, user_id, req.email, expires_at)
+    expiry_display = _invite_expiry_display(outcome, expires_at, expires_in)
 
+    stored_detail = outcome.expires_at if outcome.recorded else "pending_reconciliation"
     await log_operation(
         team_id,
         "invite_member",
         req.email,
         f"seat_type={req.seat_type}, expires_in={expires_in}, allow_overage={req.allow_overage}, "
-        f"resend={resend}",
+        f"resend={resend}, stored_expires_at={stored_detail}",
         "success",
     )
     snapshot = await _refresh_members_after_mutation(team_id, "invite", email=req.email)
@@ -369,10 +401,19 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
         team_id,
         email=req.email,
         source="admin",
-        detail=f"{'重发待接受的邀请, ' if resend else ''}seat_type={req.seat_type}, expires_in={expires_in}",
+        detail=f"{'重发待接受的邀请, ' if resend else ''}seat_type={req.seat_type}, 有效期：{expiry_display}",
     )
 
-    return {"status": "ok", "result": result, "resent": resend}
+    return {
+        "status": "ok",
+        "result": result,
+        "resent": resend,
+        # 合并后实际生效的到期（None = 永久）；expiry_recorded=False 时本地写入失败，
+        # 这里是待对账的申请值。
+        "expires_at": outcome.expires_at,
+        "expiry_recorded": outcome.recorded,
+        "expiry_display": expiry_display,
+    }
 
 
 @router.delete("/members/{user_id}")

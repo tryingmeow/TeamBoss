@@ -4,6 +4,8 @@
    撤销会把本地记录标成 kicked，已付时长 / 永久授权随之丢失。现在对待接受的邀请
    直接重发：上游重发邮件，本地到期按 record_confirmed_invite 的合并规则只延长、
    不缩短、不把永久变有限。已是正式成员的邮箱仍然 409。
+2. 合并后实际落库的到期（例如一条仍未踢出的永久记录被保留）与接口响应、Telegram
+   卡片上写的有效期必须一致，不能照抄这次填写的 30d。
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -189,6 +191,7 @@ class PendingInviteResendTest(_AdminInviteBase):
         self.assertEqual(row["expires_at"], paid)
         self.assertEqual(row["auto_kick"], 1)
         self.assertEqual(row["source"], "self_service")
+        self.assertEqual(response["expires_at"], paid)
         self.assertEqual(self._claims(), [], "成员操作占用必须在请求结束时释放")
 
     def test_pending_invite_resend_keeps_permanent_authorization(self):
@@ -202,6 +205,7 @@ class PendingInviteResendTest(_AdminInviteBase):
         self.assertIsNone(row["expires_at"], "重发邀请不能把永久授权变成 30 天")
         self.assertEqual(row["auto_kick"], 0)
         self.assertEqual(row["source"], "system")
+        self.assertIsNone(response["expires_at"])
 
     def test_pending_invite_resend_never_shortens_any_request(self):
         """不管这次填多短，已存的到期都不会往前挪。"""
@@ -278,6 +282,91 @@ class PendingInviteResendTest(_AdminInviteBase):
         self.assertEqual(self.client.invites, [])
         self.assertEqual(self._rows(), before)
         self.assertEqual([c["owner_token"] for c in self._claims()], ["other-owner"])
+
+
+# ── 2. 响应与 Telegram 卡片报告实际落库的到期 ────────────────────────────────
+
+class InviteReportsStoredExpiryTest(_AdminInviteBase):
+    def _assert_reports_stored(self, response):
+        row = self._active_row()
+        stored = row["expires_at"]
+        self.assertEqual(response["expires_at"], stored)
+        expected = _display_of(stored)
+        self.assertTrue(
+            response["expiry_display"].startswith(expected),
+            (response["expiry_display"], expected),
+        )
+        self.assertIn(f"有效期：{expected}", self._success_card())
+        self.assertIn(f"⏳ 有效期：{expected}", self._telegram_reply(response))
+        return stored
+
+    def test_stale_permanent_row_is_reported_as_permanent(self):
+        """本地仍有一条未踢出的已授权永久记录（人已不在 Team，同步还没跟上）。"""
+        self._insert_expiry(None, source="system")
+
+        response, exc = self._invite(ABSENT, expires_in="30d")
+
+        self.assertIsNone(exc)
+        stored = self._assert_reports_stored(response)
+        self.assertIsNone(stored, "已授权的永久记录不能被一次有限期邀请降级")
+        self.assertTrue(response["expiry_recorded"])
+
+    def test_stale_detected_null_row_takes_the_invite_expiry(self):
+        """detected + NULL 只是外部发现、未授权，不是永久：按这次邀请的到期落库。"""
+        self._insert_expiry(None, source="detected")
+
+        response, exc = self._invite(ABSENT, expires_in="30d")
+
+        self.assertIsNone(exc)
+        stored = self._assert_reports_stored(response)
+        self.assertIsNotNone(stored)
+        self.assertGreater(datetime.fromisoformat(stored), self.now + timedelta(days=29))
+        self.assertNotIn("永久", response["expiry_display"])
+        self.assertEqual(self._active_row()["source"], "system")
+
+    def test_longer_existing_expiry_is_reported(self):
+        paid = (self.now + timedelta(days=300)).isoformat()
+        self._insert_expiry(paid)
+
+        response, exc = self._invite(ABSENT, expires_in="30d")
+
+        self.assertIsNone(exc)
+        self.assertEqual(self._assert_reports_stored(response), paid)
+
+    def test_fresh_invite_reports_the_new_expiry(self):
+        response, exc = self._invite(ABSENT, expires_in="30d")
+
+        self.assertIsNone(exc)
+        stored = self._assert_reports_stored(response)
+        self.assertIsNotNone(stored)
+        self.assertNotIn("未生效", response["expiry_display"])
+
+    def test_permanent_invite_reports_permanent(self):
+        self._insert_expiry((self.now + timedelta(days=5)).isoformat())
+
+        response, exc = self._invite(ABSENT, expires_in="never")
+
+        self.assertIsNone(exc)
+        self.assertIsNone(self._assert_reports_stored(response))
+
+    def test_failed_local_write_is_not_reported_as_stored(self):
+        """本地写入全部失败、只留下兜底对账行时，不能把申请值当成已落库的到期。"""
+        paid = (self.now + timedelta(days=300)).isoformat()
+        self._insert_expiry(paid)
+
+        with (
+            patch.object(member_expiry, "_CONFIRM_WRITE_BACKOFF_SECONDS", 0),
+            patch.object(member_expiry, "_merge_confirmed_invite_expiry",
+                         new=AsyncMock(side_effect=sqlite3.OperationalError("database is locked"))),
+        ):
+            response, exc = self._invite(ABSENT, expires_in="30d")
+
+        self.assertIsNone(exc, "上游邀请已成功，本地记账失败不能把请求变成失败")
+        self.assertFalse(response["expiry_recorded"])
+        self.assertIn("对账", response["expiry_display"])
+        self.assertIn("对账", self._success_card())
+        self.assertIn("对账", self._telegram_reply(response))
+        self.assertEqual(self._active_row()["expires_at"], paid)
 
 
 if __name__ == "__main__":

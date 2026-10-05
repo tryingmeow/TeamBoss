@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
@@ -604,16 +605,59 @@ async def record_confirmed_invite(
     即使调用方已确认邮箱不在 Team，本地也可能留着一条 kicked=0 的旧记录（邀请在
     OpenAI 侧过期/被撤、成员自己退出而同步还没跟上），同样可能是已付时长或
     永久授权。兜底行 ``kind='backfill'`` 由调度器按同一套规则结清（max、保持永久），
-    两条路径结果一致。返回值是落库后的实际到期时间。
+    两条路径结果一致。返回值是落库后的实际到期时间；本地写入全部失败时是兜底行
+    里的申请值，需要区分这两种情况的调用方用 ``record_confirmed_invite_expiry``。
     """
-    return await _persist_confirmed_membership(
-        lambda: _merge_confirmed_invite_expiry(team_id, user_id, email, expires_at, source=source),
+    outcome = await record_confirmed_invite_expiry(
+        team_id, user_id, email, expires_at, source=source
+    )
+    return outcome.expires_at
+
+
+@dataclass(frozen=True)
+class ConfirmedInviteExpiry:
+    """一次已确认邀请落库之后的到期。
+
+    合并规则会保留更晚的已有到期和已授权的永久记录，所以 ``expires_at`` 可能
+    不是这次邀请申请的值；告诉管理员"有效期是多少"必须用它，不能照抄申请值。
+
+    * ``recorded=True``：``expires_at`` 是 member_expiry 里此刻生效的值，None = 永久。
+    * ``recorded=False``：本地写入全部失败，只留下 ``kind='backfill'`` 兜底行；
+      ``expires_at`` 是兜底行里的申请值，最终到期等调度器对账后才确定。
+    """
+
+    expires_at: Optional[str]
+    recorded: bool
+
+
+async def record_confirmed_invite_expiry(
+    team_id: str,
+    user_id: str,
+    email: str,
+    expires_at: Optional[datetime],
+    *,
+    source: str = "system",
+) -> ConfirmedInviteExpiry:
+    """``record_confirmed_invite`` 的同一套写入，额外报告结果是否已经落库。"""
+    recorded = False
+
+    async def _write() -> Optional[str]:
+        nonlocal recorded
+        stored = await _merge_confirmed_invite_expiry(
+            team_id, user_id, email, expires_at, source=source
+        )
+        recorded = True
+        return stored
+
+    stored = await _persist_confirmed_membership(
+        _write,
         team_id,
         user_id,
         email,
         expires_at.isoformat() if expires_at is not None else None,
         source,
     )
+    return ConfirmedInviteExpiry(expires_at=stored, recorded=recorded)
 
 
 async def _merge_confirmed_invite_expiry(
@@ -631,6 +675,8 @@ async def _merge_confirmed_invite_expiry(
     * 没有未踢出的记录 → 按邀请的到期建档。
     * 邀请本身是永久（``expires_at is None``）→ 升级为永久。
     * 现有记录 NULL 且 source != 'detected'（已授权的永久）→ 原样保留，不降级。
+      这个人此刻不在 Team、记录只是同步还没标成 kicked 时也一样（kicked=1 的
+      记录不参与合并，会新建一行）；返回 None，调用方据此报告"永久"。
     * 现有记录 NULL 且 source == 'detected'（外部发现、尚未授权）→ 取邀请的到期，
       source 改成邀请来源。
     * 两边都有到期 → 取较晚者；现有值无法解析时保留现有值，不拿它冒险覆盖。

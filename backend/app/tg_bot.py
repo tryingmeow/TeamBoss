@@ -987,7 +987,7 @@ def _update_watch_tg_info(team_id: str, target_email: str, reason: str,
 
 def _invite_worker(chat_id, msg_id, team_id, email, expires_in, allow_overage, name) -> None:
     try:
-        _api_post(
+        resp = _api_post(
             f"/api/teams/{team_id}/members/invite",
             {
                 "email": email,
@@ -996,9 +996,13 @@ def _invite_worker(chat_id, msg_id, team_id, email, expires_in, allow_overage, n
                 "allow_overage": allow_overage,
             },
         )
+        resp = resp if isinstance(resp, dict) else {}
+        # 有效期以服务端合并后实际落库的为准（可能保留了更晚的到期或永久授权），
+        # 不是这次填写的值。
+        shown_expiry = resp.get("expiry_display") or expires_in
         text = detail_card(
-            "✅ 邀请已发送",
-            (f"👤 成员：{email}", f"🏢 Team：{name}", f"⏳ 有效期：{expires_in}"),
+            "✅ 邀请已重发" if resp.get("resent") else "✅ 邀请已发送",
+            (f"👤 成员：{email}", f"🏢 Team：{name}", f"⏳ 有效期：{shown_expiry}"),
         ) + "\n\n⏳ 正在等待成员接受……"
         if msg_id is not None:
             _update_watch_tg_info(team_id, email, "invite", chat_id, msg_id)
