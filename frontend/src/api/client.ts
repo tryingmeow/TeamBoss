@@ -623,10 +623,11 @@ export interface RedeemTeamChoice {
   team_name: string | null;
   status: 'joined' | 'pending';
   expires_at: string | null;
-  /** false 时点了必然 409（Owner / 永久成员），按钮要禁用。 */
+  /** false 时点了必然 409（这个邮箱在该 Team 不能用兑换码续期），按钮要禁用。 */
   renewable: boolean;
+  /** 恒为 false：公开响应不区分 Owner。 */
   is_owner: boolean;
-  /** dated=有到期时间；permanent=永久（不可续）；unmanaged=本地无到期记录。 */
+  /** dated=有到期时间；permanent=到期记录里未设置时间（不可续）；unmanaged=本地无到期记录。 */
   expiry_state: 'dated' | 'permanent' | 'unmanaged';
   blocked_reason: string | null;
 }

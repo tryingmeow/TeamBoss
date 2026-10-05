@@ -234,19 +234,23 @@ function membershipsOf(db: DemoDb, email: string): Membership[] {
   return result;
 }
 
+/** Like the backend, the public choice for an Owner looks exactly like a member with no expiry set. */
 function toChoice(m: Membership): RedeemTeamChoice {
-  const blocked = m.is_owner ? 'owner_email' : m.expiry_state === 'permanent' ? 'permanent_membership' : null;
+  const expiryState = m.is_owner ? 'permanent' : m.expiry_state;
+  const blocked = expiryState === 'permanent' ? 'permanent_membership' : null;
   return {
     team_id: m.record.team.id,
     team_name: m.record.team.name,
     status: m.status,
-    expires_at: m.expires_at,
+    expires_at: m.is_owner ? null : m.expires_at,
     renewable: blocked === null,
-    is_owner: m.is_owner,
-    expiry_state: m.expiry_state,
+    is_owner: false,
+    expiry_state: expiryState,
     blocked_reason: blocked,
   };
 }
+
+const NOT_RENEWABLE_DETAIL = '该邮箱不能使用兑换码续期。兑换码未使用，如需处理请联系管理员。';
 
 /** Three plausible teams for an `atm_multi` demo token when the email is not in two teams already. */
 function syntheticChoices(db: DemoDb): RedeemTeamChoice[] {
@@ -313,7 +317,7 @@ function redeem(ctx: DemoContext): DemoResponse {
   if (teamId && !chosenReal) {
     const synthetic = syntheticChoices(db).find((c) => c.team_id === teamId);
     if (!synthetic || realChoices.length > 1) return fail(409, '所选 Team 已不在该邮箱的成员列表中，请重新查询后再兑换。兑换码未使用。');
-    if (!synthetic.renewable) return fail(409, '该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。');
+    if (!synthetic.renewable) return fail(409, NOT_RENEWABLE_DETAIL);
     const base = synthetic.expires_at ? Math.max(Date.parse(synthetic.expires_at), Date.now()) : Date.now();
     const expiresAt = grantMs === null ? null : isoAt(base + grantMs);
     const action = synthetic.status === 'joined' ? 'renewed_member' : 'renewed_invite';
@@ -329,8 +333,7 @@ function redeem(ctx: DemoContext): DemoResponse {
 
   if (chosenReal) {
     const { record } = chosenReal;
-    if (chosenReal.is_owner) return fail(409, 'Owner 邮箱不支持自助续期');
-    if (chosenReal.expiry_state === 'permanent') return fail(409, '该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。');
+    if (chosenReal.is_owner || chosenReal.expiry_state === 'permanent') return fail(409, NOT_RENEWABLE_DETAIL);
     const row = chosenReal.status === 'joined'
       ? record.members.find((m) => m.email === email)
       : record.invites.find((i) => i.email === email);
@@ -405,7 +408,8 @@ function historyFor(db: DemoDb, email: string): RedemptionHistoryItem[] {
 }
 
 function emailQuery(db: DemoDb, email: string): MembershipStatusResult {
-  const memberships = membershipsOf(db, email);
+  // Like the backend, an Owner's own row never shows up in the anonymous lookup.
+  const memberships = membershipsOf(db, email).filter((m) => !m.is_owner);
   const history = historyFor(db, email);
   if (memberships.length === 0) {
     const absent: MembershipInfo & { cache_updated_at: null } = {
@@ -419,7 +423,7 @@ function emailQuery(db: DemoDb, email: string): MembershipStatusResult {
     team_id: m.record.team.id,
     team_name: m.record.team.name,
     expires_at: m.expires_at,
-    is_owner: m.is_owner,
+    is_owner: false,
     expiry_state: m.public_expiry_state,
     cache_updated_at: m.record.cacheUpdatedAt,
   }));

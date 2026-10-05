@@ -128,6 +128,24 @@ _redeem_lookup_budget = _RedeemLookupBudget(
     per_code=10, per_code_window=3600, global_limit=60, global_window=600
 )
 
+# 公开兑换响应不能让持码人借此确认「某个邮箱是不是 Team 的 Owner」。Owner 邮箱和
+# 「没有到期时间的成员」（续期同样被拒）对外是同一句话、同一种 Team 选项、同一条兑换
+# 记录；内部审计（access_token_uses / 操作日志）照旧记 owner_email，管理端看得到。
+_NOT_RENEWABLE_DETAIL = "该邮箱不能使用兑换码续期。兑换码未使用，如需处理请联系管理员。"
+_PUBLIC_USE_ACTION_ALIASES = {"renew_owner_rejected": "renew_permanent_rejected"}
+_PUBLIC_USE_ERROR_ALIASES = {"owner_email": "permanent_membership"}
+
+
+def _public_use_fields(item: dict[str, Any]) -> dict[str, Any]:
+    """兑换记录对外展示前，把只有 Owner 才会出现的动作/原因码换成通用的那个。"""
+    action = item.get("action")
+    if action in _PUBLIC_USE_ACTION_ALIASES:
+        item["action"] = _PUBLIC_USE_ACTION_ALIASES[action]
+    error = item.get("error_message")
+    if error in _PUBLIC_USE_ERROR_ALIASES:
+        item["error_message"] = _PUBLIC_USE_ERROR_ALIASES[error]
+    return item
+
 
 async def _check_rate_limit(request: Request, limiter: _RateLimiter) -> None:
     """检查速率限制，超限时抛出 429 异常。IPv6 按 /64 计数。"""
@@ -188,6 +206,7 @@ class RedeemTeamChoice(BaseModel):
     expires_at: Optional[str] = None
     # 这个队能不能续：Owner 与永久成员点了必然 409，前端据此禁用按钮。
     renewable: bool = True
+    # 为兼容响应结构保留，恒为 False（公开响应不区分 Owner，见 _build_team_choices）。
     is_owner: bool = False
     # dated=有到期时间；permanent=本地记录为永久（续期会被拒）；
     # unmanaged=本地没有记录（续期会新建一条到期即踢的记录）。
@@ -807,13 +826,14 @@ async def _query_token(raw_token: str) -> dict[str, Any]:
             "team_id": latest_use.get("team_id") or email_status.get("team_id"),
             "team_name": latest_use.get("team_name") or email_status.get("team_name"),
             "user_id": latest_use.get("user_id"),
-            "action": latest_use.get("action"),
+            "action": _PUBLIC_USE_ACTION_ALIASES.get(latest_use.get("action"), latest_use.get("action")),
             "result": latest_use.get("result"),
             "error_message": (
                 "结果确认中，兑换码已暂时锁定，请稍后查询"
                 if latest_use.get("result") in {"pending", "uncertain"}
                 # 匿名可读，抹掉上游报错里可能夹带的 token / cookie。
-                else mask_secrets(str(latest_use.get("error_message") or "")) or None
+                else _PUBLIC_USE_ERROR_ALIASES.get(latest_use.get("error_message"))
+                or mask_secrets(str(latest_use.get("error_message") or "")) or None
             ),
             "expires_at": latest_use.get("expires_at") or email_status.get("expires_at"),
             "kicked_at": email_status.get("kicked_at"),
@@ -1255,6 +1275,9 @@ async def _build_team_choices(
     点下去必然 409，不能只画一个看起来可点的按钮。``expiry_state`` 则用来区分
     两种同样显示"没有到期时间"的情况——本地记录为永久（续期被拒），和本地根本
     没有记录（续期会新建一条到期即踢的记录，等于给一个原本不受管的人装上倒计时）。
+
+    这是公开响应：Owner 那一项和「没有到期时间、不能续」的成员长得完全一样
+    （is_owner 为兼容响应结构保留，恒为 False），见 _NOT_RENEWABLE_DETAIL。
     """
     choices: list[dict[str, Any]] = []
     for hit in memberships:
@@ -1262,10 +1285,11 @@ async def _build_team_choices(
         expiry_state = await get_active_expiry_state(
             team["id"], hit.get("user_id") or "", email
         )
-        is_owner = bool(hit.get("is_owner"))
+        expires_at = hit.get("expires_at")
         blocked_reason = None
-        if is_owner:
-            blocked_reason = "owner_email"
+        if hit.get("is_owner"):
+            expiry_state, expires_at = "permanent", None
+            blocked_reason = "permanent_membership"
         elif expiry_state == "permanent":
             blocked_reason = "permanent_membership"
         choices.append(
@@ -1273,8 +1297,8 @@ async def _build_team_choices(
                 "team_id": team["id"],
                 "team_name": team.get("name"),
                 "status": "joined" if hit["kind"] == "member" else "pending",
-                "expires_at": hit.get("expires_at"),
-                "is_owner": is_owner,
+                "expires_at": expires_at,
+                "is_owner": False,
                 "expiry_state": expiry_state,
                 "renewable": blocked_reason is None,
                 "blocked_reason": blocked_reason,
@@ -1334,7 +1358,7 @@ async def _renew_existing_membership(
         if refreshed["is_owner"]:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Owner 邮箱不支持自助续期",
+                detail=_NOT_RENEWABLE_DETAIL,
             )
 
         action = "renewed_member" if refreshed["kind"] == "member" else "renewed_invite"
@@ -1765,7 +1789,7 @@ async def _redeem_valid_token(
                     user_id=existing.get("user_id"),
                     error_message="owner_email",
                 )
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Owner 邮箱不支持自助续期")
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_NOT_RENEWABLE_DETAIL)
 
             try:
                 renewed = await _renew_existing_membership(
@@ -1787,7 +1811,7 @@ async def _redeem_valid_token(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="该成员当前为永久有效，无需续期。兑换码未使用，请联系管理员处理。",
+                    detail=_NOT_RENEWABLE_DETAIL,
                 )
             if renewed and renewed.get("needs_selection"):
                 # 拿锁后重扫才出现的第二个 Team：与拿锁前发现多队走完全一样的出口。
@@ -1980,7 +2004,7 @@ async def _query_membership_status(email: str, proof_token: Optional[str] = None
     否则 ``redemption_history`` 返回空列表——响应结构对老客户端保持不变。
     """
     history = (
-        await _get_redemption_history(email)
+        [_public_use_fields(item) for item in await _get_redemption_history(email)]
         if await _history_proof_accepted(email, proof_token)
         else []
     )

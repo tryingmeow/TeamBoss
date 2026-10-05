@@ -68,7 +68,6 @@ const HISTORY_ERRORS: Record<string, string> = {
   team_choice_unknown: '没有选择 Team',
   team_choice_not_found: '所选 Team 不存在',
   team_choice_vanished: '所选 Team 已不可用',
-  owner_email: 'Owner 邮箱不支持自助续期',
   permanent_membership: '永久有效，无需续期',
   request_aborted: '请求中断，兑换码未使用',
   'local redemption interrupted before remote mutation': '兑换中断，未发出邀请',
@@ -96,7 +95,6 @@ function choiceBlockedText(choice: RedeemTeamChoice): string | null {
   // 只在后端明确说了"不能续"时才禁用。字段缺失（前端已更新、后端还没重启的
   // 那几秒）必须按可续处理，否则会把所有车队按钮一起变灰，谁都续不了。
   if (choice.renewable !== false) return null;
-  if (choice.blocked_reason === 'owner_email') return 'Owner 邮箱不支持自助续期';
   if (choice.blocked_reason === 'permanent_membership') return '永久有效，无需续期';
   return '该 Team 暂不支持续期';
 }
@@ -146,7 +144,6 @@ function historyActionLabel(action: string): string {
     renewed_invite: '续期待接受',
     redeem_failed: '兑换失败',
     redeem_aborted: '兑换中断',
-    renew_owner_rejected: 'Owner 拒绝',
     renew_permanent_rejected: '永久有效拒绝',
     renew_multi_team_prompt: '待选择 Team',
     renew_team_choice_invalid: 'Team 选择已失效',

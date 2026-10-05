@@ -434,11 +434,11 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
             )
 
         choices = {c["team_id"]: c for c in result["choices"]}
-        self.assertTrue(choices["team-a"]["is_owner"])
+        # 公开响应不区分 Owner：Owner 那一项和永久成员一样标成不能续。
+        self.assertFalse(choices["team-a"]["is_owner"])
         self.assertFalse(choices["team-a"]["renewable"])
-        self.assertEqual(choices["team-a"]["blocked_reason"], "owner_email")
-        # team-a 本地没有到期记录：续期会新建一条，不能显示成"永不过期"。
-        self.assertEqual(choices["team-a"]["expiry_state"], "unmanaged")
+        self.assertEqual(choices["team-a"]["blocked_reason"], "permanent_membership")
+        self.assertEqual(choices["team-a"]["expiry_state"], "permanent")
 
         self.assertFalse(choices["team-b"]["renewable"])
         self.assertEqual(choices["team-b"]["blocked_reason"], "permanent_membership")
