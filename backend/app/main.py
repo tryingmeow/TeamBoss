@@ -372,4 +372,5 @@ if __name__ == "__main__":
         host=os.getenv("AUTO_TEAM_BACKEND_HOST", "127.0.0.1"),
         port=int(os.getenv("AUTO_TEAM_BACKEND_PORT", "18087")),
         reload=True,
+        proxy_headers=False,  # 客户端 IP 由 app/client_ip.py 认定，见 run_server.py
     )

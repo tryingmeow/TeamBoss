@@ -2,6 +2,10 @@
 
 自助兑换接口和后台登录接口都要按 IP 限流，两边必须用同一套判断，否则其中一边
 的白名单逻辑失效就等于整体失效（后台登录尤其严重：伪造头能直接绕开失败锁定）。
+
+这里是唯一认转发头的地方：run_server.py / Dockerfile 都关掉了 uvicorn 自带的
+proxy headers 处理（它会在这段代码之前就按 X-Forwarded-For 改写 request.client，
+信任范围也和 AUTO_TEAM_TRUSTED_PROXIES 是两套配置）。
 """
 
 import ipaddress
@@ -198,6 +202,21 @@ def get_client_ip_info(request: Request) -> tuple[str, bool]:
 def get_client_ip(request: Request) -> str:
     """从请求中获取用于限流计数的客户端 IP。详见 get_client_ip_info。"""
     return get_client_ip_info(request)[0]
+
+
+def rate_limit_key(ip: str) -> str:
+    """限流/失败锁定用的计数键：IPv4 按单个地址，IPv6 按所在的 /64 归并。
+
+    一个 IPv6 接入（家宽、VPS、云主机）通常整段分到一个 /64，里面的 2^64 个地址可以
+    随意换着用；按单个地址计数，每换一个地址就是一份全新的额度，等于没有限制。
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if address.version == 6:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+    return str(address)
 
 
 # ── 限流实现 ────────────────────────────────────────────────────────────────

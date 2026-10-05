@@ -133,3 +133,77 @@ class ComposeTopologyCollapseTest(unittest.TestCase):
             _FakeRequest("172.18.0.3", {"X-Real-IP": "172.18.0.1"})
         )
         self.assertTrue(collapsed)
+
+
+class ProductionNginxHeadersTest(unittest.IsolatedAsyncioTestCase):
+    """Production: stream :443 (proxy_protocol) -> http 127.0.0.1:8443 with
+    real_ip_header proxy_protocol -> proxy_pass 127.0.0.1:18087 with
+    X-Real-IP $remote_addr, X-Forwarded-For $proxy_add_x_forwarded_for,
+    X-Forwarded-Proto https. The backend used to run with uvicorn
+    proxy_headers=True (XFF rewrite of request.client); it now relies on
+    client_ip.py alone. The attributed client IP must be identical.
+    """
+
+    CASES = [
+        # (real visitor = nginx $remote_addr, X-Forwarded-For the visitor sent itself)
+        ("198.51.100.77", None),
+        ("198.51.100.78", "1.2.3.4"),
+        ("2001:db8:1:2::abcd", None),
+        ("2001:db8:1:2::abce", "9.9.9.9, 2001:db8:ffff::1"),
+        ("203.0.113.5", "203.0.113.250"),
+    ]
+
+    @staticmethod
+    def _scope(remote_addr: str, client_xff):
+        xff = f"{client_xff}, {remote_addr}" if client_xff else remote_addr
+        return {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/api/admin/login",
+            "raw_path": b"/api/admin/login",
+            "query_string": b"",
+            "root_path": "",
+            "server": ("127.0.0.1", 18087),
+            "client": ("127.0.0.1", 50123),
+            "headers": [
+                (b"host", b"business.example"),
+                (b"x-real-ip", remote_addr.encode()),
+                (b"x-forwarded-for", xff.encode()),
+                (b"x-forwarded-proto", b"https"),
+            ],
+        }
+
+    async def _attributed_ip(self, scope, *, uvicorn_proxy_headers: bool) -> str:
+        from starlette.requests import Request
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        seen = {}
+
+        async def app(scope, receive, send):
+            seen["ip"] = client_ip.get_client_ip(Request(scope))
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_message):
+            return None
+
+        entry = ProxyHeadersMiddleware(app, trusted_hosts="127.0.0.1") if uvicorn_proxy_headers else app
+        await entry(dict(scope), receive, send)
+        return seen["ip"]
+
+    async def test_same_client_ip_with_and_without_uvicorn_proxy_headers(self):
+        for remote_addr, client_xff in self.CASES:
+            with self.subTest(remote_addr=remote_addr, client_xff=client_xff):
+                scope = self._scope(remote_addr, client_xff)
+                before = await self._attributed_ip(scope, uvicorn_proxy_headers=True)
+                after = await self._attributed_ip(scope, uvicorn_proxy_headers=False)
+                self.assertEqual(before, client_ip.normalize_ip(remote_addr))
+                self.assertEqual(after, before)
+
+    def test_run_server_disables_uvicorn_proxy_headers(self):
+        source = (Path(__file__).resolve().parents[1] / "run_server.py").read_text(encoding="utf-8")
+        self.assertIn("proxy_headers=False", source)
+        self.assertNotIn("proxy_headers=True", source)

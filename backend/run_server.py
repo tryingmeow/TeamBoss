@@ -30,7 +30,10 @@ def main() -> None:
 
     host = os.getenv("AUTO_TEAM_BACKEND_HOST", "127.0.0.1")
     port = int(os.getenv("AUTO_TEAM_BACKEND_PORT", "18087"))
-    uvicorn.run("app.main:app", host=host, port=port, proxy_headers=True)
+    # proxy_headers=False：客户端 IP 只由 app/client_ip.py 按 AUTO_TEAM_TRUSTED_PROXIES
+    # 认定（可信反代来源才采信 X-Real-IP）。uvicorn 自己的 proxy headers 处理会在那之前
+    # 按 X-Forwarded-For 改写 request.client，是另一套信任配置，两层叠加只会更难推理。
+    uvicorn.run("app.main:app", host=host, port=port, proxy_headers=False)
 
 
 if __name__ == "__main__":
