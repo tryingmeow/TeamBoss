@@ -32,3 +32,24 @@ export function currentPeriodStart(
   if (start && until.getTime() - start.getTime() <= FIRST_PERIOD_MAX_MS) return start;
   return null;
 }
+
+function monthDay(date: Date, withYear: boolean): string {
+  const md = `${date.getMonth() + 1}/${date.getDate()}`;
+  return withYear ? `${date.getFullYear()}/${md}` : md;
+}
+
+/** Both ends as "M/D", with years when the two fall in different years ("2026/4/23", "2027/4/23"). */
+export function periodEnds(
+  start: Date | string | null | undefined,
+  end: Date | string | null | undefined,
+): [string, string] {
+  const from = start instanceof Date ? start : parse(start);
+  const to = end instanceof Date ? end : parse(end);
+  const withYear = Boolean(from && to && from.getFullYear() !== to.getFullYear());
+  return [from ? monthDay(from, withYear) : '—', to ? monthDay(to, withYear) : '—'];
+}
+
+/** "9/7 – 10/7", or "2026/4/23 – 2027/4/23" across a year boundary. */
+export function formatPeriodRange(start: Date | string | null | undefined, end: Date | string | null | undefined): string {
+  return periodEnds(start, end).join(' – ');
+}

@@ -13,7 +13,7 @@ import { formatSeatTypeLabel } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
-import { currentPeriodStart } from '../lib/billingPeriod';
+import { currentPeriodStart, formatPeriodRange } from '../lib/billingPeriod';
 
 interface TeamCardProps {
   team: Team;
@@ -712,7 +712,7 @@ export default function TeamCard({
             {showExactTime && team.active_until && (
               <div className="col-span-2 -mt-1 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 dark:bg-ink-950/60 dark:text-ink-400">
                 {periodStart
-                  ? `本期 ${formatShortDate(periodStart)} – ${formatShortDate(team.active_until)}`
+                  ? `本期 ${formatPeriodRange(periodStart, team.active_until)}`
                   : `订阅自 ${formatShortDate(team.active_start)}`}
                 {' · '}{isNonRenewing || isSubscriptionExpired ? '到期' : '续费'}于 {formatBeijingDateTime(team.active_until)}
               </div>

@@ -46,7 +46,7 @@ import {
   seatUpdateErrorMessage,
 } from '../../lib/seatType';
 import { ExpiryExtensionRequestIds } from '../../lib/expiryExtensionRequest';
-import { currentPeriodStart } from '../../lib/billingPeriod';
+import { currentPeriodStart, formatPeriodRange, periodEnds } from '../../lib/billingPeriod';
 
 interface BillingCycle {
   active_start: string | null;
@@ -206,12 +206,6 @@ function expiryUrgency(member: AdminMemberRow): { className: string; title: stri
   if (remaining <= 0) return { className: 'font-medium text-red-600 dark:text-red-400', title: '已过期' };
   if (remaining <= 3 * DAY_MS) return { className: 'font-medium text-amber-600 dark:text-amber-400', title: '3 天内到期' };
   return null;
-}
-
-function formatShortDate(value: string | Date | null): string {
-  if (!value) return '—';
-  const d = new Date(value);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 function parseTimestamp(value: string | null | undefined): number | null {
@@ -769,18 +763,19 @@ function BillingCycleCell({
   const days = cycle.days_remaining;
   // active_start is when the subscription began, not the current period's start.
   const periodStart = currentPeriodStart(cycle.active_start, cycle.active_until, billingPeriod);
+  const [subscribedFrom, subscribedUntil] = periodEnds(cycle.active_start, cycle.active_until);
   return (
     <div className={cn('flex items-center gap-x-2 gap-y-1', className)}>
       {periodStart ? (
         <span className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200" title="本期计费周期">
-          {formatShortDate(periodStart)} – {formatShortDate(cycle.active_until)}
+          {formatPeriodRange(periodStart, cycle.active_until)}
         </span>
       ) : (
         <span
           className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200"
           title="计费间隔未知，这里显示的是订阅开始日和本期结束日"
         >
-          订阅自 {formatShortDate(cycle.active_start)} · 至 {formatShortDate(cycle.active_until)}
+          订阅自 {subscribedFrom} · 至 {subscribedUntil}
         </span>
       )}
       {days != null && (
