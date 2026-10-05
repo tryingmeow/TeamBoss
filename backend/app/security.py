@@ -177,8 +177,10 @@ async def verify_admin_password(password: str) -> bool:
 
 
 async def change_admin_password(current_password: str, new_password: str) -> None:
+    # 不能用 401：前端 client 对带管理员 key 的 401 会清 key 并跳登录页，改密码填错
+    # 当前密码会把管理员踢出登录。这是表单校验失败，用 400。
     if not await verify_admin_password(current_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="当前密码错误")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前密码不正确")
 
     new_password = (new_password or "").strip()
     if len(new_password) < 8:
