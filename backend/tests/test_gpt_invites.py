@@ -82,10 +82,14 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())) as get_client,
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
             patch.object(gpt_invites, "run_chatgpt_call", new=AsyncMock(return_value={"invited": []})),
+            # 邀请前锁内现拉一次（此时还不在），邀请后刷新一次（出现在待接受邀请里）。
             patch.object(
                 gpt_invites,
                 "fetch_and_cache_members",
-                new=AsyncMock(return_value={"members": [], "pending_invites": [{"email": "user@example.com"}]}),
+                new=AsyncMock(side_effect=[
+                    {"members": [], "pending_invites": []},
+                    {"members": [], "pending_invites": [{"email": "user@example.com"}]},
+                ]),
             ),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
             patch.object(gpt_invites, "log_operation", new=AsyncMock()),
@@ -108,6 +112,11 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
             patch.object(gpt_invites, "run_chatgpt_call", new=AsyncMock(return_value={"error": "invalid account"})),
+            patch.object(
+                gpt_invites,
+                "fetch_and_cache_members",
+                new=AsyncMock(return_value={"members": [], "pending_invites": []}),
+            ),
             patch.object(gpt_invites, "log_operation", new=AsyncMock()),
         ):
             with self.assertRaises(gpt_invites.GptInviteFailed) as ctx:
@@ -166,6 +175,11 @@ class GptInvitesTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "reserved_default_seats", new=AsyncMock(return_value=0)),
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=DummyClient())),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(False, "no_gpt_seat: full"))),
+            patch.object(
+                gpt_invites,
+                "fetch_and_cache_members",
+                new=AsyncMock(return_value={"members": [], "pending_invites": []}),
+            ),
             patch.object(gpt_invites, "log_operation", new=AsyncMock()),
         ):
             with self.assertRaises(gpt_invites.NoGptSeatAvailable) as ctx:

@@ -210,19 +210,22 @@ async def _invite_to_team(
 ) -> tuple[dict[str, Any] | None, str | None]:
     team_id = team["id"]
     async with team_invite_lock(team_id):
-        snapshot = cached_snapshot
-        if _snapshot_contains_email(snapshot, email):
+        # 缓存快照只用来提前跳过：缓存里"有"足以不发邀请。
+        if _snapshot_contains_email(cached_snapshot, email):
             await log_operation(team_id, f"{action}_existing", email, EMAIL_ALREADY_IN_TEAM, "skipped")
             return None, EMAIL_ALREADY_IN_TEAM
 
+        # 缓存里"没有"却不能当作"不在"的证据：缓存可能是几分钟前的，期间这个人
+        # 可能已被邀请/加入。对已在 Team 的人再发邀请，record_confirmed_invite 会拿
+        # 这次的有效期去碰他已有的到期记录。所以发邀请前必须在锁内现拉一次名单；
+        # 拉不到（含残缺名单）就是未知状态，失败关闭、不发邀请。
         client = await get_team_client(team_id)
-        if snapshot is None:
-            try:
-                snapshot = await fetch_and_cache_members(team_id, client)
-            except Exception as exc:
-                error = str(exc)
-                await log_operation(team_id, f"{action}_lookup", email, None, "failed", error)
-                return None, error
+        try:
+            snapshot = await fetch_and_cache_members(team_id, client)
+        except Exception as exc:
+            error = str(exc)
+            await log_operation(team_id, f"{action}_lookup", email, None, "failed", error)
+            return None, error
         if _snapshot_contains_email(snapshot, email):
             await log_operation(team_id, f"{action}_existing", email, EMAIL_ALREADY_IN_TEAM, "skipped")
             return None, EMAIL_ALREADY_IN_TEAM

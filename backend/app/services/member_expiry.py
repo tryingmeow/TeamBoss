@@ -598,15 +598,131 @@ async def record_confirmed_invite(
     Never raises: the OpenAI-side action already happened and cannot be
     undone, so callers must be able to treat the invite as successful
     regardless of whether local bookkeeping fully succeeded.
+
+    邀请绝不缩短、替换已有到期（语义见 ``_merge_confirmed_invite_expiry``）：
+    调用方虽已确认邮箱不在 Team，本地仍可能留着一条 kicked=0 的旧记录（邀请在
+    OpenAI 侧过期/被撤、成员自己退出而本地没跟上），那条记录里可能是已付时长或
+    永久授权。兜底行 ``kind='backfill'`` 由调度器按同一套规则结清（max、保持永久），
+    两条路径结果一致。返回值是落库后的实际到期时间。
     """
     return await _persist_confirmed_membership(
-        lambda: upsert_member_expiry(team_id, user_id, email, expires_at, source=source),
+        lambda: _merge_confirmed_invite_expiry(team_id, user_id, email, expires_at, source=source),
         team_id,
         user_id,
         email,
         expires_at.isoformat() if expires_at is not None else None,
         source,
     )
+
+
+async def _merge_confirmed_invite_expiry(
+    team_id: str,
+    user_id: str,
+    email: str,
+    expires_at: Optional[datetime],
+    *,
+    source: str = "system",
+) -> Optional[str]:
+    """把一次已确认邀请的到期时间并入现有记录，只延长、不缩短。
+
+    与调度器结清 ``kind='backfill'`` 兜底行的规则逐条一致：
+
+    * 没有未踢出的记录 → 按邀请的到期建档。
+    * 邀请本身是永久（``expires_at is None``）→ 升级为永久。
+    * 现有记录 NULL 且 source != 'detected'（已授权的永久）→ 原样保留，不降级。
+    * 现有记录 NULL 且 source == 'detected'（外部发现、尚未授权）→ 取邀请的到期，
+      source 改成邀请来源。
+    * 两边都有到期 → 取较晚者；现有值无法解析时保留现有值，不拿它冒险覆盖。
+
+    与 ``upsert_member_expiry`` 的区别：后者是管理员"设置到期"的覆盖语义（可以
+    合法地缩短），这里只用于邀请落库。读、算、写在一个 ``BEGIN IMMEDIATE`` 事务里。
+    """
+    normalized_email = (email or "").strip().lower()
+    normalized_user_id = user_id or ""
+    new_iso = expires_at.isoformat() if expires_at is not None else None
+    if not normalized_user_id and not normalized_email:
+        return new_iso
+
+    async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            _ACTIVE_EXPIRY_ROW_SQL,
+            (
+                team_id,
+                normalized_user_id,
+                normalized_user_id,
+                normalized_email,
+                normalized_email,
+            ),
+        )
+        row = await cursor.fetchone()
+        now_iso = utc_now().isoformat()
+
+        if row is None:
+            await db.execute(
+                """INSERT INTO member_expiry
+                   (team_id, user_id, email, expires_at, auto_kick, kicked,
+                    first_seen_at, source, created_at)
+                   VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+                (
+                    team_id,
+                    normalized_user_id,
+                    normalized_email,
+                    new_iso,
+                    1 if new_iso is not None else 0,
+                    now_iso,
+                    source,
+                    now_iso,
+                ),
+            )
+            await db.commit()
+            return new_iso
+
+        current_raw = row["expires_at"]
+        current_source = row["source"] or ""
+        resolved_source = source
+        if new_iso is None:
+            resolved = None
+        elif current_raw is None and current_source != "detected":
+            # 已授权的永久成员：保持原样（连 source 一起），不能被一次有限期邀请降级。
+            await db.rollback()
+            logger.warning(
+                "record_confirmed_invite: keeping permanent membership "
+                "team=%s email=%s user_id=%s",
+                team_id, normalized_email, normalized_user_id,
+            )
+            return None
+        elif current_raw is None:
+            resolved = new_iso
+        else:
+            current = parse_optional_datetime(current_raw)
+            # 两边都转成 UTC 感知时间再比较，传入 naive datetime 也不会抛 TypeError。
+            incoming = parse_optional_datetime(new_iso)
+            if current is None or incoming is None or current >= incoming:
+                resolved = current_raw
+                # 现有到期胜出：保留它原来的来源，只有 detected 要改成邀请来源。
+                if current_source != "detected":
+                    resolved_source = current_source or source
+            else:
+                resolved = new_iso
+
+        await db.execute(
+            """UPDATE member_expiry
+               SET user_id = COALESCE(NULLIF(?, ''), user_id), email = ?,
+                   expires_at = ?, auto_kick = ?, source = ?,
+                   kicked = 0, kicked_at = NULL, kick_source = NULL
+               WHERE id = ?""",
+            (
+                normalized_user_id,
+                normalized_email,
+                resolved,
+                1 if resolved is not None else 0,
+                resolved_source,
+                row["id"],
+            ),
+        )
+        await db.commit()
+        return resolved
 
 
 async def record_confirmed_invite_extension(

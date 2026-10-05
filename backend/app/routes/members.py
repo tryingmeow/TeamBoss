@@ -130,17 +130,63 @@ async def _refresh_members_after_mutation(
         return None
 
 
-def _snapshot_contains_email(snapshot: dict | None, email: str) -> bool:
+def _snapshot_email_kind(snapshot: dict | None, email: str) -> str | None:
+    """邮箱在快照里的身份：``"member"`` / ``"invite"``（待接受邀请）/ None。"""
     if not snapshot:
-        return False
+        return None
     email_lower = (email or "").strip().lower()
     for member in snapshot.get("members", []):
         if (member.get("email") or "").strip().lower() == email_lower:
-            return True
+            return "member"
     for invite in snapshot.get("pending_invites", []):
         if (invite.get("email") or "").strip().lower() == email_lower:
-            return True
-    return False
+            return "invite"
+    return None
+
+
+def _snapshot_contains_email(snapshot: dict | None, email: str) -> bool:
+    return _snapshot_email_kind(snapshot, email) is not None
+
+
+_INVITE_EXISTING_MEMBER_DETAIL = (
+    "该邮箱已是此 Team 的成员，未重复邀请。"
+    "如需调整有效期，请在成员列表中使用「续期」或「设置到期」。"
+)
+_INVITE_EXISTING_PENDING_DETAIL = (
+    "该邮箱在此 Team 已有待接受的邀请，未重复邀请。"
+    "如需调整有效期，请在对方加入后使用「续期」或「设置到期」；如需重发邀请，请先撤销原邀请。"
+)
+_INVITE_LOOKUP_FAILED_DETAIL = "无法确认该邮箱是否已在此 Team（成员列表拉取失败），未发送邀请，请稍后重试"
+
+
+async def _ensure_email_not_in_team(team_id: str, client, email: str) -> None:
+    """邀请前确认这个邮箱此刻既不是该 Team 的成员，也没有待接受的邀请。
+
+    邀请是"基于不存在"的写操作：对已在 Team 的人再发一次，OpenAI 侧只是重发一封
+    邮件，本地却会拿这次填的有效期去碰他已有的到期记录（已付时长、永久授权）。
+    调整时间是续期 / 设置到期的事，这里直接拒绝。
+
+    必须在 team_invite_lock 内现拉：缓存可能是几分钟前的，"缓存里没有"不能当作
+    "不在"的证据。拉不到（网络失败、残缺名单）就是未知状态，失败关闭、不发邀请。
+    这一步发生在任何上游写操作之前，拒绝时本地成员记录原样不动。
+    """
+    try:
+        snapshot = await fetch_and_cache_members(team_id, client)
+    except Exception as exc:
+        # 登录已失效时"稍后重试"是误导：重试不会好，只能重新导入 session。
+        if is_auth_error(exc) and await is_team_auth_rejected(team_id):
+            raise team_auth_rejected_error() from exc
+        await log_operation(
+            team_id, "invite_member", email, "pre_invite_lookup", "failed", str(exc)
+        )
+        raise HTTPException(status_code=502, detail=_INVITE_LOOKUP_FAILED_DETAIL) from exc
+
+    kind = _snapshot_email_kind(snapshot, email)
+    if kind is None:
+        return
+    detail = _INVITE_EXISTING_MEMBER_DETAIL if kind == "member" else _INVITE_EXISTING_PENDING_DETAIL
+    await log_operation(team_id, "invite_member", email, f"existing={kind}", "skipped", detail)
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
 
 async def _ensure_default_seat_available(
@@ -214,6 +260,8 @@ async def invite_member(team_id: str, req: InviteMemberRequest):
 
     async with team_invite_lock(team_id):
         client = await get_team_client(team_id)
+        # 已在 Team（成员或待接受邀请）就拒绝，拉不到名单就失败关闭，见函数注释。
+        await _ensure_email_not_in_team(team_id, client, req.email)
         if (req.seat_type or "default") == "default":
             await _ensure_default_seat_available(
                 client,
