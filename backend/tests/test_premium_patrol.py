@@ -145,14 +145,16 @@ class _Base(unittest.TestCase):
         conn.commit()
         conn.close()
 
-    def _cache(self, team_id, members, pending=()):
+    def _cache(self, team_id, members, pending=(), *, updated_at=None):
         conn = self._conn()
         conn.execute(
             """INSERT INTO member_cache (team_id, members_json, pending_json, updated_at)
-               VALUES (?, ?, ?, '2026-01-01')
+               VALUES (?, ?, ?, ?)
                ON CONFLICT(team_id) DO UPDATE SET members_json = excluded.members_json,
-                                                  pending_json = excluded.pending_json""",
-            (team_id, json.dumps(members), json.dumps(list(pending))),
+                                                  pending_json = excluded.pending_json,
+                                                  updated_at = excluded.updated_at""",
+            (team_id, json.dumps(members), json.dumps(list(pending)),
+             updated_at or datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
         conn.close()
@@ -373,28 +375,207 @@ class PremiumOutsiderKickTest(_Base):
         self.assertEqual(self._calls("remove_member"), [])
 
     def test_per_round_cap_applies_to_premium_kicks(self):
-        cap = patrol.NON_STRICT_KICK_ABS_CAP
-        outsiders = [
-            _member(f"outsider{i:02d}@example.com", f"u-{i:02d}", seat_type="prolite",
-                    first_seen_at=f"2026-07-{10 + i:02d}T00:00:00+00:00")
-            for i in range(cap + 2)
+        # 批量护栏的阈值（最多 3）比单轮封顶（10）严，正常数据下封顶碰不到；把封顶调成 1，
+        # 证明 Premium 踢人同样受它约束。
+        members = [OWNER] + [
+            _member(f"keeper{i}@example.com", f"u-k{i}", source="system") for i in range(3)
+        ] + [
+            _member("older@example.com", "u-old", seat_type="prolite",
+                    first_seen_at="2026-07-10T00:00:00+00:00"),
+            _member("newer@example.com", "u-new", seat_type="prolite",
+                    first_seen_at="2026-07-20T00:00:00+00:00"),
         ]
-        self._armed_team("team-cap", [OWNER] + outsiders)
+        self._armed_team("team-cap", members)
 
-        result = self._patrol(dry_run=False)
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 1):
+            result = self._patrol(dry_run=False)
 
-        removed = self._calls("remove_member")
-        self.assertEqual(len(removed), cap)
-        self.assertEqual(result["kicked"], cap)
-        # 新→旧：最新的 cap 个先处理，最老的两个留到下一轮。
-        self.assertNotIn(("remove_member", "u-00"), removed)
-        self.assertNotIn(("remove_member", "u-01"), removed)
+        # 新→旧：最新的先处理，老的留到下一轮。
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-new")])
+        self.assertEqual(result["kicked"], 1)
         capped = self._logs("patrol_kick_batch_capped")
         self.assertEqual(len(capped), 1)
         self.assertIn("reason=premium_outsider", capped[0]["detail"])
         alerts = self._alerts()
         self.assertEqual(len(alerts), 1)
+        self.assertIn("older@example", alerts[0])
         self.assertIn("本轮没能自动移除", alerts[0])
+
+    def test_mass_premium_outsiders_trip_the_batch_guard(self):
+        # 13 人队阈值 = min(3, 6) = 3；突然冒出 12 个外部 Premium 成员 = 数据异常，一个都不踢。
+        outsiders = [
+            _member(f"outsider{i:02d}@example.com", f"u-{i:02d}", seat_type="prolite",
+                    first_seen_at=f"2026-07-{10 + i:02d}T00:00:00+00:00")
+            for i in range(12)
+        ]
+        self._armed_team("team-mass", [OWNER] + outsiders)
+
+        result = self._patrol(dry_run=False)
+        self._patrol(dry_run=False)
+
+        self.assertEqual(RecordingClient.calls, [])
+        self.assertEqual(result["kicked"], 0)
+        guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
+        self.assertEqual(guard[0]["guard"], "premium")
+        self.assertEqual((guard[0]["count"], guard[0]["team_size"]), (12, 13))
+        capped = self._logs("patrol_kick_batch_capped")
+        self.assertIn("batch_guard=premium", capped[0]["detail"])
+        self.assertIn("capped_to=0", capped[0]["detail"])
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)  # 第二轮同一份名单：限频
+        self.assertIn("外部 Premium 成员数量异常（12 / 团队共 13 人）", alerts[0])
+        self.assertIn("等 12 人", alerts[0])
+
+    def test_batch_guard_threshold_boundary(self):
+        # 4 人队阈值 = 2：两个外部 Premium 成员正好不超，照常踢。
+        members = [
+            OWNER, _member("keeper@example.com", "u-k", source="system"),
+            _member("p1@example.com", "u-p1", seat_type="prolite"),
+            _member("p2@example.com", "u-p2", seat_type="prolite"),
+        ]
+        self._armed_team("team-edge", members)
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(sorted(self._calls("remove_member")),
+                         [("remove_member", "u-p1"), ("remove_member", "u-p2")])
+
+    def test_strict_guard_on_same_snapshot_also_stops_premium_kicks(self):
+        # 6 人队阈值 = 3：1 个 Premium 外部成员自己不超，但严格模式数到 4 个疑似陌生成员已判异常。
+        members = [
+            OWNER, _member("keeper@example.com", "u-k", source="system"),
+            _member("premiumguy@example.com", "u-p", seat_type="prolite", first_seen_at=OLD),
+            _member("plain1@example.com", "u-d1", first_seen_at=OLD),
+            _member("plain2@example.com", "u-d2", first_seen_at=OLD),
+            _member("codexguy@example.com", "u-c", seat_type="usage_based", first_seen_at=OLD),
+        ]
+        self._armed_team("team-sguard", members, seats_entitled=99)
+        self._setting("patrol_strict_mode_enabled", "1")
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(RecordingClient.calls, [])
+        actions = {e.get("action") for e in result["events"]}
+        self.assertIn("strict_batch_guard", actions)
+        guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
+        self.assertEqual(guard[0]["guard"], "strict")
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("严格模式判定这份名单陌生成员过多", alerts[0])
+
+        # 严格模式关掉，同一份快照：Premium 自己没超阈值，照常踢。
+        self._setting("patrol_strict_mode_enabled", "0")
+        self._patrol(dry_run=False)
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-p")])
+
+    def test_timed_out_switch_to_premium_blocks_the_kick(self):
+        # 场景 A：管理员把一个 detected 成员切到 Premium，上游生效了但响应超时，TeamBoss 记了
+        # failed 并返回 502。下一轮快照里他是 detected + prolite，没有成功记录，也不能踢。
+        member = _member("upgraded@example.com", "u-up", seat_type="prolite")
+        self._armed_team("team-a", [OWNER, _member("keeper@example.com", "u-k", source="system"), member])
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO operation_logs (team_id, action, target_email, detail, result,
+                                           error_message, trigger_type, created_at)
+               VALUES ('team-a', 'change_seat', 'upgraded@example.com',
+                       'user_id=u-up, seat_type=prolite, from_seat_type=default, policy=auto',
+                       'failed', 'Read timed out', 'manual', '2026-09-01T00:00:00+00:00')"""
+        )
+        conn.commit()
+        conn.close()
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("TeamBoss 给他开过 Premium", alerts[0])
+
+        conn = self._conn()
+        ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-a", member,
+                                         rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
+        conn.close()
+        self.assertFalse(ok)
+        self.assertIn("Premium record", reason)
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_policy_refused_premium_invite_is_not_a_teamboss_record(self):
+        # 被超员策略拒绝的 Premium 邀请上游什么都没发生：不算 TeamBoss 开过 Premium。
+        self._armed_team("team-ref", [
+            OWNER, _member("keeper@example.com", "u-k", source="system"),
+            _member("refused@example.com", "u-r", seat_type="prolite"),
+        ])
+        conn = self._conn()
+        conn.executemany(
+            """INSERT INTO operation_logs (team_id, action, target_email, detail, result,
+                                           trigger_type, created_at)
+               VALUES ('team-ref', 'invite_member', 'refused@example.com', ?, ?, 'manual',
+                       '2026-09-01T00:00:00+00:00')""",
+            [
+                ("seat_type=prolite, policy=forbid, reason=overage_forbidden", "skipped"),
+                ("seat_type=prolite, policy=confirm, reason=overage_needs_confirmation", "failed"),
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-r")])
+
+    def test_seat_change_after_the_snapshot_defers_the_kick(self):
+        # 场景 B：管理员把 detected 的 Premium 成员切回 ChatGPT，切换后的刷新失败，快照还写着
+        # prolite。最新记录是 default（不算 Premium 记录），但它比快照新：这一轮不踢。
+        snapshot_at = "2026-09-01T00:00:00+00:00"
+        member = _member("downgraded@example.com", "u-down", seat_type="prolite")
+        members = [OWNER, _member("keeper@example.com", "u-k", source="system"), member]
+        self._armed_team("team-b", members)
+        self._cache("team-b", members, updated_at=snapshot_at)
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO operation_logs (team_id, action, target_email, detail, result,
+                                           trigger_type, created_at)
+               VALUES ('team-b', 'change_seat', NULL,
+                       'user_id=u-down, seat_type=default, from_seat_type=prolite, policy=confirm',
+                       'success', 'manual', '2026-09-01T00:05:00+00:00')"""
+        )
+        conn.commit()
+        conn.close()
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
+        deferred = [l for l in self._logs("patrol_kick") if l["result"] == "skipped"]
+        self.assertEqual(len(deferred), 1)
+        self.assertIn("deferred", deferred[0]["detail"])
+        self.assertIn("reason=premium_outsider", deferred[0]["detail"])
+        kick_events = [e for e in result["events"] if e.get("action") == "kick"]
+        self.assertEqual(kick_events[0]["result"], "deferred")
+        # 推迟不是失败：不推"处理失败"，也不进席位提醒（下一轮按新快照判断）。
+        self.assertFalse(any("处理失败" in t for t in self.notify_calls))
+        self.assertEqual(self._alerts(), [])
+
+        # 下一轮刷新成功，快照里他已经是 ChatGPT：不再是 Premium 候选。
+        refreshed = [OWNER, _member("keeper@example.com", "u-k", source="system"),
+                     _member("downgraded@example.com", "u-down")]
+        self._cache("team-b", refreshed, updated_at="2026-09-01T00:20:00+00:00")
+        self._patrol(dry_run=False)
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_unreadable_snapshot_time_defers_the_kick(self):
+        member = _member("premiumguy@example.com", "u-p", seat_type="prolite")
+        members = [OWNER, _member("keeper@example.com", "u-k", source="system"), member]
+        self._armed_team("team-nots", members)
+        self._cache("team-nots", members, updated_at="not-a-timestamp")
+
+        conn = self._conn()
+        ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-nots", member,
+                                         rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
+        conn.close()
+        self.assertFalse(ok)
+        self.assertEqual(reason, patrol.PREMIUM_KICK_DEFERRED)
+        self.assertEqual(self._calls("remove_member"), [])
 
     def test_stale_snapshot_leads_to_no_kick(self):
         member = _member("premiumguy@example.com", "u-p", seat_type="prolite")
@@ -666,6 +847,7 @@ class ManagedPremiumAlertTest(_Base):
             "switchedback": _member("switchedback@example.com", "u-m4", seat_type="prolite", source="system"),
             "viainvite": _member("viainvite@example.com", "u-m5", seat_type="prolite", source="system"),
             "fromprem": _member("fromprem@example.com", "u-m6", seat_type="prolite", source="system"),
+            "timedout": _member("timedout@example.com", "u-m7", seat_type="prolite", source="system"),
         }
         self._team("team-m")
         for m in managed.values():
@@ -686,9 +868,14 @@ class ManagedPremiumAlertTest(_Base):
         # from_seat_type=prolite 不能被当成 seat_type=prolite。
         self._log("team-m", "change_seat", "fromprem@example.com",
                   "user_id=u-m6, seat_type=default, from_seat_type=prolite", "2026-08-01T00:00:00+00:00")
-        # 失败的切换不算数。
+        # 被超员策略拒绝的切换不算 TeamBoss 切的。
         self._log("team-m", "change_seat", "outside1@example.com",
-                  "user_id=u-m1, seat_type=prolite", "2026-08-01T00:00:00+00:00", result="failed")
+                  "user_id=u-m1, seat_type=prolite, policy=forbid, reason=overage_forbidden",
+                  "2026-08-01T00:00:00+00:00", result="skipped")
+        # 超时（记成 failed）的切换上游可能已生效：算 TeamBoss 切的。
+        self._log("team-m", "change_seat", "timedout@example.com",
+                  "user_id=u-m7, seat_type=prolite, from_seat_type=default",
+                  "2026-08-01T00:00:00+00:00", result="failed")
         # Premium 兑换码。
         conn = self._conn()
         token_id = conn.execute(
@@ -712,7 +899,7 @@ class ManagedPremiumAlertTest(_Base):
         text = alerts[0]
         for masked in ("outsi…@example", "switc…@example", "fromp…@example"):
             self.assertIn(masked, text)
-        for masked in ("viasw…@example", "viaco…@example", "viain…@example"):
+        for masked in ("viasw…@example", "viaco…@example", "viain…@example", "timed…@example"):
             self.assertNotIn(masked, text)
         for m in managed.values():
             self.assertNotIn(m["email"], text)
