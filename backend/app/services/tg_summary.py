@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ..database import get_db_path
+from ..seat_types import PREMIUM_SEAT_TYPE, normalize_seat_type, seat_type_label
 from .seat_capacity import member_seat_usage_from_members
 from .tg_notify import notify_admins_sync
 
@@ -81,6 +82,7 @@ def build_summary_sync(now: Optional[datetime] = None) -> str:
     over_people = 0
     watch_teams = 0
     codex_on = 0
+    total_premium = 0
     over_names: list[str] = []
 
     for row in active_rows:
@@ -97,6 +99,13 @@ def build_summary_sync(now: Optional[datetime] = None) -> str:
         if not isinstance(members, list):
             members = []
         usage = member_seat_usage_from_members(members)
+        total_premium += sum(
+            1
+            for item in members
+            if isinstance(item, dict)
+            and item.get("status", "active") == "active"
+            and normalize_seat_type(item.get("seat_type")) == PREMIUM_SEAT_TYPE
+        )
         active_gpt = usage.active_chatgpt if usage is not None else 0
         entitled = int(row["seats_entitled"] or 0)
         total_active_gpt += active_gpt
@@ -124,6 +133,11 @@ def build_summary_sync(now: Optional[datetime] = None) -> str:
         f"│ 🔴 异常 / 过期　　 {stale_or_error}",
         "├────────────────────",
         f"│ 💺 GPT 席位　　　  {total_active_gpt} / {total_entitled}",
+        *(
+            [f"│ 💎 {seat_type_label(PREMIUM_SEAT_TYPE)} 席位　　 {total_premium}"]
+            if total_premium
+            else []
+        ),
         f"│ 🈳 有空位 Team　　 {idle_teams}",
         f"│ 💻 Codex 已开启　　{codex_on}",
         "├────────────────────",

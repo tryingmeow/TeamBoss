@@ -10,10 +10,15 @@ from pydantic import BaseModel
 from ..database import get_db, log_operation
 from ..services.fx import DEFAULT_FX_RATES, FxRefreshError, convert, get_fx_config, refresh_fx_rates, save_fx_rates
 from ..services.invoices import classify_latest_invoice, refresh_invoices_for_team_blocking
+from ..seat_types import DEFAULT_SEAT_TYPE, PREMIUM_SEAT_TYPE
 from ..services.pricing import discounted_monthly_total
+from ..services.seat_capacity import cached_seat_capacity
 from ..services.subscription_status import subscription_status_display
 
 router = APIRouter(prefix="/api/finance", tags=["finance"])
+
+# 上游没有 Premium 的价格接口：月付 125 美元是按官方定价写死的估算，界面必须标「估算」。
+PREMIUM_SEAT_PRICE_ESTIMATE_USD = 125
 
 
 class FinanceSettingsUpdate(BaseModel):
@@ -82,6 +87,7 @@ async def get_overview():
 
     teams_data = []
     monthly_total_base = 0.0
+    premium_total_base = 0.0
     discount_total_base = 0.0
     timeline_data = []
     excluded_teams_count = 0
@@ -117,8 +123,18 @@ async def get_overview():
         billing_period = team_row["billing_period"]
 
         # Calculate native monthly total only if billing_period is monthly and price is available
+        seat_capacity = cached_seat_capacity(team_row["seat_capacity_json"])
+        default_entry = (seat_capacity or {}).get(DEFAULT_SEAT_TYPE)
+        # ChatGPT 席位的计费数：上游 seat_capacity.default.paid（已付，不含 Premium）；
+        # 读不到时退回 seats_entitled（旧行为）。
+        chatgpt_seats_billed = default_entry["paid"] if default_entry is not None else seats_entitled
+        premium_entry = (seat_capacity or {}).get(PREMIUM_SEAT_TYPE)
+        premium_seats_paid = premium_entry["paid"] if premium_entry is not None else 0
+        premium_monthly_estimate_usd = float(premium_seats_paid * PREMIUM_SEAT_PRICE_ESTIMATE_USD)
+        premium_monthly_estimate_base = convert(premium_monthly_estimate_usd, "USD", base_currency, rates)
+
         if billing_period == "monthly" and price_per_seat is not None:
-            monthly_total_native = discounted_monthly_total(price_per_seat, seats_entitled, discount_amount)
+            monthly_total_native = discounted_monthly_total(price_per_seat, chatgpt_seats_billed, discount_amount)
             # Convert to base currency
             monthly_total_base_value = convert(monthly_total_native, billing_currency, base_currency, rates)
         else:
@@ -198,6 +214,10 @@ async def get_overview():
             "price_per_seat": price_per_seat if billing_period == "monthly" else None,
             "seats_entitled": seats_entitled,
             "seats_in_use": seats_in_use,
+            "chatgpt_seats_billed": chatgpt_seats_billed,
+            "premium_seats_paid": premium_seats_paid,
+            "premium_monthly_estimate_usd": premium_monthly_estimate_usd,
+            "premium_monthly_estimate_base": premium_monthly_estimate_base,
             "chatgpt_in_use": (
                 chatgpt_count
                 if chatgpt_count is not None
@@ -225,6 +245,8 @@ async def get_overview():
                 excluded_teams_count += 1
             else:
                 monthly_total_base += monthly_total_base_value
+            if premium_monthly_estimate_base is not None:
+                premium_total_base += premium_monthly_estimate_base
 
             discount_base = convert(discount_amount, billing_currency, base_currency, rates)
             if discount_base is not None:
@@ -371,6 +393,9 @@ async def get_overview():
         "fx_updated_at": fx_updated_at,
         "low_balance_threshold": low_balance_threshold,
         "monthly_total_base": monthly_total_base,
+        # Premium 没有上游价格来源：已付席位 × 固定估算价，只作参考，不并入 monthly_total_base。
+        "premium_monthly_estimate_base_total": premium_total_base,
+        "premium_seat_price_estimate_usd": PREMIUM_SEAT_PRICE_ESTIMATE_USD,
         "discount_total_base": discount_total_base,
         "excluded_teams_count": excluded_teams_count,
         "last_paid_total_base": last_paid_total_base if last_paid_count else None,

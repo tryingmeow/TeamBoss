@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from ..database import get_sessions_dir, get_db, log_operation
 from ..member_cache_service import fetch_and_cache_members, get_cached_members
+from ..seat_types import normalize_seat_type, seat_type_label
 from ..services.member_expiry import build_expiry_view, get_kick_policy
 from ..services.team_clients import get_team_client
 from ..services.user_display_names import load_display_name_map, set_display_name
@@ -157,7 +158,7 @@ async def list_owners(
             "team_id": team["id"],
             "team_name": team.get("name"),
             "user_id": (cached_owner or {}).get("id") or (cached_owner or {}).get("user_id") or "",
-            "seat_type": (cached_owner or {}).get("seat_type", "default"),
+            "seat_type": normalize_seat_type((cached_owner or {}).get("seat_type")),
             "card_last4": team.get("card_last4"),
             "card_brand": team.get("card_brand"),
             "billing_cycle": _billing_cycle(team),
@@ -334,7 +335,7 @@ async def list_members(
                 "email": member.get("email") or "",
                 "name": member.get("name"),
                 "role": member.get("role"),
-                "seat_type": member.get("seat_type", "default"),
+                "seat_type": normalize_seat_type(member.get("seat_type")),
                 "created_time": member.get("created_time"),
                 "is_codex_enabled": team.get("is_codex_enabled", False),
             }
@@ -362,7 +363,7 @@ async def list_members(
                 "email": email,
                 "name": invite.get("name"),
                 "role": invite.get("role"),
-                "seat_type": invite.get("seat_type", "default"),
+                "seat_type": normalize_seat_type(invite.get("seat_type")),
                 "created_time": invite.get("created_time"),
                 "is_codex_enabled": team.get("is_codex_enabled", False),
             }
@@ -415,6 +416,10 @@ async def list_members(
         items.append(_attach_display_name(row, display_names))
 
     for item in items:
+        # 显示名走注册表；已踢记录没有席位类型，保持 None。
+        item["seat_type_label"] = (
+            seat_type_label(item["seat_type"]) if item.get("seat_type") else None
+        )
         item["tg_binding"] = _tg_binding_payload(item.get("email") or "", tg_bindings)
 
     if status_filter:
@@ -422,7 +427,7 @@ async def list_members(
         items = [item for item in items if item["status"] == wanted]
     items = [
         item for item in items
-        if _matches_query(item, q, ("email", "name", "team_name", "owner_email", "owner_name", "seat_type", "status_label", "system_display_name"))
+        if _matches_query(item, q, ("email", "name", "team_name", "owner_email", "owner_name", "seat_type", "seat_type_label", "status_label", "system_display_name"))
     ]
     items.sort(key=lambda item: (item.get("team_name") or "", item.get("email") or "", item.get("status") or ""))
 

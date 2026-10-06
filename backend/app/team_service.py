@@ -14,9 +14,11 @@ from .chatgpt_limiter import (
 )
 from .database import get_db, log_operation
 from .models import TeamSession
+from .seat_types import CODEX_SEAT_TYPE
 from .services.pricing import account_billing_updates, fetch_seat_pricing
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
+    seat_counts_column_updates,
     seat_type_count_from_seat_counts,
     subscription_column_updates,
 )
@@ -147,7 +149,8 @@ async def upsert_team_from_session(
         updates["balance"] = str(balance_value) if balance_value is not None else None
 
     if "error" not in seat_counts:
-        official_codex = seat_type_count_from_seat_counts(seat_counts, "usage_based")
+        updates.update(seat_counts_column_updates(seat_counts))
+        official_codex = seat_type_count_from_seat_counts(seat_counts, CODEX_SEAT_TYPE)
         official_chatgpt = chatgpt_count_from_seat_counts(seat_counts)
         if official_codex is not None:
             updates["codex_count"] = official_codex
@@ -220,6 +223,7 @@ async def upsert_team_from_session(
                 "id", "name", "owner_email", "session_token", "access_token", "device_id",
                 "token_expires", "card_last4", "card_brand", "payment_method_id",
                 "seats_in_use", "seats_entitled", "codex_count", "chatgpt_count",
+                "seat_capacity_json", "seat_type_counts_json",
                 "is_codex_enabled",
                 "country_code", "billing_currency", "billing_symbol", "billing_period",
                 "price_per_seat", "discount_amount", "discount_duration_num_periods",

@@ -9,9 +9,11 @@ from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call
 from .database import get_db, log_operation
 from .member_cache_service import fetch_and_cache_members, get_cached_members
+from .seat_types import CODEX_SEAT_TYPE, DEFAULT_SEAT_TYPE
 from .services.pricing import account_billing_updates, fetch_seat_pricing
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
+    seat_counts_column_updates,
     member_seat_usage_from_members,
     member_seat_usage_from_members_data,
     safe_int,
@@ -38,7 +40,8 @@ def normalize_default_seat_type(settings: dict[str, Any]) -> str:
     value = settings.get("default_seat_type")
     if value is None:
         value = settings.get("value")
-    return "usage_based" if value == "usage_based" else "default"
+    # 工作区默认邀请席位只允许 default / usage_based，Premium 不能当默认值。
+    return CODEX_SEAT_TYPE if value == CODEX_SEAT_TYPE else DEFAULT_SEAT_TYPE
 
 
 def _chatgpt_error(result: dict[str, Any]) -> str | None:
@@ -177,7 +180,8 @@ async def _fetch_overview(
         updates["balance"] = str(balance_value) if balance_value is not None else None
 
     if "error" not in seat_counts:
-        official_codex = seat_type_count_from_seat_counts(seat_counts, "usage_based")
+        updates.update(seat_counts_column_updates(seat_counts))
+        official_codex = seat_type_count_from_seat_counts(seat_counts, CODEX_SEAT_TYPE)
         official_chatgpt = chatgpt_count_from_seat_counts(seat_counts)
         if official_codex is not None:
             updates["codex_count"] = official_codex

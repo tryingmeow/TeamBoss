@@ -14,7 +14,9 @@ from ..services.open_redemptions import (
     find_open_redemptions_in_team,
     unsettleable_team_note,
 )
+from ..seat_types import normalize_overage_policy
 from ..services.pricing import discounted_monthly_total
+from ..services.seat_capacity import cached_seat_capacity, cached_seat_type_counts
 from ..services.subscription_status import subscription_status_display
 from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
 from ..services.tg_commands import sync_email_chat_commands_sync
@@ -66,6 +68,9 @@ def _team_row_to_response(row) -> dict:
     d["is_codex_enabled"] = bool(d.get("is_codex_enabled", 0))
     d["default_seat_type"] = cached_default_seat_type(d.get("cached_data"))
     d["days_remaining"] = _compute_days_remaining(d.get("active_until"))
+    d["overage_policy"] = normalize_overage_policy(d.get("overage_policy"))
+    d["seat_capacity"] = cached_seat_capacity(d.get("seat_capacity_json"))
+    d["seat_type_counts"] = cached_seat_type_counts(d.get("seat_type_counts_json"))
     if d.get("chatgpt_count") is None:
         d["chatgpt_count"] = max(
             0,
