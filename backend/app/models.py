@@ -66,6 +66,8 @@ class TeamResponse(BaseModel):
     seat_capacity: Optional[Dict[str, Dict[str, int]]] = None
     # 缓存的 seat_type_counts 原样计数（含未知类型）；{} = 未知。
     seat_type_counts: Dict[str, int] = {}
+    # 成员缓存里待接受邀请按席位类型（上游原值，缺失按 default）的计数；{} = 无缓存或读不出。
+    pending_invite_counts: Dict[str, int] = {}
 
 
 class ProxyCreate(BaseModel):

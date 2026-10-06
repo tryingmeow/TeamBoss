@@ -157,3 +157,58 @@ class PremiumTelegramSummaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PendingInviteCountsTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        asyncio.run(app_database.init_database())
+        conn = sqlite3.connect(app_database.get_db_path())
+        for team_id in ("c1", "c2", "c3"):
+            conn.execute(
+                "INSERT INTO teams (id, name, status, created_at, updated_at) "
+                "VALUES (?, ?, 'active', '2026-10-01', '2026-10-01')",
+                (team_id, team_id),
+            )
+        pending = [
+            {"email": "a@x.com", "seat_type": "prolite"},
+            {"email": "b@x.com", "seat_type": "default"},
+            {"email": "c@x.com"},
+            {"email": "d@x.com", "seat_type": "automation"},
+            {"email": "e@x.com", "seat_type": "prolite"},
+        ]
+        conn.execute(
+            "INSERT INTO member_cache (team_id, members_json, pending_json, updated_at) VALUES ('c1', '[]', ?, 'x')",
+            (json.dumps(pending),),
+        )
+        conn.execute(
+            "INSERT INTO member_cache (team_id, members_json, pending_json, updated_at) VALUES ('c2', '[]', '{bad', 'x')"
+        )
+        conn.commit()
+        conn.close()
+
+    def test_counts_per_raw_type_with_missing_as_default(self):
+        expected = {"prolite": 2, "default": 2, "automation": 1}
+        self.assertEqual(asyncio.run(get_team("c1"))["pending_invite_counts"], expected)
+        listed = {t["id"]: t for t in asyncio.run(list_teams())}
+        self.assertEqual(listed["c1"]["pending_invite_counts"], expected)
+
+    def test_unparseable_or_missing_cache_gives_empty(self):
+        self.assertEqual(asyncio.run(get_team("c2"))["pending_invite_counts"], {})
+        self.assertEqual(asyncio.run(get_team("c3"))["pending_invite_counts"], {})
+        listed = {t["id"]: t for t in asyncio.run(list_teams())}
+        self.assertEqual(listed["c2"]["pending_invite_counts"], {})
+        self.assertEqual(listed["c3"]["pending_invite_counts"], {})
+
+    def test_policy_patch_helper_path_is_filled(self):
+        from app.routes.teams import _team_row_to_response
+
+        conn = sqlite3.connect(app_database.get_db_path())
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM teams WHERE id = 'c1'").fetchone()
+        conn.close()
+        self.assertEqual(_team_row_to_response(row)["pending_invite_counts"]["prolite"], 2)

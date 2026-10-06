@@ -2,19 +2,20 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
 from ..chatgpt_limiter import refresh_team_auth, run_chatgpt_call
-from ..database import get_db, log_operation, get_sessions_dir
+from ..database import get_db, get_db_path, log_operation, get_sessions_dir
 from ..models import DefaultSeatTypeRequest, TeamProxyUpdate, TeamRemarkUpdate, TeamSession, TeamResponse
 from ..services.open_redemptions import (
     delete_team_refusal_detail,
     find_open_redemptions_in_team,
     unsettleable_team_note,
 )
-from ..seat_types import normalize_overage_policy
+from ..seat_types import normalize_overage_policy, normalize_seat_type
 from ..services.pricing import discounted_monthly_total
 from ..services.seat_capacity import cached_seat_capacity, cached_seat_type_counts
 from ..services.subscription_status import subscription_status_display
@@ -55,8 +56,47 @@ def _compute_days_remaining(active_until: str) -> int | None:
         return None
 
 
-def _team_row_to_response(row) -> dict:
+def pending_invite_counts_from_json(raw) -> dict[str, int]:
+    """member_cache.pending_json → {席位类型: 待接受邀请数}；读不出一律 {}。"""
+    if not raw:
+        return {}
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(items, list):
+        return {}
+    counts: dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        seat_type = normalize_seat_type(item.get("seat_type"))
+        counts[seat_type] = counts.get(seat_type, 0) + 1
+    return counts
+
+
+def _read_pending_invite_counts(team_id) -> dict[str, int]:
+    """单个 Team 的缓存读取（只读本地库，无上游调用）。列表接口走批量查询，不经过这里。"""
+    try:
+        conn = sqlite3.connect(get_db_path())
+        try:
+            row = conn.execute(
+                "SELECT pending_json FROM member_cache WHERE team_id = ?", (team_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return {}
+    return pending_invite_counts_from_json(row[0]) if row else {}
+
+
+def _team_row_to_response(row, pending_invite_counts: dict[str, int] | None = None) -> dict:
     d = dict(row)
+    d["pending_invite_counts"] = (
+        pending_invite_counts
+        if pending_invite_counts is not None
+        else _read_pending_invite_counts(d.get("id"))
+    )
     # Subscription data is deliberately nullable when its upstream request
     # failed. Keep the public dashboard contract string-safe while showing an
     # empty currency until the next successful sync fills it in.
@@ -136,7 +176,9 @@ async def list_teams():
         cache_rows = await cache_cursor.fetchall()
 
     email_cache: dict[str, list[str]] = {}
+    pending_counts: dict[str, dict[str, int]] = {}
     for c in cache_rows:
+        pending_counts[c["team_id"]] = pending_invite_counts_from_json(c["pending_json"])
         emails: set[str] = set()
         try:
             for m in json.loads(c["members_json"] or "[]"):
@@ -154,7 +196,7 @@ async def list_teams():
 
     result = []
     for r in rows:
-        team = _team_row_to_response(r)
+        team = _team_row_to_response(r, pending_counts.get(r["id"], {}))
         team["cached_member_emails"] = email_cache.get(r["id"], [])
         result.append(team)
     return result
