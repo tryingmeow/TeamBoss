@@ -59,6 +59,8 @@ class _FlowBase(unittest.IsolatedAsyncioTestCase):
 
         self.upstream: dict[str, dict] = {}
         self.live: dict[str, dict] = {}
+        # 某个 Team 收到邀请之后再拉名单时返回的快照（没设就沿用 self.live）。
+        self.after_invite: dict[str, dict] = {}
         self.invites: list[tuple[str, str, str]] = []
         self.capacity_reads: list[str] = []
         self.invite_result: dict = {"_mutation_status": "confirmed"}
@@ -83,6 +85,8 @@ class _FlowBase(unittest.IsolatedAsyncioTestCase):
                 return dict(test.invite_result)
 
         async def fake_fetch(team_id, client):
+            if team_id in self.after_invite and any(inv[0] == team_id for inv in self.invites):
+                return self.after_invite[team_id]
             return self.live.get(team_id, {"members": [], "pending_invites": []})
 
         self.notify_admins = AsyncMock(return_value=1)
@@ -253,6 +257,26 @@ class ChatGPTCodeNeverOverfillsTest(_FlowBase):
         self.assertEqual(await reserved_seats("team-a", "default"), 1)
         self.assertEqual(await reserved_seats("team-a", "prolite"), 0)
 
+    async def test_chatgpt_invite_visible_in_snapshot_is_not_reserved(self):
+        # ChatGPT 照旧：刷新后的名单里已经看得见这个邀请，就不再额外占位。
+        await self._team("team-a")
+        self._upstream(
+            "team-a",
+            subscription=_subscription(
+                entitled=5, in_use=1, capacity=[{"type": "default", "paid": 5, "available": 4}]
+            ),
+            counts={"default": 1, "usage_based": 0},
+        )
+        self.after_invite["team-a"] = {
+            "members": [],
+            "pending_invites": [{"email": EMAIL, "seat_type": "default"}],
+        }
+        await self._token("atm_chatgpt_visible")
+        result = await self._redeem("atm_chatgpt_visible")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(self.invites, [("team-a", EMAIL, "default")])
+        self.assertEqual(await reserved_seats("team-a", "default"), 0)
+
 
 class PremiumCodeRoutingTest(_FlowBase):
     def _premium_upstream(self, team_id, *, paid=1, available=1, pending=(), entry=True):
@@ -400,6 +424,34 @@ class PremiumCodeRoutingTest(_FlowBase):
         result = await self._redeem("atm_prem_retry")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(self.invites, [("team-a", EMAIL, "prolite")])
+
+    async def test_premium_invite_visible_in_snapshot_still_reserves_the_seat(self):
+        await self._team("team-a", cached_capacity={"prolite": {"paid": 2, "available": 2}})
+        self._premium_upstream("team-a", paid=2, available=2)
+        self.after_invite["team-a"] = {
+            "members": [],
+            "pending_invites": [{"email": EMAIL, "seat_type": "prolite"}],
+        }
+        await self._token("atm_prem_visible", "prolite")
+        result = await self._redeem("atm_prem_visible")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(self.invites, [("team-a", EMAIL, "prolite")])
+        self.assertEqual(await reserved_seats("team-a", "prolite"), 1)
+        self.assertEqual(await reserved_seats("team-a", "default"), 0)
+
+    async def test_uncertain_premium_invite_seen_on_recheck_still_reserves_the_seat(self):
+        # 超时后重新拉名单看见了人 → 升级成确认成功，照样占住 Premium 空位。
+        await self._team("team-a", cached_capacity={"prolite": {"paid": 1, "available": 1}})
+        self._premium_upstream("team-a", paid=1, available=1)
+        self.invite_result = {"error": "timeout", "_mutation_status": "uncertain"}
+        self.after_invite["team-a"] = {
+            "members": [],
+            "pending_invites": [{"email": EMAIL, "seat_type": "prolite"}],
+        }
+        await self._token("atm_prem_uncertain_seen", "prolite")
+        result = await self._redeem("atm_prem_uncertain_seen")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(await reserved_seats("team-a", "prolite"), 1)
 
     async def test_uncertain_premium_invite_keeps_code_locked_and_holds_the_seat(self):
         await self._team("team-a", cached_capacity={"prolite": {"paid": 1, "available": 1}})

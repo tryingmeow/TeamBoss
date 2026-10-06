@@ -1543,7 +1543,11 @@ async def _invite_to_available_team(
                         team["id"],
                         email,
                     )
-            if not _snapshot_contains_email(snapshot, email):
+            # Premium：不管刷新后的名单里看不看得见这个邀请，都占住一个 Premium 空位
+            # （15 分钟）。待接受邀请要是没带 seat_type、或上游的 available 还没扣掉它，
+            # 只靠名单就会把这个空位再卖一次、触发自动加购；多占一会儿最多少卖一单。
+            # ChatGPT 照旧：名单里还看不见时才占。
+            if premium or not _snapshot_contains_email(snapshot, email):
                 try:
                     if premium:
                         await reserve_seat(team["id"], email, PREMIUM_SEAT_TYPE)
