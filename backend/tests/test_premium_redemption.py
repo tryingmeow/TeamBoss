@@ -100,6 +100,7 @@ class _FlowBase(unittest.IsolatedAsyncioTestCase):
             (access_tokens, "run_chatgpt_call", _direct_call),
             (seat_capacity_module, "run_chatgpt_call", _direct_call),
             (access_tokens, "notify_admins", self.notify_admins),
+            (access_tokens, "_premium_notice_sent", {}),
             (access_tokens, "notify_member_event", self.notify_member_event),
             (
                 access_tokens,
@@ -406,6 +407,22 @@ class PremiumCodeRoutingTest(_FlowBase):
         await self._assert_not_consumed(token_id)
         self.notify_admins.assert_awaited_once()
 
+    async def test_repeated_no_seat_refusals_notify_once_per_code_but_log_each(self):
+        await self._team("team-a", cached_capacity={"prolite": {"paid": 1, "available": 1}})
+        self._premium_upstream("team-a", paid=1, available=0)
+        await self._assert_premium_refused("atm_prem_repeat")
+        # 缓存已被实时复查写成 0，第二次在预筛就被挡住；照样拒绝、照样记日志，但不再发通知。
+        with self.assertRaises(HTTPException):
+            await self._redeem("atm_prem_repeat")
+        self.notify_admins.assert_awaited_once()
+        self.assertEqual(len(await self._logs("redeem_no_premium_seat")), 2)
+
+        # 另一个码照常通知。
+        await self._token("atm_prem_other", "prolite")
+        with self.assertRaises(HTTPException):
+            await self._redeem("atm_prem_other")
+        self.assertEqual(self.notify_admins.await_count, 2)
+
     async def test_refused_premium_code_can_be_used_once_a_seat_frees_up(self):
         await self._team("team-a", cached_capacity={"prolite": {"paid": 1, "available": 1}})
         self._premium_upstream("team-a", paid=1, available=0)
@@ -536,9 +553,12 @@ class RenewalSeatTypeTest(_FlowBase):
         self.assertEqual(token["used_count"], 1)
         self.assertEqual(self.invites, [])
 
-    async def _assert_mismatch(self, raw, code_seat_type, member_seat_type, detail, *, kind="member"):
+    async def _assert_mismatch(
+        self, raw, code_seat_type, member_seat_type, detail, log_message, *, kind="member"
+    ):
         await self._member("team-a", member_seat_type, kind=kind)
         token_id = await self._token(raw, code_seat_type)
+        # 客户看到的（HTTP 答复）是第二人称。
         await self._assert_refused(raw, detail)
         self.assertEqual(self.invites, [])
         self.assertEqual(await self._expiry(), FUTURE)
@@ -547,6 +567,14 @@ class RenewalSeatTypeTest(_FlowBase):
         self.assertEqual(len(logs), 1)
         self.assertEqual(logs[0]["team_id"], "team-a")
         self.assertIn(f"seat_type={code_seat_type}", logs[0]["detail"])
+        # 管理员看的操作日志说明是第三人称。
+        self.assertEqual(logs[0]["error_message"], log_message)
+        self.assertNotIn("你", logs[0]["error_message"])
+        # 公开兑换记录（给客户自己看）保持第二人称，与 HTTP 答复一致。
+        use = (await self._rows(
+            "SELECT error_message FROM access_token_uses WHERE token_id = ?", (token_id,)
+        ))[0]
+        self.assertEqual(use["error_message"], detail)
         self.notify_admins.assert_not_awaited()
         return logs[0]
 
@@ -571,6 +599,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "default",
             "prolite",
             "兑换码是 ChatGPT 码，你当前是 Premium 席位，不能用它续期。兑换码未使用。",
+            "兑换码是 ChatGPT 码，该成员当前是 Premium 席位，未续期，兑换码未使用。",
         )
         self.assertIn("member_seat_type=prolite", log["detail"])
         self.assertIn("reason=seat_type_mismatch", log["detail"])
@@ -581,6 +610,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "prolite",
             "default",
             "兑换码是 Premium 码，你当前是 ChatGPT 席位，不能用它续期。兑换码未使用。",
+            "兑换码是 Premium 码，该成员当前是 ChatGPT 席位，未续期，兑换码未使用。",
         )
 
     async def test_premium_code_on_member_with_missing_seat_type_is_refused(self):
@@ -589,6 +619,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "prolite",
             None,
             "兑换码是 Premium 码，你当前是 ChatGPT 席位，不能用它续期。兑换码未使用。",
+            "兑换码是 Premium 码，该成员当前是 ChatGPT 席位，未续期，兑换码未使用。",
         )
 
     async def test_premium_code_on_pending_chatgpt_invite_is_refused(self):
@@ -597,6 +628,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "prolite",
             "default",
             "兑换码是 Premium 码，你当前是 ChatGPT 席位，不能用它续期。兑换码未使用。",
+            "兑换码是 Premium 码，该成员当前是 ChatGPT 席位，未续期，兑换码未使用。",
             kind="invite",
         )
 
@@ -606,6 +638,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "prolite",
             "usage_based",
             "兑换码是 Premium 码，你当前是 Codex 席位，不能用它续期。兑换码未使用。",
+            "兑换码是 Premium 码，该成员当前是 Codex 席位，未续期，兑换码未使用。",
         )
 
     async def test_unknown_member_seat_type_is_refused_for_both_code_types(self):
@@ -614,6 +647,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "default",
             "automation",
             access_tokens._UNKNOWN_MEMBER_SEAT_TYPE_DETAIL,
+            "该成员当前是 其他（automation） 席位，TeamBoss 不认识这种席位，未续期，兑换码未使用。",
         )
         self.assertIn("reason=unknown_member_seat_type", log["detail"])
         await self._exec("DELETE FROM member_expiry")
@@ -623,6 +657,7 @@ class RenewalSeatTypeTest(_FlowBase):
             "prolite",
             "automation",
             access_tokens._UNKNOWN_MEMBER_SEAT_TYPE_DETAIL,
+            "该成员当前是 其他（automation） 席位，TeamBoss 不认识这种席位，未续期，兑换码未使用。",
         )
 
     async def test_team_choices_mark_seat_type_mismatch_as_not_renewable(self):

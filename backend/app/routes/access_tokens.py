@@ -213,6 +213,9 @@ _INVALID_CODE_SEAT_TYPE_DETAIL = "这张兑换码的席位类型无效，暂不�
 _UNKNOWN_MEMBER_SEAT_TYPE_DETAIL = "你当前的席位类型不能用兑换码续期。兑换码未使用，如需处理请联系管理员。"
 # 告诉管理员 Premium 码没位置时，最多列出这么多个 Team 的原因。
 _NOTICE_MAX_TEAMS = 8
+# 同一个码「Premium 没位置」的 Telegram 通知一小时最多一条（客户可能反复重试）；日志每次都写。
+_PREMIUM_NOTICE_WINDOW_SECONDS = 3600
+_premium_notice_sent: dict[Any, float] = {}
 
 
 def _renewal_seat_type_block(code_seat_type: str, member_seat_type: Any) -> Optional[str]:
@@ -241,6 +244,20 @@ def _seat_type_mismatch_detail(code_seat_type: str, member_seat_type: Any, reaso
     )
 
 
+def _seat_type_mismatch_log_message(code_seat_type: str, member_seat_type: Any, reason: str) -> str:
+    """同一次拒绝写进操作日志的说明：读者是管理员，用第三人称（客户看到的是
+    _seat_type_mismatch_detail，第二人称）。"""
+    if reason == "unknown_member_seat_type":
+        return (
+            f"该成员当前是 {seat_type_label(member_seat_type)} 席位，TeamBoss 不认识这种席位，"
+            "未续期，兑换码未使用。"
+        )
+    return (
+        f"兑换码是 {seat_type_label(code_seat_type)} 码，该成员当前是 "
+        f"{seat_type_label(member_seat_type)} 席位，未续期，兑换码未使用。"
+    )
+
+
 class _SeatTypeMismatch(Exception):
     """续期时码的席位类型和成员当前的席位类型对不上。在任何本地写入之前抛出，码不消耗。"""
 
@@ -259,7 +276,9 @@ class _SeatTypeMismatch(Exception):
         self.code_seat_type = normalize_seat_type(code_seat_type)
         self.member_seat_type = normalize_seat_type(member_seat_type)
         self.reason = reason
+        # detail 给客户（HTTP 答复、公开兑换记录）；log_message 给管理员（操作日志）。
         self.detail = _seat_type_mismatch_detail(code_seat_type, member_seat_type, reason)
+        self.log_message = _seat_type_mismatch_log_message(code_seat_type, member_seat_type, reason)
 
 
 class _NoPremiumSeat(HTTPException):
@@ -2265,6 +2284,12 @@ async def _report_no_premium_seat(
             else "兑换码状态待核对，请在兑换记录里查看这笔兑换。"
         ),
     ]
+    notice_key = token_row.get("id") if token_row.get("id") is not None else token_row.get("token_prefix")
+    now = time.monotonic()
+    last_sent = _premium_notice_sent.get(notice_key)
+    if last_sent is not None and now - last_sent < _PREMIUM_NOTICE_WINDOW_SECONDS:
+        return
+    _premium_notice_sent[notice_key] = now
     try:
         await notify_admins(detail_card("⚠️ Premium 兑换码没有可用席位", rows))
     except Exception:
@@ -2549,7 +2574,7 @@ async def _redeem_valid_token(
                         f"member_seat_type={mismatch.member_seat_type}, "
                         f"reason={mismatch.reason}, token_use_id={token_use_id}",
                         "failed",
-                        None,
+                        mismatch.log_message,
                         "manual",
                     )
                 except Exception:
