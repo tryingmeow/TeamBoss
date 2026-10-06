@@ -438,9 +438,10 @@ class AsyncRefreshRejectsIncompleteSnapshotTest(_Db):
                 self.assertEqual(len(before_holds), 1)
 
     def test_incomplete_invite_list_fails_the_refresh(self):
+        owner = _live(f"owner-{TEAM}@example.com", "u-owner", "default", role="account-owner")
         exc = self._refresh(
             _ListClient(
-                member_pages=[{"items": [], "total": 0}],
+                member_pages=[{"items": [owner], "total": 1}],
                 invite_pages=[{"items": [], "total": 1}],
             )
         )

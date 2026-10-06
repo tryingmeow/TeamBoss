@@ -302,6 +302,10 @@ class _Missing:
 _MISSING = _Missing()
 
 
+# 真实的 /users 回复里至少有 owner。
+_OWNER_ROW = {"id": "u-owner", "email": "owner@example.com", "role": "account-owner"}
+
+
 def _subscription(entitled):
     sub = {
         "seats_in_use": 3,
@@ -328,7 +332,7 @@ class _FakeSyncClient:
         return {"seat_type_counts": {"default": 3, "usage_based": 0}}
 
     def get_members(self, offset=0, limit=100):
-        return {"items": [], "total": 0}
+        return {"items": [dict(_OWNER_ROW)], "total": 1}
 
     def get_pending_invites(self, offset=0, limit=100):
         return {"items": [], "total": 0}
@@ -627,10 +631,17 @@ class AutoKickLookupFailsClosedTest(unittest.TestCase):
             self.assertIsNone(user_id)
             self.assertTrue(error)
 
-            # 结构完整：真的空队 / 真的找到。
+            # 空的成员名单不完整（真实名单里至少有 owner），同样不能当成"不在"。
+            user_id, error = _find_member_user_id_by_email(
+                _PagedClient(members_pages=[{"items": [], "total": 0}]), EMAIL
+            )
+            self.assertIsNone(user_id)
+            self.assertTrue(error)
+
+            # 结构完整：真的不在 / 真的找到。
             self.assertEqual(
                 _find_member_user_id_by_email(
-                    _PagedClient(members_pages=[{"items": [], "total": 0}]), EMAIL
+                    _PagedClient(members_pages=[{"items": [dict(_OWNER_ROW)], "total": 1}]), EMAIL
                 ),
                 (None, None),
             )
@@ -718,14 +729,14 @@ class AutoKickKeepsRowOnUnrecognizedReplyTest(_TempDbTest):
 
     def test_unrecognized_invite_reply_leaves_the_row_for_next_round(self):
         self._seed_expired_row()
-        row, log = self._run(members_pages=[{"items": []}], invite_pages=[{"invites": None}])
+        row, log = self._run(members_pages=[{"items": [dict(_OWNER_ROW)]}], invite_pages=[{"invites": None}])
         self.assertEqual(row["kicked"], 0)
         self.assertEqual(log["result"], "failed")
         self.assertEqual(log["detail"], "lookup pending invite")
 
     def test_confirmed_absence_still_closes_the_row(self):
         self._seed_expired_row()
-        row, log = self._run(members_pages=[{"items": []}], invite_pages=[{"items": []}])
+        row, log = self._run(members_pages=[{"items": [dict(_OWNER_ROW)]}], invite_pages=[{"items": []}])
         self.assertEqual(row["kicked"], 1)
         self.assertEqual(row["kick_source"], "auto_expire")
         self.assertEqual(log["detail"], "member or invite already absent")

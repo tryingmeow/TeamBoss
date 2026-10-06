@@ -22,6 +22,11 @@
 - 同一份名单（一个累加器，跨页也算）里两行 id 相同、或邮箱相同（不分大小写），整份名单
   不完整。绝不悄悄去重：重复行同样凑了条数，掩盖的是没拉到的那个人；重复的 owner 还会
   让按人头数的席位判断多算一个，把正当的人当成超员。成员名单和邀请名单同一条规则。
+- 成员名单不能是空的：真实的 /users 回复里至少有 owner。拉完一行都没有（``{"items": [],
+  "total": 0}``，或不报总数的空页）说明这不是这个 Team 的真名单，按不完整处理，否则会把
+  所有人判成缺席、清空缓存、放掉全部席位占用。规则由 ``require_items=True`` 打开：每一处
+  /users 分页（异步刷新、scheduler 的数据同步 / 踢人监视 / 到期踢人的成员查找、patrol 严格
+  模式刷新）都传它；邀请名单不传，空的邀请名单是正常的。
 """
 from __future__ import annotations
 
@@ -75,9 +80,11 @@ class SnapshotPageAccumulator:
         # 翻到上限还没完整：不完整
     """
 
-    def __init__(self, *fallback_keys: str, limit: int) -> None:
+    def __init__(self, *fallback_keys: str, limit: int, require_items: bool = False) -> None:
         self.item_keys = ("items",) + tuple(fallback_keys)
         self.limit = max(1, int(limit))
+        # True = 这是成员名单，拉完却一行都没有算不完整（真实名单里至少有 owner）。
+        self.require_items = bool(require_items)
         self.items: list[dict] = []
         self._pages = 0
         self._has_total: Optional[bool] = None
@@ -123,13 +130,18 @@ class SnapshotPageAccumulator:
         short_page = len(page_items) < self.limit
         if has_total:
             if len(self.items) == total:
-                return True
+                return self._complete()
             if len(self.items) > total:
                 raise SnapshotPageError("more member/invite entries than the reported total")
             if short_page:
                 raise SnapshotPageError("truncated member/invite response before reported total")
             return False
-        return short_page
+        return self._complete() if short_page else False
+
+    def _complete(self) -> bool:
+        if self.require_items and not self.items:
+            raise SnapshotPageError("empty member list")
+        return True
 
     def _check_identities(self, page_items: list[dict]) -> None:
         """每行要有 id 或邮箱；同一份名单里 id、邮箱都不能重复（跨页也算）。"""

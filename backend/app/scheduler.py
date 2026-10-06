@@ -204,15 +204,16 @@ def _log_operation_sync(team_id, action, target_email=None, detail=None,
         pass
 
 
-def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000):
+def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000, require_items=False):
     """分页拉完整份成员/邀请名单，返回 ``(items, error)``。
 
     只有拿到完整的名单才返回 ``(items, None)``——调用方会据此判"某人不在"（反向检测、
     到期踢人的邮箱查找、踢人监视）。何时算完整只按 ``SnapshotPageAccumulator``
     （snapshot_pages 正本）：认不出的 200、条数与 total 对不上、total 中途变了、翻到上限
     还没结束，都返回 error，那是未知状态，不是空名单。上游报错页原样返回它的 error。
+    成员名单（get_members）传 ``require_items=True``：拉完是空的同样是 error。
     """
-    pages = SnapshotPageAccumulator(*fallback_keys, limit=limit)
+    pages = SnapshotPageAccumulator(*fallback_keys, limit=limit, require_items=require_items)
     while pages.next_offset < max_items:
         data = run_chatgpt_call_sync(method, offset=pages.next_offset, limit=pages.limit)
         try:
@@ -284,7 +285,9 @@ def _find_member_user_id_by_email(client: ChatGPTClient, email: str):
     if not email:
         return None, None
     email = email.lower()
-    members, error = _fetch_all_api_items_sync(client.get_members, "users", limit=100)
+    members, error = _fetch_all_api_items_sync(
+        client.get_members, "users", limit=100, require_items=True
+    )
     if error:
         return None, error
     for member in members:
@@ -1327,7 +1330,9 @@ def data_sync_job():
                 snapshot_taken_at = datetime.now(timezone.utc)
                 # 同一时刻也是这份快照的 fetch_started_at（写缓存时只让开始得更晚的覆盖更早的）。
                 fetch_started_at = snapshot_taken_at.isoformat(timespec="microseconds")
-                members_items, m_err = _fetch_all_api_items_sync(client.get_members, "users")
+                members_items, m_err = _fetch_all_api_items_sync(
+                    client.get_members, "users", require_items=True
+                )
                 pending_items, p_err = _fetch_all_api_items_sync(client.get_pending_invites, "invites")
 
                 if not m_err and not p_err:
@@ -1864,7 +1869,9 @@ def member_watch_job():
 
                 # 拉取最新成员列表
                 fetch_started_at = snapshot_fetch_started_now()
-                members, members_error = _fetch_all_api_items_sync(client.get_members, "users")
+                members, members_error = _fetch_all_api_items_sync(
+                    client.get_members, "users", require_items=True
+                )
                 pending, pending_error = _fetch_all_api_items_sync(client.get_pending_invites, "invites")
 
                 if members_error or pending_error:

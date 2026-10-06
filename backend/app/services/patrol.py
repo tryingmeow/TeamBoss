@@ -1128,14 +1128,17 @@ def _patrol_revoke_invite(conn: sqlite3.Connection, client: ChatGPTClient, team_
 
 # ── 严格模式：动手前强制实时刷新 + 唯一踢人入口 ───────────────────────────────
 
-def _fetch_all_api_items_sync(method, *fallback_keys: str, limit: int = 100, max_items: int = 10000):
+def _fetch_all_api_items_sync(
+    method, *fallback_keys: str, limit: int = 100, max_items: int = 10000, require_items: bool = False
+):
     """分页拉取 API 列表的同步小工具，供严格模式"动手前强制实时刷新"使用。返回 (条目, 错误)。
 
     每一页按 snapshot_pages.SnapshotPageAccumulator 判定（那里是"名单何时完整"的正本）：读不懂、
     条数和 total 对不上、翻到上限还没完，都返回 (None, 原因)，调用方跳过整队、不写缓存、不踢人。
-    上游这一页本身报错时，原因沿用上游原样的 error（和以前一样）。
+    上游这一页本身报错时，原因沿用上游原样的 error（和以前一样）。成员名单传
+    ``require_items=True``：拉完是空的同样不完整（真实名单里至少有 owner）。
     """
-    pages = SnapshotPageAccumulator(*fallback_keys, limit=limit)
+    pages = SnapshotPageAccumulator(*fallback_keys, limit=limit, require_items=require_items)
     # 100 条一页、最多 10000 条 = 最多 100 页，与 scheduler 的同步拉取相同。
     max_pages = max(1, (max_items + pages.limit - 1) // pages.limit)
     for _ in range(max_pages):
@@ -1163,7 +1166,7 @@ def _refresh_team_snapshot_sync(
     client = ChatGPTClient(team["access_token"], team_id, team["device_id"], proxy_url=proxy_url)
 
     fetch_started_at = snapshot_fetch_started_now()
-    members_items, m_err = _fetch_all_api_items_sync(client.get_members, "users")
+    members_items, m_err = _fetch_all_api_items_sync(client.get_members, "users", require_items=True)
     if m_err:
         return False, m_err, None
     pending_items, p_err = _fetch_all_api_items_sync(client.get_pending_invites, "invites")

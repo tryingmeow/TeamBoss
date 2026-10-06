@@ -325,13 +325,17 @@ def _raise_fetch_error(kind: str, data: dict) -> None:
 MAX_FETCH_PAGES = 100
 
 
-async def _fetch_all_pages(method, kind: str, *item_keys: str, limit: int = 100) -> list:
+async def _fetch_all_pages(
+    method, kind: str, *item_keys: str, limit: int = 100, require_items: bool = False
+) -> list:
     """分页拉完整份名单；何时算完整只按 ``SnapshotPageAccumulator``（snapshot_pages 正本）。
+
+    成员名单传 ``require_items=True``：拉完是空的也算不完整（真实名单里至少有 owner）。
 
     拉不全、读不懂一律 502（上一份缓存保留，这次刷新算失败）。上游报错页沿用原来的
     ``Failed to fetch <kind>: <上游错误>``，``is_auth_error`` 靠这段文字认 401。
     """
-    pages = SnapshotPageAccumulator(*item_keys, limit=limit)
+    pages = SnapshotPageAccumulator(*item_keys, limit=limit, require_items=require_items)
 
     for _ in range(MAX_FETCH_PAGES):
         data = await run_chatgpt_call(method, pages.next_offset, pages.limit)
@@ -413,7 +417,7 @@ async def _fetch_and_cache_members_impl(team_id: str, client: ChatGPTClient) -> 
 
     fetch_started_at = snapshot_fetch_started_now()
     member_items, pending_items = await asyncio.gather(
-        _fetch_all_pages(client.get_members, "members", "users"),
+        _fetch_all_pages(client.get_members, "members", "users", require_items=True),
         _fetch_all_pages(client.get_pending_invites, "pending invites", "invites"),
     )
     members_data = {"items": member_items, "total": len(member_items)}

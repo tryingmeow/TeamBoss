@@ -177,5 +177,36 @@ class SnapshotRowIdentityTests(unittest.TestCase):
         self.assertEqual(len(acc.items), 205)
 
 
+class RequiredItemsTests(unittest.TestCase):
+    """成员名单（require_items=True）拉完不能是空的；邀请名单可以。"""
+
+    def test_member_list_that_completes_empty_is_incomplete(self):
+        for pages in (
+            [{"items": [], "total": 0}],
+            [{"items": []}],
+            [{"users": [], "total": None}],
+        ):
+            with self.subTest(pages=pages):
+                acc = SnapshotPageAccumulator("users", limit=100, require_items=True)
+                with self.assertRaises(SnapshotPageError) as ctx:
+                    for page in pages:
+                        acc.add(page)
+                self.assertEqual(ctx.exception.reason, "empty member list")
+
+    def test_member_list_with_the_owner_is_complete(self):
+        acc = SnapshotPageAccumulator("users", limit=100, require_items=True)
+        owner = {"id": "u-owner", "email": "owner@example.com", "role": "account-owner"}
+        self.assertTrue(acc.add({"items": [owner], "total": 1}))
+
+    def test_empty_trailing_page_without_total_is_fine_once_rows_were_seen(self):
+        acc = SnapshotPageAccumulator("users", limit=2, require_items=True)
+        self.assertFalse(acc.add({"items": _members(2)}))
+        self.assertTrue(acc.add({"items": []}))
+
+    def test_invite_list_may_be_empty(self):
+        self.assertTrue(SnapshotPageAccumulator("invites", limit=100).add({"items": [], "total": 0}))
+        self.assertTrue(SnapshotPageAccumulator("invites", limit=100).add({"items": []}))
+
+
 if __name__ == "__main__":
     unittest.main()

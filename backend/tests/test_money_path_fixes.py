@@ -460,7 +460,7 @@ class AbsenceJudgementSkipsRowsNewerThanSnapshotTest(unittest.TestCase):
         self.assertIn("if _too_new_to_judge_absent(", source)
         # 快照时刻必须在拉名单之前取，否则这个界限本身就是错的。
         snapshot_line = source.index("snapshot_taken_at = datetime.now(timezone.utc)")
-        members_line = source.index('_fetch_all_api_items_sync(client.get_members, "users")')
+        members_line = source.index("members_items, m_err = _fetch_all_api_items_sync(")
         self.assertLess(snapshot_line, members_line)
 
 

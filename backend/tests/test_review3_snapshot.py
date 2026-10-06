@@ -2,6 +2,9 @@
 
 - F2：名单里每一行都要认得出是谁，id / 邮箱不能重复；否则整份名单不完整，异步刷新保留
   上一份缓存和席位占用，调度器的数据同步不关任何 member_expiry 行。
+- F3：空的 /users 回复（``{"items": [], "total": 0}``）不完整——真实名单里至少有 owner。
+  数据同步不关行、异步刷新不动缓存和占用、踢人监视不收尾、到期踢人的查找不说「人不在」、
+  patrol 严格模式的刷新失败。空的邀请名单照常有效。
 
 累加器本身的规则在 test_snapshot_pages.py。上游一律是只记录调用的假客户端，绝不触网。
 """
@@ -16,6 +19,8 @@ from test_review2_holds import (  # noqa: I001  (_isolation first, via the suppo
     _patched,
 )
 from test_premium_overage_support import direct_call
+from test_premium_patrol import OLD, RecordingClient, _live, _member
+from test_review_fix_premium_patrol import _Fixture as _PatrolFixture
 
 import asyncio
 import json
@@ -29,6 +34,7 @@ from app import member_cache_service
 from app import scheduler as app_scheduler
 from app.services import patrol as patrol_service
 from app.services import team_health_alerts, tg_notify, tg_summary
+from app.services.snapshot_pages import SnapshotPageAccumulator
 
 OWNER = {
     "id": "user-owner-r3",
@@ -38,8 +44,15 @@ OWNER = {
 }
 
 
+EMPTY_USERS = [{"items": [], "total": 0}]
+
+
 def _owner_twice():
     return [{"items": [dict(OWNER), dict(OWNER)], "total": 2}]
+
+
+def _owner_only():
+    return [{"items": [dict(OWNER)], "total": 1}]
 
 
 class _SyncClient:
@@ -221,6 +234,121 @@ class DuplicateOwnerSnapshotTest(_SnapshotCase):
         self.assertIsNone(self.snapshot_failure())
         self.assertEqual(self.expiry_row(), {"kicked": 1, "kick_source": "detected"})
         self.assertEqual(self.holds(), [])
+
+
+# ═══ F3：空的成员名单不完整 ═════════════════════════════════════════════════════
+
+class EmptyMemberListTest(_SnapshotCase):
+    def test_data_sync_closes_nothing(self):
+        self.assert_data_sync_changes_nothing(EMPTY_USERS)
+        self.assertIn("empty member list", self.snapshot_failure())
+
+    def test_async_refresh_keeps_the_cache_and_the_hold(self):
+        self.assert_async_refresh_changes_nothing(
+            _ListClient(member_pages=EMPTY_USERS), "Failed to fetch members: empty member list"
+        )
+
+    def test_auto_kick_member_lookup_does_not_report_gone(self):
+        _SyncClient.member_pages = EMPTY_USERS
+        with patch.object(app_scheduler, "run_chatgpt_call_sync", lambda fn, *a, **kw: fn(*a, **kw)):
+            user_id, error = app_scheduler._find_member_user_id_by_email(_SyncClient(), EMAIL)
+        self.assertIsNone(user_id)
+        self.assertEqual(error, "empty member list")
+
+    def test_kick_watch_is_not_concluded(self):
+        # 「人已经走了」的踢人监视：一份空名单不能证明他不在，监视留着、缓存和占用不动。
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO member_watch (team_id, reason, target_email, target_user_id,
+                                         started_at, expires_at, done)
+               VALUES (?, 'kick', ?, ?, ?, ?, 0)""",
+            (
+                TEAM, EMAIL, USER_ID, datetime.now(timezone.utc).isoformat(),
+                (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        before_cache, before_holds = self.cache_row(), self.holds()
+        _SyncClient.member_pages = EMPTY_USERS
+
+        with patch.object(app_scheduler, "ChatGPTClient", _SyncClient), \
+             patch.object(app_scheduler, "run_chatgpt_call_sync", lambda fn, *a, **kw: fn(*a, **kw)), \
+             patch.object(app_scheduler, "edit_message_sync", lambda *a, **kw: None):
+            app_scheduler.member_watch_job()
+
+        conn = self._conn()
+        done = conn.execute("SELECT done FROM member_watch WHERE team_id = ?", (TEAM,)).fetchone()["done"]
+        conn.close()
+        self.assertEqual(done, 0)
+        self.assertEqual(self.cache_row(), before_cache)
+        self.assertEqual(self.holds(), before_holds)
+
+    def test_empty_invite_list_is_still_a_complete_snapshot(self):
+        self.assertIsNone(
+            self.refresh_async(_ListClient(member_pages=_owner_only(), invite_pages=[{"items": [], "total": 0}]))
+        )
+        cached = json.loads(self.cache_row()["members_json"])
+        self.assertEqual([m["email"] for m in cached], [OWNER["email"]])
+        self.assertEqual(json.loads(self.cache_row()["pending_json"]), [])
+        self.assertEqual(self.holds(), [])
+
+    def test_every_member_pagination_requires_rows(self):
+        # 每一处 /users 分页都打开 require_items；邀请名单的分页不打开。
+        seen = []
+        real = SnapshotPageAccumulator.__init__
+
+        def spy(acc, *keys, limit, require_items=False):
+            seen.append((keys, require_items))
+            real(acc, *keys, limit=limit, require_items=require_items)
+
+        with patch.object(SnapshotPageAccumulator, "__init__", spy):
+            self.refresh_async(_ListClient(member_pages=_owner_only()))
+            self.run_data_sync(_owner_only())
+        self.assertTrue(seen)
+        for keys, require_items in seen:
+            with self.subTest(keys=keys):
+                self.assertEqual(require_items, "users" in keys)
+
+
+class StrictRefreshEmptyMemberListTest(_PatrolFixture):
+    """严格模式：一个早过了等待期的 ChatGPT 外部成员，刷新成功就会被踢。"""
+
+    TEAM_ID = "team-r3-empty"
+
+    def setUp(self):
+        super().setUp()
+        owner = _member("owner@example.com", "u-owner", seat_type=None, is_owner=True, source=None)
+        keeper = _member("keeper@example.com", "u-k", source="system")
+        plain = _member("plain@example.com", "u-d", first_seen_at=OLD)
+        self._armed_team(self.TEAM_ID, [owner, keeper, plain], seats_entitled=99)
+        self._setting("patrol_strict_mode_enabled", "1")
+        self._hold(self.TEAM_ID, "keeper@example.com")
+
+    def test_empty_reply_fails_the_refresh_and_kicks_nobody(self):
+        RecordingClient.live_members = []
+        before = self._cache_row(self.TEAM_ID)
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        failed = [e for e in result["events"] if e.get("action") == "strict_refresh_failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["error"], "empty member list")
+        self.assertEqual(len(self._logs("patrol_strict_refresh_failed")), 1)
+        self.assertEqual(self._cache_row(self.TEAM_ID), before)
+        self.assertEqual(self._holds(self.TEAM_ID), {"keeper@example.com"})
+
+    def test_the_same_team_with_a_real_reply_is_kicked(self):
+        RecordingClient.live_members = [
+            {"id": "u-owner", "email": "owner@example.com", "role": "account-owner"},
+            _live("keeper@example.com", "u-k", "default"),
+            _live("plain@example.com", "u-d", "default"),
+        ]
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-d")])
 
 
 if __name__ == "__main__":
