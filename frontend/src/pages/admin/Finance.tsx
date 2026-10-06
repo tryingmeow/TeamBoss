@@ -45,21 +45,23 @@ import { SEAT_STYLE } from '../../lib/seatType';
 
 /**
  * Premium seats have no upstream price; the backend estimates them in USD. Always labelled 估算.
- * Written in the same unit as the row's ChatGPT fee: the Team's own symbol for a USD Team
- * ("$375" next to "$240"), the base currency otherwise ("≈" only when actually converted).
+ * Written like the rest of the 预计月费 column: in the base currency, "≈" only when converted.
  */
 function premiumEstimateText(
-  team: Pick<FinanceTeamItem, 'billing_currency' | 'premium_monthly_estimate_base' | 'premium_monthly_estimate_usd'>,
+  team: Pick<FinanceTeamItem, 'premium_monthly_estimate_base' | 'premium_monthly_estimate_usd'>,
   baseCurrency: string,
-  teamSymbol: string,
 ): string {
-  const usd = team.premium_monthly_estimate_usd ?? 0;
-  if (sameCurrency(team.billing_currency, 'USD')) return formatMoney(usd, teamSymbol);
-  if (sameCurrency(baseCurrency, 'USD')) return formatMoney(usd, 'USD');
   if (typeof team.premium_monthly_estimate_base === 'number') {
-    return `≈ ${formatMoney(team.premium_monthly_estimate_base, baseCurrency)}`;
+    return `${sameCurrency(baseCurrency, 'USD') ? '' : '≈ '}${formatMoney(team.premium_monthly_estimate_base, baseCurrency)}`;
   }
-  return formatMoney(usd, 'USD');
+  return formatMoney(team.premium_monthly_estimate_usd ?? 0, 'USD');
+}
+
+/** Why a renewing Team is left out of 月预计支出 (the backend counts it in excluded_teams_count). */
+function excludedReason(team: FinanceTeamItem): string {
+  if (team.billing_period === null) return '计费周期未知';
+  if (team.monthly_total_native === null) return '年付';
+  return '缺汇率';
 }
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
@@ -266,7 +268,11 @@ function LatestInvoiceCell({
   const nativeUnit = teamUnit(team, inv.currency);
   const nativeText = formatMoney(inv.display_amount, nativeUnit);
   const converted = inv.display_amount_base !== null && !sameCurrency(inv.currency, baseCurrency);
-  const primary = converted ? `≈ ${formatMoney(inv.display_amount_base, baseCurrency)}` : nativeText;
+  // 和预计月费同一种写法：基准币种（换算过的带 ≈）；原币在悬停提示和明细里。
+  const sameAsBase = sameCurrency(inv.currency, baseCurrency);
+  const primary = converted
+    ? `≈ ${formatMoney(inv.display_amount_base, baseCurrency)}`
+    : sameAsBase ? formatMoney(inv.display_amount, baseCurrency) : nativeText;
   const deviating = inv.reconciliation === 'over' || inv.reconciliation === 'under';
 
   let diffLine: string | null = null;
@@ -275,7 +281,7 @@ function LatestInvoiceCell({
     diffLine =
       converted && inv.diff_base !== null
         ? `比推算${word} ≈ ${formatMoney(Math.abs(inv.diff_base), baseCurrency)}`
-        : `比推算${word} ${formatMoney(Math.abs(inv.diff_native ?? inv.diff_base ?? 0), nativeUnit)}`;
+        : `比推算${word} ${formatMoney(Math.abs(inv.diff_native ?? inv.diff_base ?? 0), sameAsBase ? baseCurrency : nativeUnit)}`;
   }
 
   return (
@@ -821,6 +827,10 @@ export default function Finance() {
   );
 
   const baseCurrency = overview?.base_currency || 'USD';
+  // 与后端 excluded_teams_count 同一条件里能从明细看出来的那部分：续费中却算不出月费的 Team。
+  const excludedTeams = (overview?.teams ?? []).filter(
+    (team) => team.status === 'active' && team.subscription_status === 'renewing' && team.monthly_total_base === null,
+  );
   const currencyOptions = BASE_CURRENCIES.includes(baseCurrency) ? BASE_CURRENCIES : [baseCurrency, ...BASE_CURRENCIES];
   const alertCount = overview?.alerts.length || 0;
 
@@ -904,6 +914,18 @@ export default function Finance() {
 
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
           <StatCard label="月预计支出" loading={overviewLoading} value={formatMoney(overview?.monthly_total_base ?? 0, baseCurrency)}>
+            {/* 紧跟总额：说的是这个数没算进哪些 Team。 */}
+            {overview?.excluded_teams_count ? (
+              <p>
+                未计入 {overview.excluded_teams_count} 个 Team
+                {excludedTeams.length > 0 && (
+                  <>
+                    ：{excludedTeams.slice(0, 3).map((team) => `${team.name}（${excludedReason(team)}）`).join('、')}
+                    {overview.excluded_teams_count > Math.min(3, excludedTeams.length) && ' 等'}
+                  </>
+                )}
+              </p>
+            ) : null}
             {(overview?.premium_monthly_estimate_base_total ?? 0) > 0 && (
               <p>
                 另加 <span className={cn('font-medium', SEAT_STYLE.prolite.text)}>Premium 估算</span>{' '}
@@ -915,7 +937,6 @@ export default function Finance() {
                 </span>
               </p>
             )}
-            {overview?.excluded_teams_count ? <p>{overview.excluded_teams_count} 个 Team 未计入</p> : null}
             {overview?.last_paid_total_base != null && (
               <p>上期实付合计 <span className="whitespace-nowrap">≈ {formatMoney(overview.last_paid_total_base, baseCurrency)}</span></p>
             )}
@@ -1155,7 +1176,7 @@ export default function Finance() {
                             <div className="whitespace-nowrap">
                               <span className={cn('text-xs font-medium', SEAT_STYLE.default.text)}>ChatGPT </span>
                               <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{team.chatgpt_in_use}</span>
-                              <span className="tabular-nums text-gray-400 dark:text-ink-500">/{chatgptBilled}</span>
+                              <span className="tabular-nums text-gray-500 dark:text-ink-400">/{chatgptBilled}</span>
                             </div>
                             {premiumPaid > 0 && (
                               <div className="mt-0.5 whitespace-nowrap" title="Premium 在用 / 已付">
@@ -1203,10 +1224,9 @@ export default function Finance() {
                           </td>
                           <td className="px-3 py-3.5 text-right">
                             <div className="whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-gray-100">
+                              {/* 这一列统一写成基准币种（换算过的带 ≈），原币另起一行。 */}
                               {team.monthly_total_base !== null
-                                ? monthlyConverted
-                                  ? `≈ ${formatMoney(team.monthly_total_base, overview.base_currency)}`
-                                  : formatMoney(team.monthly_total_base, sym)
+                                ? `${monthlyConverted ? '≈ ' : ''}${formatMoney(team.monthly_total_base, overview.base_currency)}`
                                 : formatMoney(team.monthly_total_native, sym)}
                             </div>
                             {team.billing_period === null ? (
@@ -1225,7 +1245,7 @@ export default function Finance() {
                             {premiumPaid > 0 && (
                               <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums">
                                 <span className={SEAT_STYLE.prolite.text}>+ Premium 估算</span>{' '}
-                                <span className="text-gray-700 dark:text-ink-200">{premiumEstimateText(team, overview.base_currency, sym)}</span>
+                                <span className="text-gray-700 dark:text-ink-200">{premiumEstimateText(team, overview.base_currency)}</span>
                               </div>
                             )}
                           </td>

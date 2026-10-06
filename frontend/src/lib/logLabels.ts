@@ -77,7 +77,7 @@ const ACTION_LABELS: Record<string, string> = {
   data_sync_resumed: '恢复自动同步',
   data_sync_job_error: '定时同步任务出错',
   invite_reconciliation: '核对邀请',
-  member_detect: '发现未登记成员',
+  member_detect: '发现外部加入成员',
   member_detect_absent: '标记已离开成员',
   overview_failures_notification: '同步失败通知',
   sync_suspension_notification: '暂停同步通知',
@@ -410,7 +410,7 @@ const PHRASES: Array<[RegExp, (m: RegExpMatchArray) => string]> = [
     [`已同步 ${m[1]}/${m[2]} 个 Team`, m[3] && m[3] !== '0' ? `失败 ${m[3]}` : '', m[4] && m[4] !== '0' ? `暂停 ${m[4]}` : '']
       .filter(Boolean).join(' · ')],
   [/^reconciled (\d+) confirmed invite\(s\)$/i, (m) => `核对确认 ${m[1]} 个邀请`],
-  [/^detected (\d+) untracked member\(s\)$/i, (m) => `发现 ${m[1]} 个未登记成员`],
+  [/^detected (\d+) untracked member\(s\)$/i, (m) => `发现 ${m[1]} 个外部加入成员`],
   [/^marked (\d+) absent member\(s\) as kicked$/i, (m) => `${m[1]} 个已离开的成员标记为已移出`],
   [/^sync suspended after (\d+)h of continuous failure; probing every (\d+)h$/i, (m) => `连续失败 ${m[1]} 小时，暂停自动同步，每 ${m[2]} 小时探测一次`],
   [/^sync recovered; suspension lifted$/i, () => '同步已恢复，取消暂停'],

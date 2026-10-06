@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useLayoutEffect, useRef, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import { BUTTON } from './ui';
@@ -45,6 +45,16 @@ export default function DialogFrame({
   nested,
   onOpenAutoFocus,
 }: DialogFrameProps) {
+  // Radix returns focus to a Dialog.Trigger, and these dialogs are opened from plain buttons:
+  // remember what had focus when the dialog opened (layout effects run before Radix moves
+  // focus) and give focus back to it on close, e.g. after 取消 in a confirm step.
+  const openerRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (open && document.activeElement instanceof HTMLElement && document.activeElement !== document.body) {
+      openerRef.current = document.activeElement;
+    }
+  }, [open]);
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -52,6 +62,14 @@ export default function DialogFrame({
         <Dialog.Content
           {...(description ? {} : { 'aria-describedby': undefined })}
           onOpenAutoFocus={onOpenAutoFocus}
+          onCloseAutoFocus={(event) => {
+            const opener = openerRef.current;
+            openerRef.current = null;
+            if (opener?.isConnected && !opener.hasAttribute('disabled')) {
+              event.preventDefault();
+              opener.focus();
+            }
+          }}
           className={cn(
             'fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-gray-200 bg-white shadow-2xl transition-[opacity,scale] duration-150 starting:scale-95 starting:opacity-0 focus:outline-none dark:border-ink-800 dark:bg-ink-900',
             WIDTH[size],

@@ -624,7 +624,7 @@ function SeatTypeCell({
   // 不认识的席位类型只显示：TeamBoss 不会切换它。
   const canEdit = editable && context && current !== null;
   return (
-    <div className="flex min-w-0 items-center gap-1 pr-2">
+    <div className="flex min-w-0 items-center gap-1">
       {/* 窄列里放不下「其他（automation）」：截断并给完整名称，不压到旁边一列。 */}
       <span className={cn(PILL, seatStyle(seatType).pill, 'min-w-0 max-w-full shrink')} title={formatSeatTypeLabel(seatType)}>
         <span className="truncate">{formatSeatTypeLabel(seatType)}</span>
@@ -1300,6 +1300,11 @@ function MemberList({
     }
   };
 
+  const hasUnknownSeat = useMemo(
+    () => members.some((member) => member.seat_type && parseSeatType(member.seat_type) === null),
+    [members],
+  );
+
   const pendingByTeam = useMemo(() => {
     const rows = new Map<string, Array<{ seat_type: string }>>();
     members.forEach((member) => {
@@ -1496,7 +1501,8 @@ function MemberList({
                 <col className="w-[5.5rem]" />
                 <col className="w-[7rem]" />
                 <col className="w-[13.5rem]" />
-                <col className="w-[7.5rem]" />
+                {/* 有「其他（automation）」这类长名称时席位列放宽到整枚标签放得下（按全部数据定，筛选不改列宽）。 */}
+                <col className={hasUnknownSeat ? 'w-[9.5rem]' : 'w-[7.5rem]'} />
                 <col className="w-[7.5rem]" />
                 <col className="w-[6.5rem]" />
               </colgroup>
