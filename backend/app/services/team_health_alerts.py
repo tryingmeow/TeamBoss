@@ -10,7 +10,7 @@ import asyncio
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from ..database import get_db_path
 from ..tg_format import detail_card
@@ -150,6 +150,8 @@ def report_team_failure_sync(
     *,
     source: str,
     notify_interval: Optional[timedelta] = None,
+    render: Optional[Callable[[bool], str]] = None,
+    notify: Optional[Callable[[str], int]] = None,
 ) -> dict:
     """Open/update an incident and notify only when it has not been delivered.
 
@@ -157,6 +159,11 @@ def report_team_failure_sync(
     about this (team, alert_key) at most once per interval, counted from the last
     delivered alert, and a recovery in between does not reopen the window. It also
     replaces REPEAT_ALERT_INTERVAL as the reminder interval for an open incident.
+
+    ``render(is_reminder) -> text`` replaces the generic "Team 异常" card for alert
+    families that are not failures (e.g. patrol's Premium seat alerts); ``notify``
+    replaces notify_admins_sync and must return the number of admins reached.
+    The incident / throttle bookkeeping is the same either way.
     """
     if not team_id:
         return {"notified": 0, "reason": "missing_team_id"}
@@ -258,21 +265,24 @@ def report_team_failure_sync(
     # ── Outside the lock: the blocking Telegram call, then a short second
     # critical section to persist the outcome and release the claim. ──
     try:
-        label = _ALERT_LABELS.get(alert_key, alert_key)
-        lines = [
-            f"🏢 Team：{team_name}",
-            f"🏷️ 类型：{label}",
-            f"🔗 来源：{source}",
-            f"📝 错误：{error_text}",
-        ]
-        if is_reminder:
-            duration = _humanize_since(first_failed_at, now_dt)
-            lines.insert(1, f"⏰ 仍未恢复{f'，已持续 {duration}' if duration else ''}")
-        text = detail_card(
-            "🔁 Team 异常仍未恢复" if is_reminder else "🚨 Team 异常",
-            tuple(lines),
-        )
-        sent = notify_admins_sync(text)
+        if render is not None:
+            text = render(is_reminder)
+        else:
+            label = _ALERT_LABELS.get(alert_key, alert_key)
+            lines = [
+                f"🏢 Team：{team_name}",
+                f"🏷️ 类型：{label}",
+                f"🔗 来源：{source}",
+                f"📝 错误：{error_text}",
+            ]
+            if is_reminder:
+                duration = _humanize_since(first_failed_at, now_dt)
+                lines.insert(1, f"⏰ 仍未恢复{f'，已持续 {duration}' if duration else ''}")
+            text = detail_card(
+                "🔁 Team 异常仍未恢复" if is_reminder else "🚨 Team 异常",
+                tuple(lines),
+            )
+        sent = (notify or notify_admins_sync)(text)
 
         with _INCIDENT_LOCK:
             conn = _connect()
@@ -311,6 +321,62 @@ def report_team_failure_sync(
     finally:
         with _INCIDENT_LOCK:
             _SENDING_INCIDENTS.discard(incident_key)
+
+
+def close_incident_family_sync(
+    team_id: str,
+    alert_key_prefix: str,
+    *,
+    keep_alert_key: Optional[str] = None,
+    forget_after: Optional[timedelta] = None,
+) -> int:
+    """Silently resolve open incidents whose key starts with ``alert_key_prefix``.
+
+    For alert families keyed by *what* was found (one key per distinct finding set)
+    rather than by a failure that later recovers: when the set changes or empties,
+    the old keys are closed without a "恢复" message, because the condition going
+    away is not news. ``keep_alert_key`` stays open. Resolved rows of the family
+    whose last notification is older than ``forget_after`` are deleted: they can no
+    longer throttle anything. Returns the number of incidents resolved.
+    """
+    if not team_id or not alert_key_prefix:
+        return 0
+    now = _now_iso()
+    prefix_len = len(alert_key_prefix)
+    keep = keep_alert_key or ""
+    with _INCIDENT_LOCK:
+        conn = _connect()
+        try:
+            _ensure_table(conn)
+            # 常态是这一族一行都没有：先读一下，免得每轮每个 Team 都开一次写事务。
+            if conn.execute(
+                """SELECT 1 FROM team_health_incidents
+                   WHERE team_id = ? AND substr(alert_key, 1, ?) = ? AND alert_key != ?
+                   LIMIT 1""",
+                (team_id, prefix_len, alert_key_prefix, keep),
+            ).fetchone() is None:
+                return 0
+            cursor = conn.execute(
+                """UPDATE team_health_incidents
+                   SET status = 'resolved', resolved_at = ?, updated_at = ?
+                   WHERE team_id = ? AND status = 'open'
+                     AND substr(alert_key, 1, ?) = ? AND alert_key != ?""",
+                (now, now, team_id, prefix_len, alert_key_prefix, keep),
+            )
+            resolved = cursor.rowcount
+            if forget_after is not None:
+                cutoff = (datetime.now(timezone.utc) - forget_after).isoformat()
+                conn.execute(
+                    """DELETE FROM team_health_incidents
+                       WHERE team_id = ? AND status = 'resolved'
+                         AND substr(alert_key, 1, ?) = ? AND alert_key != ?
+                         AND COALESCE(last_notified_at, updated_at, '') < ?""",
+                    (team_id, prefix_len, alert_key_prefix, keep, cutoff),
+                )
+            conn.commit()
+            return resolved
+        finally:
+            conn.close()
 
 
 def report_team_recovery_sync(team_id: str, alert_key: str, *, source: str) -> dict:

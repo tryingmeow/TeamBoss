@@ -12,10 +12,12 @@ from .chatgpt_limiter import run_chatgpt_call_sync
 from .database import get_db_path
 from .services.invoices import refresh_invoices_if_stale_sync
 from .services.pricing import account_billing_updates, fetch_seat_pricing_sync
+from .seat_types import is_known_seat_type, normalize_seat_type
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
     member_seat_usage_from_members,
     positive_seat_count,
+    seat_counts_column_updates,
     seat_type_count_from_seat_counts,
     subscription_column_updates,
 )
@@ -744,6 +746,57 @@ def _pending_invite_reconciliation_reject_sync(conn, team_id, user_id="", email=
     return None
 
 
+def _cached_unknown_seat_type_sync(conn, team_id, user_id, email):
+    """到期目标在成员快照里是不是注册表外的席位类型（如 automation）。
+
+    返回 ``(status, 席位类型原值)``，status 为 member / pending；快照读不到、快照里没有
+    这个人、或席位类型认识，都返回 None，到期踢人照旧处理（它本来就不看席位类型）。
+    只有快照明确写着未知类型才跳过：TeamBoss 对这类席位什么都不做。
+    """
+    try:
+        row = conn.execute(
+            "SELECT members_json, pending_json FROM member_cache WHERE team_id = ?",
+            (team_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    user_id = str(user_id or "")
+    email = (email or "").strip().lower()
+    for status, raw in (("member", row["members_json"]), ("pending", row["pending_json"])):
+        try:
+            items = json.loads(raw or "[]")
+        except Exception:
+            continue
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            # 邀请的 id 是邀请号，不是用户 id，只能按邮箱对。
+            item_user_id = str(item.get("id") or item.get("user_id") or "") if status == "member" else ""
+            item_email = (item.get("email") or "").strip().lower()
+            if not ((user_id and item_user_id == user_id) or (email and item_email == email)):
+                continue
+            if not is_known_seat_type(item.get("seat_type")):
+                return status, normalize_seat_type(item.get("seat_type"))
+    return None
+
+
+def _latest_log_detail_sync(conn, team_id, action, target_email):
+    try:
+        row = conn.execute(
+            """SELECT detail FROM operation_logs
+               WHERE team_id = ? AND action = ? AND target_email IS ?
+               ORDER BY id DESC LIMIT 1""",
+            (team_id, action, target_email),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row["detail"] if row else None
+
+
 def auto_kick_job():
     try:
         conn = _get_sync_db()
@@ -788,6 +841,16 @@ def auto_kick_job():
 
                 kick_at = _effective_kick_at(expires_at, mode, delay_hours)
                 if kick_at > now_dt:
+                    continue
+
+                # 注册表外的席位类型（如 automation）：不踢、不撤，只记一条（同样的跳过不每分钟重复记）。
+                unknown_seat = _cached_unknown_seat_type_sync(conn, team_id, user_id, email)
+                if unknown_seat:
+                    unknown_status, unknown_type = unknown_seat
+                    skip_action = "auto_kick" if unknown_status == "member" else "auto_revoke_invite"
+                    skip_detail = f"seat_type={unknown_type}, reason=unknown_seat_type"
+                    if _latest_log_detail_sync(conn, team_id, skip_action, email) != skip_detail:
+                        _log_operation_sync(team_id, skip_action, email, skip_detail, "skipped")
                     continue
 
                 client = ChatGPTClient(access_token, team_id, device_id, proxy_url=proxy_url)
@@ -1139,6 +1202,11 @@ def data_sync_job():
                     if official_chatgpt is not None:
                         updates.append("chatgpt_count = ?")
                         params.append(official_chatgpt)
+                    # 分类型计数原样（含未知类型）给界面用；seat_capacity_json 由上面的
+                    # subscription_column_updates 写。规则见 seat_capacity。
+                    for col, value in seat_counts_column_updates(seat_counts).items():
+                        updates.append(f"{col} = ?")
+                        params.append(value)
 
                 if payment_methods is not None and "error" not in payment_methods:
                     methods = payment_methods.get("payment_methods", [])
