@@ -57,6 +57,27 @@ class GptInviteFailed(Exception):
         self.team_id = team_id
 
 
+class ConfirmedOverfillAllowance:
+    """一次批量请求里管理员确认过、还能在「超员需确认」的 Team 上加购的个数。
+
+    每个超员邀请发出去之前先扣 1 个（``take``）；只有上游明确拒绝才还回去（``give_back``）。
+    结果不明（超时、5xx、读不回来）按已经加购算，不还：邀请可能已经落地、ChatGPT 可能
+    已经扣费，不能让下一个邮箱再买一个他没确认的席位。「超员自动」的 Team 不扣这个额度。
+    """
+
+    def __init__(self, limit: int):
+        self.remaining = max(0, int(limit))
+
+    def take(self) -> bool:
+        if self.remaining <= 0:
+            return False
+        self.remaining -= 1
+        return True
+
+    def give_back(self) -> None:
+        self.remaining += 1
+
+
 def normalize_invite_emails(values: list[str]) -> list[str]:
     emails: list[str] = []
     seen: set[str] = set()
@@ -299,11 +320,13 @@ async def _invite_to_team(
     action: str,
     cached_snapshot: dict[str, Any] | None = None,
     allow_overage: bool = False,
+    allowance: ConfirmedOverfillAllowance | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """``check_capacity=True``：只往现拉确认有空位的 Team 里拉。
     ``check_capacity=False``：超员（可能让 ChatGPT 加购扣费），只在锁内现读的超员策略
     允许时才拉——``auto``，或 ``confirm`` 且管理员确认过这个 Team（``allow_overage``，
-    批量里 = 它在确认过的计划里）；``forbid`` 永远不超员。
+    批量里 = 它在确认过的计划里）；``forbid`` 永远不超员。``confirm`` 的超员还要先从
+    ``allowance`` 里扣 1 个（扣不到就不拉）；``allowance`` 为 None 时不限个数。
     """
     team_id = team["id"]
     policy = normalize_overage_policy(team.get("overage_policy"))
@@ -373,6 +396,21 @@ async def _invite_to_team(
                 )
                 return None, f"no_gpt_seat: overage not allowed (policy={policy})"
 
+        # 确认过的个数在发邀请之前就扣掉：之后结果不明也算用掉了，见 ConfirmedOverfillAllowance。
+        took_allowance = False
+        if not check_capacity and policy == "confirm" and allowance is not None:
+            if not allowance.take():
+                await log_operation(
+                    team_id,
+                    action,
+                    email,
+                    f"seat_type=default, policy={policy}, reason=overage_allowance_used_up",
+                    "skipped",
+                    "这次确认的加购个数已经用完，没有再超员。",
+                )
+                return None, "no_gpt_seat: confirmed overage allowance used up"
+            took_allowance = True
+
         result = await run_chatgpt_call(client.invite_member, email, "default")
         # 成败只看 ChatGPTClient 给的定性 _mutation_status，不看有没有 error 键：
         # confirmed 的 2xx 响应体里可能带着 "error": null 之类的字段，按键判失败会让
@@ -382,6 +420,8 @@ async def _invite_to_team(
         mutation_status = result.get("_mutation_status") if isinstance(result, dict) else None
         upstream_error = result.get("error") if isinstance(result, dict) else None
         if mutation_status == "rejected":
+            if took_allowance:
+                allowance.give_back()
             error = str(upstream_error or "OpenAI rejected the invite")
             await log_operation(team_id, action, email, "seat_type=default", "failed", error)
             return None, error
@@ -406,6 +446,8 @@ async def _invite_to_team(
                     reason=error,
                 )
                 await log_operation(team_id, action, email, "seat_type=default", "uncertain", error)
+                # 邀请可能已经落地：先占住一个 ChatGPT 席位，免得下一个邮箱按旧空位再拉进来。
+                await reserve_default_seat(team_id, email)
                 return None, f"{INVITE_RESULT_UNCERTAIN}{error}"
 
         # OpenAI 邀请已在上面成功，本地记录必须最终落地（否则下一轮同步会把
@@ -549,15 +591,21 @@ async def invite_gpt_member_any_team(
     *,
     allow_overage: bool = False,
     overage_team_ids: Any = None,
-    confirm_overfill_budget: int | None = None,
+    confirm_overfill_budget: int | ConfirmedOverfillAllowance | None = None,
     action: str = "invite_gpt_member",
 ) -> dict[str, Any]:
     """``allow_overage`` + ``overage_team_ids``：管理员确认过的计划。confirm Team 只有列在
     ``overage_team_ids`` 里才会被超员；auto Team 不用列。没列表 = 空列表。
 
-    ``confirm_overfill_budget``：这次请求里确认过的超员个数还剩几个（批量路由传入）；
-    用完（<= 0）时 confirm Team 一律不超员，只剩 auto。None = 不限个数（单独调用时）。
+    ``confirm_overfill_budget``：这次请求里确认过、还能在 confirm Team 上超员的个数。批量路由
+    传整个请求共用的 ``ConfirmedOverfillAllowance``（每个超员邀请发出前扣 1 个）；传 int 时
+    只在这一次调用里用。用完时 confirm Team 一律不超员，只剩 auto。None = 不限个数（单独调用时）。
     """
+    allowance = (
+        ConfirmedOverfillAllowance(confirm_overfill_budget)
+        if isinstance(confirm_overfill_budget, int)
+        else confirm_overfill_budget
+    )
     email = (email or "").strip().lower()
     capacity_errors: list[str] = []
     hard_errors: list[tuple[str, str | None]] = []
@@ -602,7 +650,7 @@ async def invite_gpt_member_any_team(
     # 超员只往策略允许的 Team 去：auto 总是可以；confirm 要管理员确认过、且在他看到的
     # 计划里；forbid 永远不行。
     confirmed_ids = confirmed_overage_team_ids(allow_overage, overage_team_ids)
-    if confirm_overfill_budget is not None and confirm_overfill_budget <= 0:
+    if allowance is not None and allowance.remaining <= 0:
         confirmed_ids = frozenset()
     overfill_teams = [
         team for team in _overfill_order(candidates)
@@ -641,6 +689,7 @@ async def invite_gpt_member_any_team(
             cached_snapshot=caches.get(team["id"]),
             # 锁内现读策略时也按「这个 Team 是否在确认过的计划里」判断。
             allow_overage=team["id"] in confirmed_ids,
+            allowance=allowance,
         )
         if added:
             return added

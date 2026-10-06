@@ -11,6 +11,7 @@
 """
 
 import sqlite3
+import secrets
 import threading
 import logging
 import re
@@ -906,19 +907,9 @@ def _team_cached_full(team: dict) -> bool:
     return active >= seats
 
 
-def _invite_forbidden_text(team: dict) -> Optional[str]:
-    """Team 设为禁止超员且（按缓存）已满时的拒绝文案；否则 None。"""
-    if not _team_cached_full(team):
-        return None
-    if _team_overage_policy(team.get("team_id")) != "forbid":
-        return None
-    # 延迟导入：本模块不在导入期依赖业务 service（见模块说明）。文案和服务端 409 同一个正本。
-    from .services.overage_policy import refusal_message
-
-    message = refusal_message(
-        policy="forbid", team_name=team.get("name") or "?", seat_type="default"
-    )
-    return f"⛔ 未邀请\n\n{message}"
+def _new_overage_confirmation() -> dict:
+    """管理员在卡片上看到「加购 1 个」后回 1：一次只确认这 1 个 ChatGPT 席位。"""
+    return {"confirmation_id": secrets.token_hex(16), "seat_type": "default", "seat_limit": 1}
 
 
 def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
@@ -936,11 +927,8 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
             _reset_wizard(chat_id)
             return _WIZ_INVALID
 
+        # 禁止超员的 Team 也不按缓存拒绝：缓存可能过时，提交后服务端现查空位再决定。
         w["team"] = teams[idx]
-        refusal = _invite_forbidden_text(w["team"])
-        if refusal:
-            _reset_wizard(chat_id)
-            return refusal
         w["step"] = "input_time"
         _touch(w)
         return (
@@ -964,14 +952,10 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
         team = w.get("team", {})
         name = team.get("name", "?")
         email = w.get("email", "?")
-        refusal = _invite_forbidden_text(team)
-        if refusal:
-            _reset_wizard(chat_id)
-            return refusal
         is_full = _team_cached_full(team)
         policy = _team_overage_policy(team.get("team_id"))
-        # 卡片上提示了会加购扣费、管理员回 1，就算确认了超员（allow_overage）。
-        w["allow_overage"] = is_full
+        # 卡片上提示了会加购 1 个并扣费、管理员回 1，就带一次只管 1 个席位的确认。
+        w["overage_confirm"] = is_full and policy != "forbid"
 
         confirm_msg = detail_card(
             "📋 请确认邀请信息",
@@ -981,7 +965,12 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
                 f"⏳ 有效期：{dur}",
             ),
         )
-        if is_full:
+        if is_full and policy == "forbid":
+            confirm_msg += (
+                f"\n\n⚠️ 按缓存该 Team 的 ChatGPT 席位已满（{OVERAGE_POLICY_LABELS.get(policy, policy)}）："
+                "提交后会现查空位，确实满了就不邀请，也不会加购。"
+            )
+        elif is_full:
             confirm_msg += (
                 f"\n\n⚠️ 该 Team 的 ChatGPT 席位已满（{OVERAGE_POLICY_LABELS.get(policy, policy)}）："
                 "继续会让 ChatGPT 自动加购 1 个 ChatGPT 席位并扣费。"
@@ -999,17 +988,13 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
             name = team.get("name", "?")
             email = w.get("email", "?")
             expires_in = w.get("expires_in", "never")
-            refusal = _invite_forbidden_text(team)
-            if refusal:
-                _reset_wizard(chat_id)
-                return refusal
-            allow_overage = bool(w.get("allow_overage", _team_cached_full(team)))
+            confirmation = _new_overage_confirmation() if w.get("overage_confirm") else None
 
             _reset_wizard(chat_id)
             msg_id = _send_returning_id(chat_id, f"⏳ 系统已请求 API 发送邀请……")
             threading.Thread(
                 target=_invite_worker,
-                args=(chat_id, msg_id, team_id, email, expires_in, allow_overage, name),
+                args=(chat_id, msg_id, team_id, email, expires_in, confirmation, name),
                 name="tg-invite",
                 daemon=True,
             ).start()
@@ -1052,16 +1037,17 @@ def _api_error_detail(exc: Exception) -> Optional[dict]:
     return detail if isinstance(detail, dict) else None
 
 
-def _overage_confirmation_prompt(exc, chat_id, team_id, email, expires_in, allow_overage, name) -> Optional[str]:
+def _overage_confirmation_prompt(exc, chat_id, team_id, email, expires_in, confirmation, name) -> Optional[str]:
     """缓存说没满、服务端现拉发现满了（超员需确认）：转成和满员时一样的确认步骤。
 
     只在这个 chat 当前没有别的向导时挂上确认步骤（setdefault 不覆盖管理员新开的操作）；
-    回 1 后带 allow_overage 重新调用邀请接口。其他错误返回 None，照常显示失败。
+    回 1 后带一次只管 1 个席位的确认重新调用邀请接口。已经带过确认还被拒、或其他错误
+    返回 None，照常显示失败。
     """
     from .services.overage_policy import CODE_NEEDS_CONFIRMATION
 
     detail = _api_error_detail(exc)
-    if not detail or detail.get("code") != CODE_NEEDS_CONFIRMATION or allow_overage:
+    if not detail or detail.get("code") != CODE_NEEDS_CONFIRMATION or confirmation:
         return None
     message = str(detail.get("message") or "该 Team 已满，继续会让 ChatGPT 自动加购并扣费。")
     state = {
@@ -1070,7 +1056,7 @@ def _overage_confirmation_prompt(exc, chat_id, team_id, email, expires_in, allow
         "email": email,
         "team": {"team_id": team_id, "name": name},
         "expires_in": expires_in,
-        "allow_overage": True,
+        "overage_confirm": True,
     }
     _touch(state)
     if _wizards.setdefault(str(chat_id), state) is not state:
@@ -1084,7 +1070,9 @@ def _overage_confirmation_prompt(exc, chat_id, team_id, email, expires_in, allow
     ) + "\n\n回复 1 确认加购 · 回复 0 取消"
 
 
-def _invite_worker(chat_id, msg_id, team_id, email, expires_in, allow_overage, name) -> None:
+def _invite_worker(chat_id, msg_id, team_id, email, expires_in, confirmation, name) -> None:
+    """``confirmation``：管理员回 1 确认过的加购（``overage_confirmation``），没有为 None。"""
+    confirmation = confirmation if isinstance(confirmation, dict) else None
     try:
         resp = _api_post(
             f"/api/teams/{team_id}/members/invite",
@@ -1092,7 +1080,7 @@ def _invite_worker(chat_id, msg_id, team_id, email, expires_in, allow_overage, n
                 "email": email,
                 "seat_type": "default",
                 "expires_in": expires_in,
-                "allow_overage": allow_overage,
+                "overage_confirmation": confirmation,
             },
         )
         resp = resp if isinstance(resp, dict) else {}
@@ -1106,7 +1094,7 @@ def _invite_worker(chat_id, msg_id, team_id, email, expires_in, allow_overage, n
         if msg_id is not None:
             _update_watch_tg_info(team_id, email, "invite", chat_id, msg_id)
     except Exception as e:
-        text = _overage_confirmation_prompt(e, chat_id, team_id, email, expires_in, allow_overage, name)
+        text = _overage_confirmation_prompt(e, chat_id, team_id, email, expires_in, confirmation, name)
         if text is None:
             text = detail_card("❌ 邀请失败", (f"👤 成员：{email}", f"📝 原因：{_extract_api_error(e)}"))
 

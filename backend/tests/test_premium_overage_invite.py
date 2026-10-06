@@ -43,7 +43,7 @@ class _InviteHarness(TempDbMixin, unittest.TestCase):
         self.track_reservation(TEAM, EMAIL)
 
     def invite(self, client, *, policy=None, seat_type="default", allow_overage=False, snapshot=ABSENT,
-               refreshed=None):
+               refreshed=None, confirmation=None):
         """``snapshot``：邀请前现拉的名单；``refreshed``：邀请成功后刷新拿到的名单（默认同前）。"""
         if policy is not None:
             self.set_policy(TEAM, policy)
@@ -67,7 +67,8 @@ class _InviteHarness(TempDbMixin, unittest.TestCase):
                 members.invite_member(
                     TEAM,
                     InviteMemberRequest(
-                        email=EMAIL, expires_in="30d", seat_type=seat_type, allow_overage=allow_overage
+                        email=EMAIL, expires_in="30d", seat_type=seat_type, allow_overage=allow_overage,
+                        overage_confirmation=confirmation,
                     ),
                 )
             ), None
@@ -120,13 +121,16 @@ class ConfirmPolicyTest(_InviteHarness):
         self.assertEqual(detail["capacity"]["seats_entitled"], 2)
         self.assertEqual(detail["capacity"]["active_chatgpt"], 2)
 
-    def test_flag_proceeds_without_reading_capacity(self):
-        response, exc = self.invite(_full_default_client(), allow_overage=True)
+    def test_confirmation_proceeds_after_the_live_read(self):
+        confirmation = {"confirmation_id": "confirm-invite-0001", "seat_type": "default", "seat_limit": 1}
+        response, exc = self.invite(_full_default_client(), confirmation=confirmation)
 
         log = self.assert_invited(response, exc)
-        self.assertEqual(self.client.capacity_reads, 0, "确认过就和旧的 allow_overage=True 一样，不再读容量")
+        self.assertEqual(self.client.capacity_reads, 1, "带了确认也先现拉：有空位就不动确认")
         self.assertIn("policy=confirm", log["detail"])
         self.assertIn("overage=True", log["detail"])
+        self.assertIn("overage_confirmed=1/1", log["detail"])
+        self.assertEqual((response["overage"], response["policy"]), (True, "confirm"))
 
     def test_free_seat_proceeds_and_reserves_it(self):
         response, exc = self.invite(_free_default_client())

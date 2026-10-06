@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..services.gpt_invites import (
+    ConfirmedOverfillAllowance,
     GptInviteFailed,
     NoGptSeatAvailable,
     batch_overage_plan,
@@ -67,7 +68,9 @@ async def invite_gpt_members(req: InviteGptMembersRequest):
 
     confirmed_ids = confirmed_overage_team_ids(req.allow_overage, req.overage_team_ids)
     seat_limit = req.overage_seat_limit if req.allow_overage else 0
-    confirm_overfills = 0  # 这次请求里已经落在 confirm Team 上的超员个数
+    # 整个请求共用的确认额度：每个 confirm Team 上的超员邀请发出前扣 1 个，只有上游明确拒绝
+    # 才还；结果不明按已加购算。
+    allowance = ConfirmedOverfillAllowance(seat_limit)
 
     def replan_note(teams: list[dict]) -> str:
         """带了确认标记还要重新问时，先说清楚是哪种情况。"""
@@ -110,12 +113,10 @@ async def invite_gpt_members(req: InviteGptMembersRequest):
                 expires_at,
                 allow_overage=req.allow_overage,
                 overage_team_ids=req.overage_team_ids,
-                confirm_overfill_budget=seat_limit - confirm_overfills,
+                confirm_overfill_budget=allowance,
                 action="invite_gpt_member",
             )
             added.append(item)
-            if item.get("overage") and item.get("policy") == "confirm":
-                confirm_overfills += 1
         except NoGptSeatAvailable as exc:
             # 没空位、auto Team 接不住、确认过的 Team 不能用或确认的个数用完：还有
             # confirm Team 就带新计划（剩下的邮箱数）再问，没有就记为没位置。

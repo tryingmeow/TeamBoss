@@ -1,10 +1,10 @@
 """Telegram /invite 按 Team 的超员策略走（仍然只邀请 ChatGPT 席位）。
 
-* 禁止超员且已满：向导直接拒绝、点名那个设置，不调邀请接口。
-* 超员需确认且已满：确认卡片说清会加购扣费，回 1 才带确认标记调接口。
+* 禁止超员：向导不按缓存拒绝，提交后服务端现查；现拉也满了才显示拒绝原因。
+* 超员需确认且已满：确认卡片说清会加购扣费，回 1 才带确认（只管 1 个席位）调接口。
 * 超员自动：照常邀请。
 * 缓存说没满、服务端现拉发现满了：禁止超员 → 显示拒绝原因；超员需确认 → 转成同样的
-  确认步骤，回 1 后带确认标记重发。
+  确认步骤，回 1 后带确认重发。
 
 机器人经本地 HTTP 调邀请接口；这里把 ``_api_post`` 接到真实的 invite_member 路由上
 （上游仍是记录调用的替身），所以服务端的策略检查也一起跑。
@@ -114,13 +114,18 @@ class TelegramInviteOverageTest(TempDbMixin, unittest.TestCase):
 
     # ---- 禁止超员 ----
 
-    def test_forbid_full_team_is_refused_in_the_wizard(self):
-        reply = self.start_wizard(policy="forbid", cached_active=2, live_used=2)
+    def test_forbid_cached_full_team_is_decided_by_the_server(self):
+        card = self.start_wizard(policy="forbid", cached_active=2, live_used=2)
+        self.assertIn("提交后会现查空位", card)
+        self.assertNotIn("扣费", card)
 
-        self.assertIn("设为禁止超员", reply)
-        self.assertIn("Team 设置里修改超员策略", reply)
-        self.assertNotIn(CHAT, tg_bot._wizards)
-        self.post.assert_not_called()
+        self.assertIsNone(self.confirm())
+
+        self.assertIsNone(self.post.call_args.args[1]["overage_confirmation"])
+        text = self.last_edit()
+        self.assertIn("❌ 邀请失败", text)
+        self.assertIn("设为禁止超员", text)
+        self.assertIn("Team 设置里修改超员策略", text)
         self.assertEqual(self.client.mutations, [])
 
     def test_forbid_live_full_gets_the_server_refusal(self):
@@ -131,7 +136,7 @@ class TelegramInviteOverageTest(TempDbMixin, unittest.TestCase):
 
         body = self.post.call_args.args[1]
         self.assertEqual(body["seat_type"], "default")
-        self.assertFalse(body["allow_overage"])
+        self.assertIsNone(body["overage_confirmation"])
         text = self.last_edit()
         self.assertIn("❌ 邀请失败", text)
         self.assertIn("设为禁止超员", text)
@@ -148,9 +153,10 @@ class TelegramInviteOverageTest(TempDbMixin, unittest.TestCase):
 
         self.confirm()
 
-        self.assertTrue(self.post.call_args.args[1]["allow_overage"])
+        confirmation = self.post.call_args.args[1]["overage_confirmation"]
+        self.assertEqual((confirmation["seat_type"], confirmation["seat_limit"]), ("default", 1))
         self.assertEqual(self.client.mutations, [("invite_member", EMAIL, "default")])
-        self.assertEqual(self.client.capacity_reads, 0)
+        self.assertEqual(self.client.capacity_reads, 1)
         self.assertIn("✅ 邀请已发送", self.last_edit())
 
     def test_confirm_live_full_turns_into_a_confirm_step(self):
@@ -159,7 +165,7 @@ class TelegramInviteOverageTest(TempDbMixin, unittest.TestCase):
 
         self.confirm()
 
-        self.assertFalse(self.post.call_args.args[1]["allow_overage"])
+        self.assertIsNone(self.post.call_args.args[1]["overage_confirmation"])
         prompt = self.last_edit()
         self.assertIn("需要确认超员", prompt)
         self.assertIn("自动加购 1 个 ChatGPT 席位并扣费", prompt)
@@ -169,7 +175,7 @@ class TelegramInviteOverageTest(TempDbMixin, unittest.TestCase):
 
         self.confirm()
 
-        self.assertTrue(self.post.call_args.args[1]["allow_overage"])
+        self.assertEqual(self.post.call_args.args[1]["overage_confirmation"]["seat_limit"], 1)
         self.assertEqual(self.client.mutations, [("invite_member", EMAIL, "default")])
         self.assertNotIn(CHAT, tg_bot._wizards)
 

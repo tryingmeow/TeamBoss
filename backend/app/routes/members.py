@@ -38,6 +38,7 @@ from ..services.overage_policy import (
     check_billed_seat,
     load_team_policy,
     refuse,
+    restore_overage_confirmation,
 )
 from ..services.team_locks import member_operation_claim, team_invite_lock
 from ..services.team_locks import reserve_default_seat, reserve_seat
@@ -294,7 +295,7 @@ async def _ensure_default_seat_available(
     team_id: str,
     *,
     email: str = "",
-    allow_overage: bool = False,
+    confirmation=None,
     seat_type: str = DEFAULT_SEAT_TYPE,
     operation: str = OPERATION_INVITE,
     log_action: str = "invite_member",
@@ -305,10 +306,12 @@ async def _ensure_default_seat_available(
     规则见 services/overage_policy.py；必须在 team_invite_lock 与成员操作占用之内、
     发上游写请求之前调用。不放行时记一条 skipped 日志并抛 409（禁止超员 /
     需要确认）；放行时返回判断结果，调用方把 policy / overage 写进成功日志。
+    ``confirmation`` 是请求的 ``overage_confirmation``；旧的 allow_overage 不传进来，
+    在 confirm 的 Team 上它不算确认。
     """
     team = await load_team_policy(team_id)
     check = await check_billed_seat(
-        client, team, seat_type, email=email, allow_overage=allow_overage
+        client, team, seat_type, email=email, confirmation=confirmation
     )
     if not check.allowed:
         await refuse(check, operation=operation, action=log_action, email=email or None)
@@ -316,10 +319,43 @@ async def _ensure_default_seat_available(
 
 
 def _seat_check_log_suffix(check) -> str:
-    """成功日志里追加的 policy / overage（没做检查时为空）。"""
+    """成功日志里追加的 policy / overage / 用掉的确认（没做检查时为空）。"""
     if isinstance(check, SeatCheck):
-        return f", policy={check.policy}, overage={check.overage}"
+        text = f", policy={check.policy}, overage={check.overage}"
+        if check.confirmation is not None:
+            text += f", {check.confirmation.log_detail()}"
+        return text
     return ""
+
+
+async def _overage_response_fields(team_id: str, check) -> dict:
+    """成功响应里的 ``overage``（这次可能让 ChatGPT 加购了）和 ``policy``（Team 的超员策略）。"""
+    if isinstance(check, SeatCheck):
+        return {"overage": check.overage, "policy": check.policy}
+    return {"overage": False, "policy": (await load_team_policy(team_id)).policy}
+
+
+async def _restore_confirmation(check) -> None:
+    """上游明确拒绝：把这次从确认里扣掉的 1 个还回去（没扣就什么都不做）。"""
+    if isinstance(check, SeatCheck):
+        await restore_overage_confirmation(check.confirmation)
+
+
+# 上游可能已经执行了的状态码：不算明确拒绝（同 ChatGPTClient.invite_member 的定性）。
+_POSSIBLY_APPLIED_STATUS_CODES = frozenset({408, 409, 425, 429})
+
+
+def _seat_change_rejected(result) -> bool:
+    """change_seat_type 的失败是不是上游明确拒绝（4xx，可能已执行的那几个除外）。
+
+    超时、断线、5xx 都不算：切换可能已经生效、ChatGPT 可能已经加购。
+    """
+    status_code = result.get("status_code") if isinstance(result, dict) else None
+    return (
+        isinstance(status_code, int)
+        and 400 <= status_code < 500
+        and status_code not in _POSSIBLY_APPLIED_STATUS_CODES
+    )
 
 
 def _must_reserve(seat_type: str, *, shown: bool) -> bool:
@@ -430,7 +466,7 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
             client,
             team_id,
             email=req.email,
-            allow_overage=req.allow_overage,
+            confirmation=req.overage_confirmation,
             seat_type=seat_type,
         )
 
@@ -458,10 +494,13 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
                 team_id,
                 "invite_member",
                 req.email,
-                None,
+                f"seat_type={seat_type}{_seat_check_log_suffix(seat_check)}",
                 "uncertain",
                 error,
             )
+            # 邀请可能已经到了 OpenAI：照样占住这个类型的一个席位（Premium 持久占到对账），
+            # 用掉的确认也不还。
+            await _reserve_billed_seat(team_id, req.email, seat_type)
             raise HTTPException(
                 status_code=409,
                 detail="邀请结果确认中，请先刷新成员列表，勿重复提交",
@@ -469,6 +508,8 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
 
     error = _chatgpt_error(result)
     if error:
+        if mutation_status == "rejected":
+            await _restore_confirmation(seat_check)
         await log_operation(team_id, "invite_member", req.email, None, "failed", error)
         await notify_member_event(
             "后台拉人", team_id, email=req.email, result="failed", source="admin", detail=error
@@ -490,7 +531,7 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
         team_id,
         "invite_member",
         req.email,
-        f"seat_type={req.seat_type}, expires_in={expires_in}, allow_overage={req.allow_overage}, "
+        f"seat_type={req.seat_type}, expires_in={expires_in}, "
         f"resend={resend}, stored_expires_at={stored_detail}{_seat_check_log_suffix(seat_check)}",
         "success",
     )
@@ -515,6 +556,7 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
         "expires_at": outcome.expires_at,
         "expiry_recorded": outcome.recorded,
         "expiry_display": expiry_display,
+        **(await _overage_response_fields(team_id, seat_check)),
     }
 
 
@@ -620,7 +662,7 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
         raise HTTPException(status_code=409, detail="成员信息已变化，请刷新后重试")
     email = live_email or email
     current = normalize_seat_type(member.get("seat_type"))
-    base_detail = f"user_id={user_id}, seat_type={target}, from_seat_type={current}, allow_overage={req.allow_overage}"
+    base_detail = f"user_id={user_id}, seat_type={target}, from_seat_type={current}"
 
     if not is_known_seat_type(current):
         message = f"该成员当前是 {seat_type_label(current)} 席位，TeamBoss 不认识这个类型，不会改动它。"
@@ -630,7 +672,7 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
             detail={"code": "seat_type_unknown", "message": message, "seat_type": current},
         )
     if current == target:
-        return {"status": "ok", "result": None, "unchanged": True}
+        return {"status": "ok", "result": None, "unchanged": True, **(await _overage_response_fields(team_id, None))}
 
     seat_check = None
     if is_billed_seat_type(target):
@@ -638,7 +680,7 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
             client,
             team_id,
             email=email,
-            allow_overage=req.allow_overage,
+            confirmation=req.overage_confirmation,
             seat_type=target,
             operation=OPERATION_SEAT_SWITCH,
             log_action="change_seat",
@@ -653,15 +695,32 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
 
     error = _chatgpt_error(result)
     if error:
+        if _seat_change_rejected(result):
+            await _restore_confirmation(seat_check)
+            await log_operation(
+                team_id,
+                "change_seat",
+                email or None,
+                f"{base_detail}{policy_detail}",
+                "failed",
+                error,
+            )
+            raise HTTPException(status_code=502, detail=error)
+        # 超时、5xx 等：切换可能已经生效（ChatGPT 可能已经加购），用掉的确认不还，
+        # 并占住目标类型的一个席位（Premium 持久占到对账）。
         await log_operation(
             team_id,
             "change_seat",
             email or None,
-            f"{base_detail}{policy_detail}",
-            "failed",
+            f"{base_detail}{_seat_check_log_suffix(seat_check) or policy_detail}",
+            "uncertain",
             error,
         )
-        raise HTTPException(status_code=502, detail=error)
+        await _reserve_billed_seat(team_id, email, target)
+        raise HTTPException(
+            status_code=502,
+            detail=f"切换结果不明确，请先刷新成员列表确认，勿重复提交：{error}",
+        )
 
     await log_operation(
         team_id,
@@ -678,7 +737,7 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
     if _must_reserve(target, shown=shown):
         await _reserve_billed_seat(team_id, email, target)
 
-    return {"status": "ok", "result": result}
+    return {"status": "ok", "result": result, **(await _overage_response_fields(team_id, seat_check))}
 
 
 @router.delete("/invites/{email:path}")

@@ -46,7 +46,8 @@ class _SeatHarness(TempDbMixin, unittest.TestCase):
         self._start_db()
         self.track_reservation(TEAM, EMAIL)
 
-    def switch(self, client, target, *, policy=None, allow_overage=False, snapshots=None, current="usage_based"):
+    def switch(self, client, target, *, policy=None, allow_overage=False, snapshots=None, current="usage_based",
+               confirmation=None):
         """跑真实的 change_seat；``snapshots`` 依次作为每次现拉名单的结果。"""
         if policy is not None:
             self.set_policy(TEAM, policy)
@@ -73,7 +74,13 @@ class _SeatHarness(TempDbMixin, unittest.TestCase):
             p.start()
         try:
             return asyncio.run(
-                members.change_seat(TEAM, USER_ID, ChangeSeatRequest(seat_type=target, allow_overage=allow_overage))
+                members.change_seat(
+                    TEAM,
+                    USER_ID,
+                    ChangeSeatRequest(
+                        seat_type=target, allow_overage=allow_overage, overage_confirmation=confirmation
+                    ),
+                )
             ), None
         except HTTPException as exc:
             return None, exc
@@ -111,16 +118,18 @@ class SwitchToChatGPTTest(_SeatHarness):
         self.assertIn("reason=overage_needs_confirmation", log["detail"])
         self.assertEqual(self.claims(), [], "成员操作占用必须释放")
 
-    def test_confirmed_switch_proceeds_without_capacity_read(self):
-        result, exc = self.switch(_full_client(), "default", allow_overage=True)
+    def test_confirmed_switch_proceeds_after_the_live_read(self):
+        confirmation = {"confirmation_id": "confirm-switch-0001", "seat_type": "default", "seat_limit": 1}
+        result, exc = self.switch(_full_client(), "default", confirmation=confirmation)
 
         self.assertIsNone(exc, getattr(exc, "detail", None))
         self.assertEqual(result["status"], "ok")
+        self.assertEqual((result["overage"], result["policy"]), (True, "confirm"))
         self.assertEqual(self.client.mutations, [("change_seat_type", USER_ID, "default")])
-        self.assertEqual(self.client.capacity_reads, 0)
+        self.assertEqual(self.client.capacity_reads, 1)
         log = self.logs("change_seat")[-1]
         self.assertEqual(log["result"], "success")
-        for part in ("seat_type=default", "from_seat_type=usage_based", "allow_overage=True",
+        for part in ("seat_type=default", "from_seat_type=usage_based", "overage_confirmed=1/1",
                      "policy=confirm", "overage=True", f"user_id={USER_ID}"):
             self.assertIn(part, log["detail"])
 

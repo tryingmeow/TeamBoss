@@ -116,17 +116,33 @@ class PendingInvite(BaseModel):
     expires_at: Optional[str] = None
 
 
+class OverageConfirmation(BaseModel):
+    """管理员点过的一次「确认加购」，绑定 Team、席位类型和他看到的加购个数。
+
+    服务端按 ``confirmation_id`` 记账（overage_confirmations 表）：第一次用到时登记 Team、
+    类型、个数，之后同一个 id 最多让 ChatGPT 加购 ``seat_limit`` 个，规则见
+    services/overage_policy.py。
+    """
+
+    confirmation_id: str = Field(min_length=16, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    seat_type: SeatTypeLiteral
+    seat_limit: int = Field(ge=1, le=100)
+
+
 class InviteMemberRequest(BaseModel):
     email: str
     seat_type: SeatTypeLiteral = "default"
     expires_in: Optional[str] = None
-    # 确认标记：超员策略为 confirm 的 Team 满了时，带 true 才会超员加购。
+    # 超员策略为 confirm 的 Team 满了时，只有带了这个确认才会超员加购。
+    overage_confirmation: Optional[OverageConfirmation] = None
+    # 旧前端的确认标记：仍然接受，但在 confirm 的 Team 上不算确认（会回 409 要求确认）。
     allow_overage: bool = False
 
 
 class ChangeSeatRequest(BaseModel):
     seat_type: SeatTypeLiteral
-    # 同上：切到计费类型而该类型没有空位时，confirm 策略需要带 true。
+    # 同上：切到计费类型而该类型没有空位时，confirm 策略需要带确认（个数 1）。
+    overage_confirmation: Optional[OverageConfirmation] = None
     allow_overage: bool = False
 
 
