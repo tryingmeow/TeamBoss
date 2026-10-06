@@ -24,6 +24,7 @@ from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call
 from .services.seat_capacity import update_member_seat_usage_cache
 from .services.seat_holds import reconcile_seat_holds, reconcile_seat_holds_sync
+from .services.snapshot_pages import SnapshotPageAccumulator, SnapshotPageError
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,42 @@ async def write_member_cache(
     return now, written
 
 
+def _apply_cached_expiry(
+    members: list,
+    pending_invites: list,
+    *,
+    user_id: str,
+    email: str,
+    expires_at: Optional[str],
+) -> bool:
+    """把 ``expires_at`` 写进缓存名单里对应的那一条（就地改）。返回有没有改到。"""
+    changed = False
+    for member in members:
+        member_id = (member.get("id") or member.get("user_id") or "").strip()
+        member_email = (member.get("email") or "").strip().lower()
+        # A caller with a user id has already resolved the canonical
+        # Team member.  Do not OR-match its email against another row.
+        member_matches = (
+            member_id == user_id
+            and (not email or member_email == email)
+        ) if user_id else (email and member_email == email)
+        if member_matches:
+            member["expires_at"] = expires_at
+            changed = True
+
+    for invite in pending_invites:
+        invite_email = (invite.get("email") or "").strip().lower()
+        if not user_id and email and invite_email == email:
+            invite["expires_at"] = expires_at
+            changed = True
+    return changed
+
+
+# 读到写之间另一次刷新写进来的快照不能被这里盖掉：写回只在这一行仍是读到的那一版时生效
+# （拉取开始时间和两份名单原文都没变），否则重读、在新的那一版上再改一次。
+_EXPIRY_EDIT_ATTEMPTS = 5
+
+
 async def update_cached_member_expiry(
     team_id: str,
     *,
@@ -146,55 +183,59 @@ async def update_cached_member_expiry(
     """Update local member cache after an expiry-only change.
 
     Expiry is managed locally, so changing it should not require a live
-    ChatGPT members refresh.
+    ChatGPT members refresh.  The edit is a compare-and-swap on the row it
+    read: a snapshot written between the read and the write is kept and the
+    edit is re-applied on top of it.
     """
     normalized_user_id = user_id or ""
     normalized_email = (email or "").strip().lower()
 
-    async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT members_json, pending_json FROM member_cache WHERE team_id = ?",
-            (team_id,),
-        )
-        row = await cursor.fetchone()
-        if not row:
+    for _attempt in range(_EXPIRY_EDIT_ATTEMPTS):
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT members_json, pending_json, fetch_started_at FROM member_cache WHERE team_id = ?",
+                (team_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if not row:
+                return
+            members_json, pending_json = row["members_json"], row["pending_json"]
+            fetch_started_at = row["fetch_started_at"]
+
+            members = json.loads(members_json or "[]")
+            pending_invites = json.loads(pending_json or "[]")
+            if not _apply_cached_expiry(
+                members,
+                pending_invites,
+                user_id=normalized_user_id,
+                email=normalized_email,
+                expires_at=expires_at,
+            ):
+                return
+
+            cursor = await db.execute(
+                """UPDATE member_cache SET members_json = ?, pending_json = ?
+                   WHERE team_id = ?
+                     AND fetch_started_at IS ?
+                     AND members_json IS ?
+                     AND pending_json IS ?""",
+                (
+                    json.dumps(members, ensure_ascii=False),
+                    json.dumps(pending_invites, ensure_ascii=False),
+                    team_id,
+                    fetch_started_at,
+                    members_json,
+                    pending_json,
+                ),
+            )
+            swapped = cursor.rowcount > 0
+            await db.commit()
+        if swapped:
             return
-
-        members = json.loads(row["members_json"] or "[]")
-        pending_invites = json.loads(row["pending_json"] or "[]")
-
-        changed = False
-        for member in members:
-            member_id = (member.get("id") or member.get("user_id") or "").strip()
-            member_email = (member.get("email") or "").strip().lower()
-            # A caller with a user id has already resolved the canonical
-            # Team member.  Do not OR-match its email against another row.
-            member_matches = (
-                member_id == normalized_user_id
-                and (not normalized_email or member_email == normalized_email)
-            ) if normalized_user_id else (normalized_email and member_email == normalized_email)
-            if member_matches:
-                member["expires_at"] = expires_at
-                changed = True
-
-        for invite in pending_invites:
-            invite_email = (invite.get("email") or "").strip().lower()
-            if not normalized_user_id and normalized_email and invite_email == normalized_email:
-                invite["expires_at"] = expires_at
-                changed = True
-
-        if not changed:
-            return
-
-        await db.execute(
-            "UPDATE member_cache SET members_json = ?, pending_json = ? WHERE team_id = ?",
-            (
-                json.dumps(members, ensure_ascii=False),
-                json.dumps(pending_invites, ensure_ascii=False),
-                team_id,
-            ),
-        )
-        await db.commit()
+    logger.warning(
+        "member cache expiry edit for team %s skipped: the cached snapshot kept changing", team_id
+    )
 
 
 # ── 监视任务 ─────────────────────────────────────────────────────────────────
@@ -285,38 +326,40 @@ MAX_FETCH_PAGES = 100
 
 
 async def _fetch_all_pages(method, kind: str, *item_keys: str, limit: int = 100) -> list:
-    items: list = []
-    offset = 0
+    """分页拉完整份名单；何时算完整只按 ``SnapshotPageAccumulator``（snapshot_pages 正本）。
+
+    拉不全、读不懂一律 502（上一份缓存保留，这次刷新算失败）。上游报错页沿用原来的
+    ``Failed to fetch <kind>: <上游错误>``，``is_auth_error`` 靠这段文字认 401。
+    """
+    pages = SnapshotPageAccumulator(*item_keys, limit=limit)
 
     for _ in range(MAX_FETCH_PAGES):
-        data = await run_chatgpt_call(method, offset, limit)
-        _raise_fetch_error(kind, data)
+        data = await run_chatgpt_call(method, pages.next_offset, pages.limit)
+        try:
+            if pages.add(data):
+                return pages.items
+        except SnapshotPageError as exc:
+            if isinstance(data, dict) and "error" in data:
+                reason = exc.upstream_error
+            else:
+                reason = str(exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to fetch {kind}: {reason}",
+            ) from exc
 
-        page_items = _api_items(data, *item_keys)
-        items.extend(page_items)
-
-        total = data.get("total")
-        if len(page_items) < limit:
-            break
-        if isinstance(total, int) and len(items) >= total:
-            break
-
-        offset += limit
-    else:
-        # 翻到硬上限还没结束 = 这份名单是截断的。返回它等于对上层撒谎说"就这些人"，
-        # 而"人不在名单里"会被当作可以另外发邀请的依据。同样失败关闭。
-        logger.error(
-            "%s 分页在 %d 页后仍未结束，判定为不完整名单（已取 %d 条）",
-            kind,
-            MAX_FETCH_PAGES,
-            len(items),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to fetch {kind}: pagination did not terminate",
-        )
-
-    return items
+    # 翻到硬上限还没结束 = 这份名单是截断的。返回它等于对上层撒谎说"就这些人"，
+    # 而"人不在名单里"会被当作可以另外发邀请的依据。同样失败关闭。
+    logger.error(
+        "%s 分页在 %d 页后仍未结束，判定为不完整名单（已取 %d 条）",
+        kind,
+        MAX_FETCH_PAGES,
+        len(pages.items),
+    )
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail=f"Failed to fetch {kind}: pagination did not terminate",
+    )
 
 def _build_members_list(members_data: dict, pending_data: dict, expiry_map: dict) -> tuple[list, list]:
     """从 API 返回值构建 members / pending_invites 两个列表（复用 routes/members.py 的逻辑）。"""

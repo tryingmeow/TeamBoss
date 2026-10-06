@@ -14,6 +14,7 @@ from .member_cache_service import snapshot_fetch_started_now, store_member_snaps
 from .services.invoices import refresh_invoices_if_stale_sync
 from .services.pricing import account_billing_updates, fetch_seat_pricing_sync
 from .seat_types import is_known_seat_type, normalize_seat_type
+from .services.snapshot_pages import SnapshotPageAccumulator, SnapshotPageError
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
     member_seat_usage_from_members,
@@ -203,69 +204,26 @@ def _log_operation_sync(team_id, action, target_email=None, detail=None,
         pass
 
 
-def _api_items(data, *fallback_keys):
-    """取出响应里的列表字段。只能在 ``_response_has_item_list`` 确认过结构之后用：
-    这里对错误/不认识的结构返回 []，单独拿来判断"人在不在"会把未知当成缺席。"""
-    if not isinstance(data, dict) or "error" in data:
-        return []
-    for key in ("items",) + fallback_keys:
-        items = data.get(key)
-        if isinstance(items, list):
-            return items
-    return []
-
-
-def _response_has_item_list(data, *fallback_keys):
-    """响应体里是否带一个可识别的列表键。
-
-    用来把"真的空队"（items=[]，键在、值是空列表）和"结构不认识的 200"（既无
-    items 也无 fallback 键，如网关 JSON 挑战 / 契约漂移 / 代理注入）区分开。
-    后者绝不能当成空队，否则反向检测会把整队付费成员标成缺席。
-    """
-    if not isinstance(data, dict):
-        return False
-    for key in ("items",) + fallback_keys:
-        if isinstance(data.get(key), list):
-            return True
-    return False
-
-
 def _fetch_all_api_items_sync(method, *fallback_keys, limit=100, max_items=10000):
     """分页拉完整份成员/邀请名单，返回 ``(items, error)``。
 
-    只有拿到完整、结构可识别的名单才返回 ``(items, None)``——调用方会据此判
-    "某人不在"（反向检测、到期踢人的邮箱查找、踢人监视）。任何认不出的 200
-    （非对象响应体、缺列表键、条目不是对象）、total 之前被截断、翻到上限还没
-    结束，都返回 error：那是未知状态，不是空名单。
+    只有拿到完整的名单才返回 ``(items, None)``——调用方会据此判"某人不在"（反向检测、
+    到期踢人的邮箱查找、踢人监视）。何时算完整只按 ``SnapshotPageAccumulator``
+    （snapshot_pages 正本）：认不出的 200、条数与 total 对不上、total 中途变了、翻到上限
+    还没结束，都返回 error，那是未知状态，不是空名单。上游报错页原样返回它的 error。
     """
-    items = []
-    offset = 0
-    while offset < max_items:
-        data = run_chatgpt_call_sync(method, offset=offset, limit=limit)
-        if isinstance(data, dict) and "error" in data:
-            return None, data["error"]
-        if not _response_has_item_list(data, *fallback_keys):
-            # 200 但结构不认识：fail closed，绝不当空队交给反向检测。
-            return None, "unrecognized member/invite response structure"
-        page_items = _api_items(data, *fallback_keys)
-        if not all(isinstance(item, dict) for item in page_items):
-            return None, "unrecognized member/invite entry structure"
-        items.extend(page_items)
-        total = data.get("total")
-        short_page = len(page_items) < limit
-        if isinstance(total, int):
-            if len(items) >= total:
-                break
-            if short_page:
-                # total 已知却提前收到短页 = 响应被截断，未见到的人不能判为缺席。
-                return None, "truncated member/invite response before reported total"
-        elif short_page:
-            break
-        offset += limit
-    else:
-        # 翻到上限还没结束：没见到的人不能判为缺席。
-        return None, "member/invite list exceeds the paging limit"
-    return items, None
+    pages = SnapshotPageAccumulator(*fallback_keys, limit=limit)
+    while pages.next_offset < max_items:
+        data = run_chatgpt_call_sync(method, offset=pages.next_offset, limit=pages.limit)
+        try:
+            if pages.add(data):
+                return pages.items, None
+        except SnapshotPageError as exc:
+            if isinstance(data, dict) and "error" in data and data["error"]:
+                return None, exc.upstream_error
+            return None, str(exc)
+    # 翻到上限还没结束：没见到的人不能判为缺席。
+    return None, "member/invite list exceeds the paging limit"
 
 
 def _parse_datetime(value):
