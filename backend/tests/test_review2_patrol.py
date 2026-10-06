@@ -390,6 +390,7 @@ class PremiumSeatRecordTest(_Fixture):
                                          "seat_type=prolite, policy=forbid, reason=overage_forbidden",
                                          "skipped"),
             "switch_lookup_failed": ("change_seat", None, "user_id=u-x, pre_switch_lookup", "failed"),
+            "gpt_batch_invite": ("invite_gpt_member", "x@example.com", "seat_type=default", "success"),
         }
         for name, (action, target, detail, result) in cases.items():
             with self.subTest(case=name):

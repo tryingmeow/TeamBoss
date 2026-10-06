@@ -1424,7 +1424,9 @@ _POLICY_REFUSAL_REASONS = ("overage_forbidden", "overage_needs_confirmation")
 def _teamboss_seat_logs_sync(
     conn: sqlite3.Connection, team_id: str, email: str, user_id: str
 ) -> list[dict]:
-    """这个 Team + 这个人的 change_seat / invite_member 日志（任何结果），新→旧。
+    """这个 Team + 这个人的 change_seat / invite_member / invite_gpt_member 日志（任何结果），新→旧。
+
+    invite_gpt_member 是成员管理里批量邀请 ChatGPT 成员那条路（services/gpt_invites.py）写的。
 
     按 target_email（小写）或 detail 里的 user_id=…（change_seat 的 target_email 可能为空）对上。
     每条 {created_at, result, seat_type, refused}；refused = 被超员策略拒绝、上游没动。
@@ -1435,7 +1437,7 @@ def _teamboss_seat_logs_sync(
         return []
     rows = conn.execute(
         """SELECT target_email, detail, result, created_at FROM operation_logs
-           WHERE team_id = ? AND action IN ('change_seat', 'invite_member')
+           WHERE team_id = ? AND action IN ('change_seat', 'invite_member', 'invite_gpt_member')
              AND ((? != '' AND lower(target_email) = ?) OR (? != '' AND instr(detail, ?) > 0))
            ORDER BY id DESC LIMIT 200""",
         (team_id, email, email, user_id, f"user_id={user_id}"),
@@ -1482,7 +1484,7 @@ def _teamboss_seat_record_sync(conn: sqlite3.Connection, team_id: str, email: st
     """TeamBoss 动过这个人在这个 Team 的席位没有（Premium 踢人的否决条件，宁可漏踢）。
 
     任何一条都算，不看先后、不看结果、不看目标席位类型：
-    - 任何 change_seat / invite_member 记录：成功、失败、待定、被超员策略拒绝都算；切到 ChatGPT 也算。
+    - 任何 change_seat / invite_member / invite_gpt_member 记录：成功、失败、待定、被超员策略拒绝都算；切到 ChatGPT 也算。
       管理员动过这个人就是有意的安排。切换的成功日志先于切换后的名单刷新落库，上游名单可能还停在
       Premium，下一份快照照样列着 prolite；光看"快照开始之后有没有改过"挡不住这种情况。
     - Premium 兑换码在这个 Team 给这个邮箱的兑换（成功 / 待定 / 处理中）。
@@ -1585,7 +1587,7 @@ def outsider_batch_guard(members: Any) -> tuple[bool, int]:
 def _teamboss_set_premium_sync(conn: sqlite3.Connection, team_id: str, email: str, user_id: str) -> bool:
     """TeamBoss 最近一次给这个人定席位时，定的是不是 Premium（只用于 TeamBoss 成员的提醒）。
 
-    看 change_seat / invite_member 记录（被超员策略拒绝、没带目标席位的不算）和 Premium 兑换码兑换，
+    看 change_seat / invite_member / invite_gpt_member 记录（被超员策略拒绝、没带目标席位的不算）和 Premium 兑换码兑换，
     两边取时间最新的一条：是 Premium = TeamBoss 切的；不是 Premium，或者一条都没有 = 不是 TeamBoss
     切的。不设时间窗口：operation_logs 不做清理，加窗口只会让 TeamBoss 自己切的 Premium 成员过了
     窗口后被误报。
@@ -1640,7 +1642,7 @@ def premium_seat_findings_sync(
       （handled_ids，邮箱小写或 user_id），和本轮会被巡逻撤掉的外部邀请（pending_outsiders_revoked）
       不算：前者有自己的通知或下一轮再判，后者有撤销通知。
     - premium_detected_with_record：来源是 detected，但 TeamBoss 动过他在这个 Team 的席位（任何
-      change_seat / invite_member 记录，或 Premium 兑换码兑换，_teamboss_seat_record_sync）。管理员
+      change_seat / invite_member / invite_gpt_member 记录，或 Premium 兑换码兑换，_teamboss_seat_record_sync）。管理员
       动过他就是有意的安排，不自动踢，交给管理员。
     - premium_detected_was_managed：来源是 detected，但 TeamBoss 还在管他、或因为名单里不见了才没在管
       他、或他在这个 Team 兑换过（_teamboss_managed_history_sync，常见于付费成员掉出名单后又回来）。

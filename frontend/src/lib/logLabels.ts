@@ -247,7 +247,7 @@ const PREMIUM_OUTSIDER = '外部加入，占用 Premium 席位';
 
 const PREMIUM_ALERT_KIND: Record<string, string> = {
   premium_outsider: PREMIUM_OUTSIDER,
-  premium_detected_with_record: '外部加入的 Premium 成员，但 TeamBoss 有他的 Premium 记录',
+  premium_detected_with_record: '外部加入的 Premium 成员，但 TeamBoss 改过他的席位、邀请过他或卖给他 Premium',
   premium_detected_was_managed: '外部加入的 Premium 成员，但 TeamBoss 以前拉过他或他兑换过',
   chatgpt_detected_was_managed: 'Team 超员，但这个外部加入的 ChatGPT 成员 TeamBoss 以前拉过或他兑换过，没有移除',
   premium_unswitched: 'TeamBoss 管理的成员在 Premium 席位上，但不是 TeamBoss 切的',
