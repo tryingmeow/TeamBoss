@@ -624,7 +624,7 @@ export default function Finance() {
   };
 
   // ?team=<id>（Team 卡片账单弹窗的「在财务页查看」）：切到「Team 明细」、展开这个 Team 的账单并滚过去。只认一次。
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkTeamId = searchParams.get('team');
   const deepLinkHandled = useRef(false);
   const pendingScrollTeamId = useRef<string | null>(null);
@@ -632,6 +632,12 @@ export default function Finance() {
     // handleToggleInvoices / expandedTeamId are read once, when the overview first arrives.
     if (deepLinkHandled.current || !deepLinkTeamId || !overview) return;
     deepLinkHandled.current = true;
+    // Used once: drop it from the URL so a reload does not force this Team open again.
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.delete('team');
+      return next;
+    }, { replace: true });
     if (!overview.teams.some(team => team.team_id === deepLinkTeamId)) return;
     pendingScrollTeamId.current = deepLinkTeamId;
     setActiveBillingTab('details');

@@ -826,10 +826,12 @@ export default function TeamCard({
             <div className="min-w-0">
               <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">付款卡</dt>
               <dd className="mt-0.5 flex min-w-0 items-center gap-1.5 text-sm font-medium text-gray-900 dark:text-gray-100">
+                {/* 行首不再放卡片图标：「付款卡」标签已经说明了，省下的宽度留给后面的账单按钮，免得卡品牌被截断。 */}
                 {team.card_last4 ? (
                   <>
-                    <CreditCard size={14} className="shrink-0 text-gray-400 dark:text-ink-500" />
-                    {team.card_brand && <span className="min-w-0 truncate">{cardBrandLabel(team.card_brand)}</span>}
+                    {team.card_brand && (
+                      <span className="min-w-0 truncate" title={cardBrandLabel(team.card_brand)}>{cardBrandLabel(team.card_brand)}</span>
+                    )}
                     <span className="shrink-0 tabular-nums">···· {team.card_last4}</span>
                   </>
                 ) : (

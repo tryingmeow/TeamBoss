@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowUpRight } from 'lucide-react';
 import { getFinanceInvoices, type FinanceInvoicesResponse, type FinancePaidAmounts } from '../api/client';
@@ -53,6 +53,8 @@ export default function TeamBillingDialog({
 }) {
   const navigate = useNavigate();
   const [state, setState] = useState<LoadState>('loading');
+  // The footer's first button leaves the page; land focus on 「关闭」 so Enter right after opening just closes.
+  const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -88,12 +90,16 @@ export default function TeamBillingDialog({
       size="xl"
       title={`账单 · ${team.name}`}
       description="Stripe 账单和花费，只读已同步的数据。"
+      onOpenAutoFocus={(event) => {
+        event.preventDefault();
+        closeRef.current?.focus();
+      }}
       footer={
         <>
           <button type="button" onClick={openFinance} className={BUTTON.secondary}>
             在财务页查看 <ArrowUpRight size={14} />
           </button>
-          <button type="button" onClick={() => onOpenChange(false)} className={BUTTON.primary}>
+          <button ref={closeRef} type="button" onClick={() => onOpenChange(false)} className={BUTTON.primary}>
             关闭
           </button>
         </>
@@ -126,7 +132,7 @@ export default function TeamBillingDialog({
               )}
             </SummaryTile>
           </div>
-          <p className="mt-2 text-xs leading-5 text-gray-500 dark:text-ink-400">
+          <p className="mt-2 text-pretty text-xs leading-5 text-gray-500 dark:text-ink-400">
             只把已支付的账单算进合计；作废和未支付的照常列出，不计入。
           </p>
         </div>

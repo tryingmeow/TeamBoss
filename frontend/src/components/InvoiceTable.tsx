@@ -22,10 +22,14 @@ export function invoiceStatusCell(status: string | null) {
   return <span className="text-gray-500 dark:text-ink-400">{label}</span>;
 }
 
+/** "MM-dd ~ MM-dd"; with the year when the period crosses a year (a yearly plan would read 04-24 ~ 04-24). */
 export function formatInvoicePeriod(row: Pick<FinanceInvoiceRow, 'period_start' | 'period_end'>) {
   if (!row.period_start && !row.period_end) return '—';
-  const fmt = (value: string | null) => (value ? format(parseISO(value), 'MM-dd') : '?');
-  return `${fmt(row.period_start)} ~ ${fmt(row.period_end)}`;
+  const start = row.period_start ? parseISO(row.period_start) : null;
+  const end = row.period_end ? parseISO(row.period_end) : null;
+  const pattern = start && end && start.getFullYear() !== end.getFullYear() ? 'yyyy-MM-dd' : 'MM-dd';
+  const fmt = (value: Date | null) => (value ? format(value, pattern) : '?');
+  return `${fmt(start)} ~ ${fmt(end)}`;
 }
 
 // 金额保持原币种，和 Stripe 发票页逐行核对用。
@@ -77,8 +81,9 @@ export function InvoiceSubTable({ state }: { state: FinanceInvoiceRow[] | 'loadi
               <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums text-gray-700 dark:text-ink-300">
                 {amount(row.amount_paid)}
               </td>
-              <td className="max-w-[18rem] truncate py-1.5 pr-3 text-gray-500 dark:text-ink-400" title={row.description || undefined}>
-                {row.description || '—'}
+              {/* Two lines, not one: the tail ("· promo -$75", "+ proration") is what explains the amount. */}
+              <td className="min-w-[12rem] max-w-[22rem] py-1.5 pr-3 text-gray-500 dark:text-ink-400" title={row.description || undefined}>
+                <div className="line-clamp-2 break-words">{row.description || '—'}</div>
               </td>
               <td className="py-1.5 text-right">
                 {row.hosted_invoice_url && (
