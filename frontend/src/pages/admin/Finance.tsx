@@ -846,7 +846,7 @@ export default function Finance() {
             {(overview?.premium_monthly_estimate_base_total ?? 0) > 0 && (
               <p>
                 另加{' '}
-                <span className={cn('whitespace-nowrap font-medium', SEAT_STYLE.prolite.text)}>
+                <span className={cn('inline-flex items-center gap-1 whitespace-nowrap font-medium', SEAT_STYLE.prolite.text)}>
                   Premium <SeatBetaBadge seatType="prolite" />
                 </span>{' '}
                 <span className="whitespace-nowrap">

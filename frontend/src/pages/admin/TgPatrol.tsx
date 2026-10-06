@@ -94,7 +94,7 @@ function patrolRuleText(intervalMinutes: number): ReactNode {
   return (
     <>
       每 {intervalMinutes} 分钟巡逻一次，只处理未豁免的 Team：ChatGPT 席位超出时，移除新的外部加入成员（绕过 TeamBoss
-      加入的），最多移除超出的人数；外部加入、占用 <span className="whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 席位的成员，不管是否超出都会移除（每个
+      加入的），最多移除超出的人数；外部加入、占用 <span className="inline-flex items-center gap-1 whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 席位的成员，不管是否超出都会移除（每个
       Premium 席位都按月扣费）。
     </>
   );

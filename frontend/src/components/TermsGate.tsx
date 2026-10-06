@@ -208,7 +208,7 @@ export default function TermsGate({ children }: TermsGateProps) {
         </div>
 
         <div className="sticky bottom-0 rounded-b-xl border-t border-gray-200 bg-gray-50 px-5 py-4 sm:px-7 sm:py-5 dark:border-ink-800 dark:bg-ink-925">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center justify-between gap-3">
             <p id={progressId} aria-live="polite" className="text-sm text-gray-600 dark:text-ink-300">
               {allChecked ? (
                 '已全部确认'
@@ -224,12 +224,12 @@ export default function TermsGate({ children }: TermsGateProps) {
               onClick={handleAccept}
               disabled={!allChecked}
               aria-describedby={progressId}
-              className={cn(BUTTON.primary, 'w-full py-2.5 sm:w-auto sm:px-6')}
+              className={cn(BUTTON.primary, 'shrink-0 px-5 py-2.5 sm:px-6')}
             >
               同意并继续
             </button>
           </div>
-          <p className="mt-3 text-xs text-gray-500 sm:mt-2.5 dark:text-ink-400">不同意请直接关闭页面，并停止使用本项目。</p>
+          <p className="mt-2.5 text-xs text-gray-500 dark:text-ink-400">不同意请直接关闭页面，并停止使用本项目。</p>
         </div>
       </div>
     </PublicShell>
