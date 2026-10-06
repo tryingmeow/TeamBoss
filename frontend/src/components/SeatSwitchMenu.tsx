@@ -1,6 +1,7 @@
 import { useState, type ReactElement, type ReactNode } from 'react';
 import { Check } from 'lucide-react';
-import { ApiError, OverageConfirmationError, OverageForbiddenError } from '../api/client';
+import { ApiError, OverageConfirmationError, OverageForbiddenError, type OverageConfirmation } from '../api/client';
+import { newOverageConfirmation } from '../lib/overageConfirmation';
 import { SEAT_STYLE, SEAT_TYPE_OPTIONS, SEAT_TYPES, seatUpdateErrorMessage } from '../lib/seatType';
 import { gateMessage, gateShortHint, switchConfirmText, type SeatGate } from '../lib/seatCapacity';
 import type { SeatType, ShowToast } from '../types';
@@ -70,8 +71,11 @@ export function SeatSwitchOptions({ current, gateFor, disabled, onPick, wrap }: 
 }
 
 interface UseSeatSwitchOptions {
-  /** Performs the switch; `allowOverage` is true only after the admin confirmed the charge. */
-  apply: (seatType: SeatType, allowOverage: boolean) => Promise<void>;
+  /**
+   * Performs the switch. `confirmation` is set only after the admin confirmed the charge: one
+   * fresh confirmation for one seat of that type.
+   */
+  apply: (seatType: SeatType, confirmation: OverageConfirmation | null) => Promise<unknown>;
   onSwitched: () => void;
   showToast: ShowToast;
   isCodexEnabled?: boolean | number;
@@ -92,15 +96,16 @@ export function useSeatSwitch({ apply, onSwitched, showToast, isCodexEnabled, on
     setAsk({ seatType, message });
   };
 
-  const run = async (seatType: SeatType, allowOverage: boolean) => {
+  const run = async (seatType: SeatType, confirmation: OverageConfirmation | null) => {
     setBusy(true);
     try {
-      await apply(seatType, allowOverage);
+      await apply(seatType, confirmation);
       setAsk(null);
       onSwitched();
       showToast('席位类型已更新');
     } catch (err) {
-      if (err instanceof OverageConfirmationError && !allowOverage) {
+      if (err instanceof OverageConfirmationError) {
+        // 没带确认，或者服务端没认这次确认（过期、对不上）：都重新问，确认后换一个新的确认。
         openAsk(seatType, err.message);
       } else if (err instanceof OverageForbiddenError || (err instanceof ApiError && err.status === 409)) {
         setAsk(null);
@@ -122,7 +127,7 @@ export function useSeatSwitch({ apply, onSwitched, showToast, isCodexEnabled, on
       openAsk(seatType, switchConfirmText(gate));
       return;
     }
-    void run(seatType, false);
+    void run(seatType, null);
   };
 
   const label = ask ? SEAT_TYPES[ask.seatType].label : '';
@@ -138,7 +143,8 @@ export function useSeatSwitch({ apply, onSwitched, showToast, isCodexEnabled, on
       destructive
       loading={busy}
       onConfirm={() => {
-        if (ask) void run(ask.seatType, true);
+        // 确认只管这一次切换：1 个这个类型的席位。
+        if (ask) void run(ask.seatType, newOverageConfirmation(ask.seatType, 1));
       }}
     />
   );

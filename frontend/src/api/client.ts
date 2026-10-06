@@ -1,6 +1,7 @@
 import type {
   CodeSeatType,
   MembersData,
+  OverageConfirmation,
   OveragePolicy,
   SeatType,
   Settings,
@@ -65,6 +66,12 @@ export class ApiError extends Error {
 /** Team 的 ChatGPT 登录已失效（后端 auth_state 已是 rejected），只能重新导入 session。 */
 export class TeamAuthRejectedError extends Error {}
 
+export type OverageConfirmationStatus = 'missing' | 'used_up' | 'expired' | 'mismatch';
+
+function parseConfirmationStatus(raw: unknown): OverageConfirmationStatus | null {
+  return raw === 'missing' || raw === 'used_up' || raw === 'expired' || raw === 'mismatch' ? raw : null;
+}
+
 /** 409 require_overage_confirmation: the seat type is full and the Team asks before buying. */
 export class OverageConfirmationError extends Error {
   capacity: OverageCapacity;
@@ -79,6 +86,11 @@ export class OverageConfirmationError extends Error {
   capacityUnknown: boolean;
   overagePlan: OveragePlanItem[];
   extraSeatsTotal: number;
+  /**
+   * Single invite / seat switch: why the sent confirmation (if any) was not used. `missing` = none
+   * was sent (or only the legacy allow_overage); the others mean a fresh confirmation is needed.
+   */
+  confirmationStatus: OverageConfirmationStatus | null = null;
 
   constructor(
     message: string,
@@ -214,7 +226,7 @@ async function request<T>(url: string, options?: RequestInit, behavior: RequestB
         }
         if (parsed?.detail?.code === 'require_overage_confirmation') {
           const capacity = parsed.detail.capacity ?? {};
-          throw new OverageConfirmationError(
+          const error = new OverageConfirmationError(
             parsed.detail.message ?? 'ChatGPT 席位不足',
             {
               seats_entitled: Number(capacity.seats_entitled) || 0,
@@ -230,6 +242,8 @@ async function request<T>(url: string, options?: RequestInit, behavior: RequestB
             parseOveragePlan(parsed.detail.overage_plan),
             Number(parsed.detail.extra_seats_total) || 0,
           );
+          error.confirmationStatus = parseConfirmationStatus(parsed.detail.confirmation_status);
+          throw error;
         }
       } catch (e) {
         if (
@@ -372,13 +386,39 @@ export async function updateTeamOveragePolicy(teamId: string, policy: OveragePol
   });
 }
 
+export type { OverageConfirmation };
+
+export interface InviteMemberResult {
+  status: 'ok';
+  result?: unknown;
+  /** A pending invite was resent instead of creating a new one. */
+  resent?: boolean;
+  expires_at?: string | null;
+  expiry_recorded?: boolean;
+  expiry_display?: string;
+  /** No free seat was left: ChatGPT added and charged one for this invite. */
+  overage?: boolean;
+  policy?: OveragePolicy;
+}
+
+/**
+ * Invite one email into one Team. `overage_confirmation` is the admin's confirmation that
+ * ChatGPT may buy seats on a 超员需确认 Team; the server uses one unit of it only when no seat
+ * is free and refuses (409) once its `seat_limit` is used up.
+ */
 export async function inviteMember(
   teamId: string,
-  data: { email: string; seat_type: SeatType; expires_in?: string; allow_overage?: boolean }
-): Promise<unknown> {
-  return request(`/api/teams/${teamId}/members/invite`, {
+  data: {
+    email: string;
+    seat_type: SeatType;
+    expires_in?: string;
+    overage_confirmation?: OverageConfirmation | null;
+  }
+): Promise<InviteMemberResult> {
+  const { overage_confirmation: confirmation, ...rest } = data;
+  return request<InviteMemberResult>(`/api/teams/${teamId}/members/invite`, {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: JSON.stringify(confirmation ? { ...rest, overage_confirmation: confirmation } : rest),
   });
 }
 
@@ -420,19 +460,31 @@ export async function removeMember(teamId: string, userId: string): Promise<void
   return request<void>(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' });
 }
 
+export interface ChangeSeatResult {
+  status: 'ok';
+  result?: unknown;
+  /** The member already had that seat type; nothing was sent. */
+  unchanged?: boolean;
+  /** No free seat of the target type was left: ChatGPT added and charged one. */
+  overage?: boolean;
+  policy?: OveragePolicy;
+}
+
 /**
- * Switch a member's seat type. `allowOverage` is the explicit confirmation that ChatGPT may
- * add and charge a seat of the target type when none is free; send it only after asking.
+ * Switch a member's seat type. `confirmation` is the admin's explicit confirmation that
+ * ChatGPT may add and charge a seat of the target type when none is free; send it only after asking.
  */
 export async function changeSeat(
   teamId: string,
   userId: string,
   seatType: SeatType,
-  allowOverage = false
-): Promise<void> {
-  return request<void>(`/api/teams/${teamId}/members/${userId}/seat`, {
+  confirmation: OverageConfirmation | null = null
+): Promise<ChangeSeatResult> {
+  return request<ChangeSeatResult>(`/api/teams/${teamId}/members/${userId}/seat`, {
     method: 'PATCH',
-    body: JSON.stringify({ seat_type: seatType, allow_overage: allowOverage }),
+    body: JSON.stringify(
+      confirmation ? { seat_type: seatType, overage_confirmation: confirmation } : { seat_type: seatType }
+    ),
   });
 }
 

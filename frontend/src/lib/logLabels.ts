@@ -294,6 +294,7 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   expires_at: (v) => `到期 ${timeLabel(v)}`,
   expires_in: (v) => `时长 ${durationLabel(v)}`,
   allow_overage: (v) => (isTrue(v) ? '已确认加购' : null),
+  overage_confirmed: (v) => `已确认加购 ${v}`,
   user_id: () => null,
   request_id: () => null,
   token_use_id: (v) => `兑换记录 #${v}`,

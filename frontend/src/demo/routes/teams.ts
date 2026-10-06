@@ -5,7 +5,7 @@ import { findTeam, nextId, recount, type DemoDb, type DemoInvite, type DemoTeam 
 import { bodyObject, bodyString, fail, ok, queryFlag, type DemoContext, type DemoResponse, type DemoRoute } from '../http';
 import { appendLog } from '../logs';
 import { DAY, durationMs, isNeverDuration, isoAt } from '../time';
-import { isOverage, isRegistrySeat, overageGate, parseSeat, policyOf, seatLabel } from '../overage';
+import { isOverage, isRegistrySeat, overageGate, parseConfirmation, parseSeat, policyOf, seatLabel } from '../overage';
 import { availableGptSeats, expiryState, membersData, teamView, workspaceSettings } from '../views';
 
 const AUTH_REJECTED = { code: 'team_auth_rejected', message: '登录已失效，请重新导入' };
@@ -29,6 +29,7 @@ function upstreamBlocked(record: DemoTeam): DemoResponse | null {
 
 const SEAT_INVALID = [{ msg: "seat_type 必须是 'default' / 'usage_based' / 'prolite'" }];
 const NO_PLACE = '没位置，未邀请';
+const CONFIRMATION_INVALID = [{ msg: 'overage_confirmation 需要 confirmation_id（16–64 位字母数字 _ -）、seat_type 和 1–100 的 seat_limit' }];
 
 /** Workspace default invite seat: Premium can never be the default (the backend answers 422). */
 function parseWorkspaceDefault(value: unknown): WorkspaceDefaultSeatType | null {
@@ -316,6 +317,8 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   if (!EMAIL_RE.test(email)) return fail(422, [{ msg: '邮箱格式无效' }]);
   const seat = parseSeat(body.seat_type);
   if (!seat) return fail(422, SEAT_INVALID);
+  const confirmation = parseConfirmation(body.overage_confirmation);
+  if (confirmation === 'invalid') return fail(422, CONFIRMATION_INVALID);
   let expiresAt: string | null;
   try {
     expiresAt = expiryFromDuration(body.expires_in);
@@ -334,12 +337,14 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   if (record.members.some((m) => m.email === email) || pending) {
     return fail(409, EMAIL_ALREADY_IN_TEAM);
   }
-  const refused = overageGate({
-    db: ctx.db, record, seatType: seat, allowOverage: body.allow_overage === true, operation: 'invite',
+  // 旧前端的 allow_overage 不再算确认（超员需确认的 Team 满了照样 409）。
+  const gate = overageGate({
+    db: ctx.db, record, seatType: seat, confirmation, operation: 'invite',
     logAction: 'invite_member', targetEmail: email,
   });
-  if (refused) return refused;
+  if (gate.refused) return gate.refused;
   const overage = isOverage(record, seat);
+  const policy = policyOf(record);
   const now = Date.now();
   record.invites.push({
     id: `invite-demo-${nextId(ctx.db)}`,
@@ -354,10 +359,11 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   appendLog(ctx.db, {
     team_id: record.team.id, action: 'invite_member', target_email: email,
     detail:
-      `seat_type=${seat}, expires_in=${String(body.expires_in ?? 'never')}, allow_overage=${body.allow_overage === true ? 'True' : 'False'}` +
-      (seat === 'usage_based' ? '' : `, policy=${policyOf(record)}, overage=${overage ? 'True' : 'False'}`),
+      `seat_type=${seat}, expires_in=${String(body.expires_in ?? 'never')}` +
+      (seat === 'usage_based' ? '' : `, policy=${policy}, overage=${overage ? 'True' : 'False'}`) +
+      (gate.confirmed ? `, overage_confirmed=${gate.confirmed.used}/${gate.confirmed.limit}` : ''),
   });
-  return ok({ status: 'ok', result: { _mutation_status: 'confirmed' } });
+  return ok({ status: 'ok', result: { _mutation_status: 'confirmed' }, overage, policy });
 }
 
 function memberOr404(ctx: DemoContext, record: DemoTeam) {
@@ -400,7 +406,9 @@ function changeSeat(ctx: DemoContext): DemoResponse {
   const body = bodyObject(ctx);
   const seat = parseSeat(body.seat_type);
   if (!seat) return fail(422, SEAT_INVALID);
-  const allowOverage = body.allow_overage === true;
+  const confirmation = parseConfirmation(body.overage_confirmation);
+  if (confirmation === 'invalid') return fail(422, CONFIRMATION_INVALID);
+  const policy = policyOf(record);
   const from = member.seat_type;
   if (from !== 'default' && from !== 'usage_based' && from !== 'prolite') {
     return fail(409, {
@@ -408,7 +416,7 @@ function changeSeat(ctx: DemoContext): DemoResponse {
       message: `该成员的席位类型是「${seatLabel(from)}」，TeamBoss 不会切换或移除这类席位。`,
     });
   }
-  if (seat === from) return ok({ status: 'ok', result: { seat_type: seat } });
+  if (seat === from) return ok({ status: 'ok', result: { seat_type: seat }, unchanged: true, overage: false, policy });
   if (seat === 'usage_based' && !record.team.is_codex_enabled) {
     appendLog(ctx.db, {
       team_id: record.team.id, action: 'change_seat', target_email: member.email,
@@ -416,21 +424,22 @@ function changeSeat(ctx: DemoContext): DemoResponse {
     });
     return fail(502, 'HTTP 403: Forbidden (usage_based seats are not enabled for this workspace)');
   }
-  const refused = overageGate({
-    db: ctx.db, record, seatType: seat, allowOverage, operation: 'seat_switch',
+  const gate = overageGate({
+    db: ctx.db, record, seatType: seat, confirmation, operation: 'seat_switch',
     logAction: 'change_seat', targetEmail: member.email, logPrefix: `user_id=${member.id}, `,
   });
-  if (refused) return refused;
+  if (gate.refused) return gate.refused;
   const overage = isOverage(record, seat);
   member.seat_type = seat;
   touch(record);
   appendLog(ctx.db, {
     team_id: record.team.id, action: 'change_seat', target_email: member.email,
     detail:
-      `user_id=${member.id}, seat_type=${seat}, from_seat_type=${from}, allow_overage=${allowOverage ? 'True' : 'False'}, ` +
-      `policy=${policyOf(record)}` + (seat === 'usage_based' ? '' : `, overage=${overage ? 'True' : 'False'}`),
+      `user_id=${member.id}, seat_type=${seat}, from_seat_type=${from}, policy=${policy}` +
+      (seat === 'usage_based' ? '' : `, overage=${overage ? 'True' : 'False'}`) +
+      (gate.confirmed ? `, overage_confirmed=${gate.confirmed.used}/${gate.confirmed.limit}` : ''),
   });
-  return ok({ status: 'ok', result: { seat_type: seat } });
+  return ok({ status: 'ok', result: { seat_type: seat }, overage, policy });
 }
 
 function revokeInvite(ctx: DemoContext): DemoResponse {

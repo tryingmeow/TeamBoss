@@ -63,11 +63,78 @@ function capacityOf(record: DemoTeam, seatType: SeatType) {
 
 export type OverageOperation = 'invite' | 'seat_switch';
 
+/** `overage_confirmation` of an invite / seat-switch request (see the backend's models.py). */
+export interface DemoConfirmation {
+  confirmation_id: string;
+  seat_type: string;
+  seat_limit: number;
+}
+
+type ConfirmationStatus = 'missing' | 'used_up' | 'expired' | 'mismatch';
+
+const CONFIRMATION_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const CONFIRMATION_TTL_MS = 60 * 60 * 1000;
+
+/** The backend's overage_confirmations table: registered on first use, limit fixed from then on. */
+const ledger = new Map<string, { teamId: string; seatType: string; limit: number; used: number; expiresAt: number }>();
+
+/**
+ * Missing / null → null; a well-formed object → it; anything else → 'invalid' (the backend answers 422).
+ * A bare `allow_overage` is not read here at all: on 超员需确认 it is not a confirmation.
+ */
+export function parseConfirmation(raw: unknown): DemoConfirmation | null | 'invalid' {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'object') return 'invalid';
+  const value = raw as Record<string, unknown>;
+  const id = value.confirmation_id;
+  const seat = value.seat_type;
+  const limit = value.seat_limit;
+  if (typeof id !== 'string' || !CONFIRMATION_ID_RE.test(id)) return 'invalid';
+  if (typeof seat !== 'string' || !isRegistrySeat(seat)) return 'invalid';
+  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 100) return 'invalid';
+  return { confirmation_id: id, seat_type: seat, seat_limit: limit };
+}
+
+/** Takes one seat from the confirmation, or says why it cannot. */
+function consumeConfirmation(
+  confirmation: DemoConfirmation | null,
+  teamId: string,
+  seatType: SeatType,
+): { used: number; limit: number } | { status: ConfirmationStatus } {
+  if (!confirmation) return { status: 'missing' };
+  if (confirmation.seat_type !== seatType) return { status: 'mismatch' };
+  const now = Date.now();
+  let entry = ledger.get(confirmation.confirmation_id);
+  if (!entry) {
+    entry = {
+      teamId, seatType: confirmation.seat_type, limit: confirmation.seat_limit, used: 0,
+      expiresAt: now + CONFIRMATION_TTL_MS,
+    };
+    ledger.set(confirmation.confirmation_id, entry);
+  }
+  if (entry.teamId !== teamId || entry.seatType !== seatType) {
+    return { status: 'mismatch' };
+  }
+  if (entry.expiresAt <= now) return { status: 'expired' };
+  if (entry.used >= entry.limit) return { status: 'used_up' };
+  entry.used += 1;
+  return { used: entry.used, limit: entry.limit };
+}
+
+/** Same sentences as the backend's overage_policy._CONFIRMATION_RETRY_NOTES. */
+function reconfirmNote(status: ConfirmationStatus): string {
+  if (status === 'used_up') return '你确认过的加购个数已经用完，需要重新确认。';
+  if (status === 'expired') return '上次的确认已过期，需要重新确认。';
+  if (status === 'mismatch') return '这次确认对不上这个 Team 或席位类型，需要重新确认。';
+  return '';
+}
+
 export interface GateInput {
   db: DemoDb;
   record: DemoTeam;
   seatType: SeatType;
-  allowOverage: boolean;
+  /** The request's parsed `overage_confirmation`. */
+  confirmation: DemoConfirmation | null;
   operation: OverageOperation;
   /** The log action of the attempted operation (`invite_member` / `change_seat`). */
   logAction: string;
@@ -76,14 +143,23 @@ export interface GateInput {
   logPrefix?: string;
 }
 
-/** Returns a 409 when the add must be refused or confirmed first; null when it may proceed. */
-export function overageGate(input: GateInput): DemoResponse | null {
-  const { db, record, seatType, allowOverage, operation } = input;
-  if (!BILLED.has(seatType)) return null;
+export type GateOutcome =
+  | { refused: DemoResponse }
+  /** May proceed; `confirmed` = the confirmation seat it used (used / limit), null when none was needed. */
+  | { refused: null; confirmed: { used: number; limit: number } | null };
+
+/**
+ * 超员需确认: a free seat → proceed without touching the confirmation; full → one seat of the
+ * confirmation, or a 409 asking again. 禁止超员 refuses when full; 超员自动 always proceeds.
+ */
+export function overageGate(input: GateInput): GateOutcome {
+  const { db, record, seatType, confirmation, operation } = input;
+  const pass = { refused: null, confirmed: null } as const;
+  if (!BILLED.has(seatType)) return pass;
   const policy = policyOf(record);
-  if (policy === 'auto' || (policy === 'confirm' && allowOverage)) return null;
+  if (policy === 'auto') return pass;
   const capacity = capacityOf(record, seatType);
-  if (capacity.available > 0) return null;
+  if (capacity.available > 0) return pass;
 
   const label = DEMO_SEAT_LABELS[seatType];
   const team = record.team;
@@ -96,22 +172,30 @@ export function overageGate(input: GateInput): DemoResponse | null {
 
   if (policy === 'forbid') {
     refusedLog('overage_forbidden');
-    return fail(409, {
-      code: 'overage_forbidden',
-      message: `「${team.name}」设为禁止超员：${label} 席位已满，不会自动加购。要加人请先在 Team 设置里修改超员策略。`,
-      ...base,
-    });
+    return {
+      refused: fail(409, {
+        code: 'overage_forbidden',
+        message: `「${team.name}」设为禁止超员：${label} 席位已满，不会自动加购。要加人请先在 Team 设置里修改超员策略。`,
+        ...base,
+      }),
+    };
   }
+  const use = consumeConfirmation(confirmation, team.id, seatType);
+  if ('used' in use) return { refused: null, confirmed: use };
   refusedLog('overage_needs_confirmation');
-  return fail(409, {
-    code: 'require_overage_confirmation',
-    message:
-      operation === 'seat_switch'
-        ? `切换到 ${label} 会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费。`
-        : `「${team.name}」${label} 席位已满，继续会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费。`,
-    operation,
-    ...base,
-  });
+  return {
+    refused: fail(409, {
+      code: 'require_overage_confirmation',
+      message:
+        reconfirmNote(use.status) +
+        (operation === 'seat_switch'
+          ? `切换到 ${label} 会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费。`
+          : `「${team.name}」${label} 席位已满，继续会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费。`),
+      operation,
+      confirmation_status: use.status,
+      ...base,
+    }),
+  };
 }
 
 /** Whether an add that passed the gate lands on a full billed type, i.e. ChatGPT will add a seat. */

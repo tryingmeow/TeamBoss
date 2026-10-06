@@ -65,6 +65,16 @@ export type CodeSeatType = 'default' | 'prolite';
 
 export type OveragePolicy = 'forbid' | 'confirm' | 'auto';
 
+/**
+ * 管理员对「超员需确认」Team 的一次加购确认（单个邀请 / 切换席位）。服务端按 confirmation_id
+ * 记账：同一个确认最多加购 seat_limit 个 seat_type 席位，用完、过期或对不上就重新问。
+ */
+export interface OverageConfirmation {
+  confirmation_id: string;
+  seat_type: SeatType;
+  seat_limit: number;
+}
+
 export interface SeatCapacityEntry {
   paid: number;
   available: number;

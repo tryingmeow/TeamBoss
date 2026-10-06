@@ -245,6 +245,32 @@ export function gateShortHint(gate: SeatGate | null): string | null {
   return `${full} · 会自动加购扣费`;
 }
 
+/**
+ * Confirm text after the server found the seat type full while inviting one by one: the live
+ * free count is 0, so every remaining email would buy a seat. Quotes that count, not the
+ * server's per-request "1 个".
+ */
+export function liveFullConfirmText({ label, teamName, count, invited, capacityUnknown, reconfirm }: {
+  label: string;
+  teamName?: string;
+  /** Emails still to invite; each one buys a seat. */
+  count: number;
+  /** Already invited in this run. */
+  invited: number;
+  capacityUnknown: boolean;
+  /** The server did not accept the confirmation sent with this email (used up or expired). */
+  reconfirm?: boolean;
+}): string {
+  const team = teamName ? `「${teamName}」` : '这个 Team ';
+  const done = invited > 0 ? `已邀请 ${invited} 个。` : '';
+  const again = reconfirm ? '之前的确认已用完或失效，需要重新确认。' : '';
+  const full = capacityUnknown
+    ? `读不到${team}的 ${label} 空位，按已满处理，`
+    : `${team}${label} 席位已满（刚核对），`;
+  const who = invited > 0 ? `剩下的 ${count} 个邮箱` : count > 1 ? `这 ${count} 个邮箱` : '';
+  return `${again}${done}${full}${who}继续${willBuy(label, count)}。`;
+}
+
 /** Confirm text before switching a member into a full billed type. */
 export function switchConfirmText(gate: SeatGate): string {
   const lead = gate.over > 0

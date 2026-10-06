@@ -136,6 +136,9 @@ export function isForbiddenError(err: unknown): boolean {
   return /\b403\b/i.test(message) || /forbidden/i.test(message);
 }
 
+/** Start of the backend's 502 detail when a seat switch may or may not have happened. */
+const SWITCH_UNCERTAIN_PREFIX = '切换结果不明确';
+
 /** Friendly message for a failed seat-type change, matching the wording
  * used in the admin User Management table. */
 export function seatUpdateErrorMessage(
@@ -147,5 +150,7 @@ export function seatUpdateErrorMessage(
   if (nextSeatType === 'usage_based' && codexKnownOff && isForbiddenError(err)) {
     return 'Codex 席位未开启，请先开启 Codex 席位';
   }
+  // 上游超时等结果不明：切换可能已经生效（也可能已加购），原话告诉管理员先刷新再说。
+  if (err instanceof Error && err.message.startsWith(SWITCH_UNCERTAIN_PREFIX)) return err.message;
   return '修改席位类型失败';
 }

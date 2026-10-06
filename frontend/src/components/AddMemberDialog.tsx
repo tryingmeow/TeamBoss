@@ -8,12 +8,15 @@ import {
   fetchResourceUsage,
   inviteMember,
   OverageConfirmationError,
+  type OverageConfirmation,
   type OveragePlanItem,
 } from '../api/client';
-import { SEAT_STYLE, SEAT_TYPES, SEAT_TYPE_OPTIONS, parseOveragePolicy, parseSeatType } from '../lib/seatType';
+import { MAX_CONFIRMED_SEATS, newOverageConfirmation } from '../lib/overageConfirmation';
+import { SEAT_STYLE, SEAT_TYPES, SEAT_TYPE_OPTIONS, parseOveragePolicy } from '../lib/seatType';
 import {
   cachedFreeSeats,
   gateMessage,
+  liveFullConfirmText,
   overagePurchaseText,
   pendingCountsByType,
   seatGate,
@@ -82,6 +85,11 @@ interface OverageAsk {
   message: ReactNode;
   emails: string[];
   /**
+   * One Team: the seats the message says will be bought. The confirmation sent back covers exactly
+   * this many (server-enforced); beyond it the dialog asks again.
+   */
+  purchaseCount?: number;
+  /**
    * Batch: the plan the admin is shown (its Teams and seat count go back as overage_team_ids /
    * overage_seat_limit) and what the server already did before asking.
    */
@@ -89,6 +97,7 @@ interface OverageAsk {
 }
 
 const NO_PLACE = '没位置，未邀请';
+const CAP_NOTE = `一次最多确认 ${MAX_CONFIRMED_SEATS} 个，超出的会再问你。`;
 const REPLAN_NOTE = '你确认过的超员计划已经不成立，需要重新确认。';
 
 function asAdded(list: unknown): BatchInviteAdded[] {
@@ -393,23 +402,34 @@ export default function AddMemberDialog({
     }
   };
 
-  /** One Team: invite one by one; the server re-checks every billed invite against live seats. */
-  const submitToTeam = async (list: string[], allowOverage: boolean) => {
+  /**
+   * One Team: invite one by one; the server re-checks every billed invite against live seats.
+   * `confirmation` (after the admin agreed to buy N seats) goes with each email until N of them
+   * came back as bought; the rest go without it, so a full Team asks again instead of buying more.
+   */
+  const submitToTeam = async (list: string[], confirmation: OverageConfirmation | null) => {
     if (!teamId) {
       setError('Team ID 缺失');
       return;
     }
     const expiresIn = selectionToDuration(expiry);
     let done = 0;
+    // 这次确认已经用掉的加购个数（服务端回 overage=true 的邀请）。
+    let bought = 0;
+    let attached = false;
     try {
       for (const address of list) {
-        await inviteMember(teamId, {
+        const sendConfirmation = confirmation && bought < confirmation.seat_limit ? confirmation : null;
+        attached = sendConfirmation !== null;
+        const result = await inviteMember(teamId, {
           email: address,
           seat_type: effectiveSeatType,
           expires_in: expiresIn,
-          allow_overage: allowOverage,
+          overage_confirmation: sendConfirmation,
         });
         done += 1;
+        // 没写 overage 的响应也按加购算：宁可多问一次，不多买。
+        if (sendConfirmation && result?.overage !== false) bought += 1;
       }
       setAsk(null);
       onSuccess();
@@ -419,11 +439,22 @@ export default function AddMemberDialog({
       // 已经发出去的邀请是真的：先让卡片刷新，表单里只留下没加上的邮箱。
       if (done > 0) onSuccess();
       setEmail(rest.join('\n'));
-      if (err instanceof OverageConfirmationError && !allowOverage) {
+      if (err instanceof OverageConfirmationError) {
+        // 服务端刚现拉过、空位是 0：剩下的每个邮箱都会加购一个席位，按这个数问。
+        const label = SEAT_TYPES[effectiveSeatType].label;
+        const text = liveFullConfirmText({
+          label,
+          teamName: err.teamName || teamName,
+          count: rest.length,
+          invited: done,
+          capacityUnknown: err.capacityUnknown,
+          reconfirm: attached && err.confirmationStatus !== null && err.confirmationStatus !== 'missing',
+        });
         setAsk({
-          seatType: parseSeatType(err.seatType) ?? effectiveSeatType,
-          emails: err.remainingEmails.length > 0 ? err.remainingEmails : rest,
-          message: done > 0 ? `已邀请 ${done} 个。${err.message}` : err.message,
+          seatType: effectiveSeatType,
+          emails: rest,
+          purchaseCount: rest.length,
+          message: rest.length > MAX_CONFIRMED_SEATS ? `${text}${CAP_NOTE}` : text,
         });
         return;
       }
@@ -443,14 +474,20 @@ export default function AddMemberDialog({
     setBatchResult(null);
     setLeftoverText('');
     if (gate?.action === 'confirm') {
-      // 缓存显示已满且这个 Team 要先问：先确认再发，确认后才带上 allow_overage。
-      setAsk({ seatType: effectiveSeatType, emails, message: gateText ?? '' });
+      // 缓存显示已满且这个 Team 要先问：先确认再发，确认里写明他看到的加购个数。
+      const text = gateText ?? '';
+      setAsk({
+        seatType: effectiveSeatType,
+        emails,
+        purchaseCount: gate.extra,
+        message: gate.extra > MAX_CONFIRMED_SEATS ? `${text}${CAP_NOTE}` : text,
+      });
       return;
     }
     setLoading(true);
     try {
       if (submitInvites) await submitBatch(emails, false);
-      else await submitToTeam(emails, false);
+      else await submitToTeam(emails, null);
     } finally {
       setLoading(false);
     }
@@ -461,7 +498,7 @@ export default function AddMemberDialog({
     setLoading(true);
     try {
       if (submitInvites) await submitBatch(ask.emails, true, ask.batch);
-      else await submitToTeam(ask.emails, true);
+      else await submitToTeam(ask.emails, newOverageConfirmation(effectiveSeatType, ask.purchaseCount ?? ask.emails.length));
     } finally {
       setLoading(false);
     }
