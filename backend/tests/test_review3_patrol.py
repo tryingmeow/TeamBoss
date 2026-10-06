@@ -2,6 +2,8 @@
 
 - F4：邮箱等于 teams.owner_email（不分大小写）的人是 Owner，即使上游角色不是 account-owner。
   候选筛选和 _patrol_kick 的闸门都认这一条，和 scheduler 同步时认 Owner 的规则相同。
+- F5：批量邀请发现"邮箱已在这个 Team"时写的 invite_gpt_member_existing 也是 TeamBoss 的邀请记录，
+  单独一条就挡住 Premium 踢人；它是 skipped，"TeamBoss 最近给他定的席位"照旧不看它。
 
 所有上游调用都是记录调用的假客户端，绝不触网。
 """
@@ -20,6 +22,7 @@ from test_premium_patrol import (  # noqa: I001  (_isolation first)
 from test_review2_patrol import PROD_OWNER, _Fixture, _outsider
 
 from app.services import patrol
+from app.services.gpt_invites import EMAIL_ALREADY_IN_TEAM
 
 
 class _R3Fixture(_Fixture):
@@ -83,6 +86,50 @@ class OwnerEmailIsOwnerTest(_R3Fixture):
         self.assertFalse(ok)
         self.assertIn("owner_email", reason)
         self.assertEqual(self._calls("remove_member"), [])
+
+
+# ═══ F5：批量邀请的"已在这个 Team"记录也挡 Premium 踢人 ═════════════════════════
+
+class ExistingMemberInviteLogTest(_R3Fixture):
+    def test_batch_invite_existing_member_log_alone_blocks_the_premium_kick(self):
+        team_id = "team-f5"
+        member = _member("x@example.com", "u-x", seat_type="prolite")
+        self._armed_team(team_id, [PROD_OWNER, member], seats_entitled=2)
+        self._seat_log(team_id, "invite_gpt_member_existing", "X@Example.com",
+                       EMAIL_ALREADY_IN_TEAM, "skipped", "2026-07-01T00:00:00+00:00")
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
+        self.assertEqual(self._logs("patrol_kick"), [])
+        logged = self._logs("patrol_premium_alert")
+        self.assertEqual([l["target_email"] for l in logged], ["x@example.com"])
+        self.assertIn("kind=premium_detected_with_record", logged[0]["detail"])
+
+        ok, reason = self._kick(team_id, member, rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
+        self.assertFalse(ok)
+        self.assertIn("seat or invite record", reason)
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_existing_member_log_is_not_a_seat_assignment(self):
+        # TeamBoss 邀请他进 Premium，后来批量邀请时发现他已在 Team、跳过：最近一次定席位仍是 Premium，
+        # 不发"不是 TeamBoss 切的"提醒。
+        team_id = "team-f5-managed"
+        managed = _member("m@example.com", "u-m", seat_type="prolite", source="system")
+        self._armed_team(team_id, [PROD_OWNER, managed], seats_entitled=2)
+        self._seat_log(team_id, "invite_member", "m@example.com",
+                       "seat_type=prolite, expires_in=30d", "success", "2026-07-01T00:00:00+00:00")
+        self._seat_log(team_id, "invite_gpt_member_existing", "m@example.com",
+                       EMAIL_ALREADY_IN_TEAM, "skipped", "2026-07-05T00:00:00+00:00")
+
+        conn = self._conn()
+        try:
+            self.assertTrue(patrol._teamboss_set_premium_sync(conn, team_id, "m@example.com", "u-m"))
+        finally:
+            conn.close()
+        self._patrol(dry_run=False)
+        self.assertEqual(self._logs("patrol_premium_alert"), [])
 
 
 if __name__ == "__main__":
