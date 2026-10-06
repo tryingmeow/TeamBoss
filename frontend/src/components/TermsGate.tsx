@@ -1,11 +1,11 @@
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useId, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import PublicShell from './PublicShell';
 import { BUTTON, CARD } from './ui';
 
 /**
- * 后台首次打开时的使用条款确认。
+ * 后台首次打开时的使用条款确认：每一条单独勾选，全部勾完才能进。
  *
  * 只拦管理后台，不拦根路径的成员自助兑换页——成员只是填个邮箱换码，风险由部署者承担，
  * 对他们弹法律条款既没意义又吓人。
@@ -13,41 +13,112 @@ import { BUTTON, CARD } from './ui';
  * 同意状态存 localStorage：换浏览器 / 换设备会再弹一次，这是刻意的。真正需要看到这段
  * 的是"第一次在某台机器上打开后台的人"，而不是"这个部署"。
  *
- * key 带版本号：条款内容有实质变化时把 v1 递增，所有人会重新确认一次。
+ * key 带版本号：条款内容有实质变化时递增版本号，所有人会重新确认一次。
  */
-const STORAGE_KEY = 'teamboss.terms.accepted.v1';
+const STORAGE_KEY = 'teamboss.terms.accepted.v2';
 
 interface TermsGateProps {
   children: ReactNode;
 }
 
-const TERMS: { title: string; body: string }[] = [
+interface Term {
+  id: string;
+  /** The checkbox sentence: first person, one complete statement. */
+  text: ReactNode;
+  /** Background facts under the sentence; inside the label, so clicking it ticks the box too. */
+  note?: string;
+}
+
+function Key({ children }: { children: ReactNode }) {
+  return <strong className="font-semibold text-gray-900 dark:text-gray-50">{children}</strong>;
+}
+
+const GROUPS: { title: string; terms: Term[] }[] = [
   {
-    title: '这不是 OpenAI 的官方产品',
-    body: '本项目与 OpenAI 没有任何关联。它依赖 ChatGPT 未公开的内部接口工作，接口、成员操作方式和计费策略都可能被官方随时改动，功能随时可能失效。',
+    title: '风险',
+    terms: [
+      {
+        id: 'unofficial',
+        text: (
+          <>
+            我明白 TeamBoss 依赖 ChatGPT / OpenAI <Key>未公开的私有接口</Key>，官方随时可能改动它们，功能很可能
+            <Key>有时效性</Key>，随时会不经通知地失效。
+          </>
+        ),
+        note: '本项目与 OpenAI 没有任何关联，不是官方产品。',
+      },
+      {
+        id: 'credentials',
+        text: (
+          <>
+            我知晓 Owner 账号的登录凭证会<Key>以明文存放在这台服务器上</Key>，拿到服务器、数据卷或备份的人，就能完全接管我的
+            Team。
+          </>
+        ),
+        note: '接入 Team 需要提供 Owner 账号的会话数据（access token 和 session cookie）。',
+      },
+      {
+        id: 'auto-kick',
+        text: (
+          <>
+            我知道到期踢人和巡逻踢人会<Key>真的把成员移出 Team</Key>，用之前我会先弄清触发规则，并核对成员数据。
+          </>
+        ),
+        note: '设了到期时间的成员，到点会被自动移出。巡逻踢人出厂是空跑演练，在「TG 与巡逻」页激活后，会在超员或有人占用 Premium 席位时，移除绕过 TeamBoss 加入的成员。',
+      },
+      {
+        id: 'premium-beta',
+        text: (
+          <>
+            我知晓 <Key>Premium 席位是 Beta 功能</Key>，从未在生产环境中测试过，随时可能出错。
+          </>
+        ),
+        note: '涉及 Premium 的邀请、换席位、兑换码和巡逻都算在内；Premium 席位单价高、按月扣费，出错的代价也更大。',
+      },
+    ],
   },
   {
-    title: '你要交出的是主账号的完整登录凭证',
-    body: '接入 Team 需要你提供 Owner 账号的会话数据（access token + session cookie）。它以明文存放在这台服务器的数据卷里。任何拿到这台服务器、这个数据卷或它的备份的人，都能完全接管你的 Team。',
-  },
-  {
-    title: '账号有被限制或封禁的可能',
-    body: '以这种方式访问 ChatGPT 属于服务条款的灰色地带。请不要用你输不起的账号，并自行评估风险。',
-  },
-  {
-    title: '这里有能自动移除成员的定时任务',
-    body: '到期自动踢人和巡逻踢人（超员时、或有外部加入的成员占用 Premium 席位时）都会真的把人移出你的 Team。它们默认关闭，开启前请先弄清楚触发规则，并确认你的成员数据是准确的。',
-  },
-  {
-    title: '后果由你自己承担',
-    body: '因使用本项目产生的账号异常、财务损失、数据丢失，作者不承担任何责任。完整免责声明见项目 README。',
+    title: '责任',
+    terms: [
+      {
+        id: 'review',
+        text: (
+          <>
+            我会在投入生产使用前，<Key>自己审查一遍代码</Key>，或者让 AI Agent 替我审查。
+          </>
+        ),
+        note: '它会用 Owner 凭证邀请、移除成员，必要时加购席位并扣费，上线前值得先看清它到底做了什么。',
+      },
+      {
+        id: 'own-risk',
+        text: (
+          <>
+            我同意<Key>自行承担</Key>使用 TeamBoss 的<Key>全部风险</Key>，一切后果由我自行负责。
+          </>
+        ),
+        note: '用非官方接口操作 ChatGPT 处在服务条款的灰色地带，账号有被限制或封禁的可能，别用输不起的账号。',
+      },
+      {
+        id: 'no-liability',
+        text: (
+          <>
+            我同意作者对任何损失<Key>概不负责</Key>，包括扣费、加购的席位、被移除的成员，以及账号被限制或封禁。
+          </>
+        ),
+        note: '完整免责声明见项目 README。',
+      },
+    ],
   },
 ];
+
+const TERM_COUNT = GROUPS.reduce((sum, group) => sum + group.terms.length, 0);
 
 export default function TermsGate({ children }: TermsGateProps) {
   // null = 还没读完 localStorage，先什么都不渲染，避免同意过的人看到弹窗闪一下
   const [accepted, setAccepted] = useState<boolean | null>(null);
-  const [checked, setChecked] = useState(false);
+  const [checked, setChecked] = useState<ReadonlySet<string>>(() => new Set());
+  const baseId = useId();
+  const progressId = `${baseId}-progress`;
 
   useEffect(() => {
     try {
@@ -58,7 +129,19 @@ export default function TermsGate({ children }: TermsGateProps) {
     }
   }, []);
 
+  const toggle = (id: string, on: boolean) => {
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const allChecked = checked.size === TERM_COUNT;
+
   const handleAccept = () => {
+    if (!allChecked) return;
     try {
       window.localStorage.setItem(STORAGE_KEY, '1');
     } catch {
@@ -78,51 +161,75 @@ export default function TermsGate({ children }: TermsGateProps) {
             <AlertTriangle size={20} className="text-amber-600 dark:text-amber-400" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">使用前请先读完</h1>
+            <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">使用前请逐条确认</h1>
             <p className="mt-0.5 text-sm text-gray-500 dark:text-ink-400">
-              第一次在这台设备上打开管理后台，需要先确认以下内容。
+              第一次在这台设备上打开管理后台，需要读完并勾选下面每一条。
             </p>
           </div>
         </div>
 
-        <ol className="space-y-5 px-5 py-6 sm:px-7">
-          {TERMS.map((term, index) => (
-            <li key={term.title} className="flex gap-3">
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600 dark:bg-ink-800 dark:text-ink-300">
-                {index + 1}
-              </span>
-              <div className="min-w-0">
-                <h2 className="text-sm font-semibold leading-6 text-gray-900 dark:text-gray-100">{term.title}</h2>
-                <p className="mt-1 text-sm leading-relaxed text-gray-600 dark:text-ink-300">{term.body}</p>
+        <div className="space-y-6 px-5 py-6 sm:px-7">
+          {GROUPS.map((group) => (
+            <fieldset key={group.title}>
+              <legend className="mb-2.5 text-xs font-medium text-gray-500 dark:text-ink-400">{group.title}</legend>
+              <div className="space-y-2.5">
+                {group.terms.map((term) => (
+                  <label
+                    key={term.id}
+                    className={cn(
+                      'flex cursor-pointer gap-3 rounded-lg border border-gray-200 px-3.5 py-3 transition-colors hover:bg-gray-50 dark:border-ink-800 dark:hover:bg-ink-850',
+                      'has-[:checked]:border-blue-200 has-[:checked]:bg-blue-50/60 dark:has-[:checked]:border-blue-400/30 dark:has-[:checked]:bg-blue-500/[0.07]',
+                      'has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-blue-500/40',
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked.has(term.id)}
+                      onChange={(event) => toggle(term.id, event.target.checked)}
+                      aria-labelledby={`${baseId}-${term.id}`}
+                      aria-describedby={term.note ? `${baseId}-${term.id}-note` : undefined}
+                      className="mt-1 size-4 shrink-0 cursor-pointer accent-blue-600 focus-visible:outline-none"
+                    />
+                    <span className="min-w-0">
+                      <span id={`${baseId}-${term.id}`} className="block text-sm leading-6 text-gray-700 dark:text-gray-300">
+                        {term.text}
+                      </span>
+                      {term.note && (
+                        <span id={`${baseId}-${term.id}-note`} className="mt-1 block text-xs leading-5 text-gray-500 dark:text-ink-400">
+                          {term.note}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                ))}
               </div>
-            </li>
+            </fieldset>
           ))}
-        </ol>
+        </div>
 
         <div className="sticky bottom-0 rounded-b-xl border-t border-gray-200 bg-gray-50 px-5 py-4 sm:px-7 sm:py-5 dark:border-ink-800 dark:bg-ink-925">
-          <label className="flex cursor-pointer select-none items-start gap-3 py-1">
-            <input
-              type="checkbox"
-              checked={checked}
-              onChange={(event) => setChecked(event.target.checked)}
-              className="mt-0.5 size-4 shrink-0 cursor-pointer accent-blue-600"
-            />
-            <span className="text-sm text-gray-700 dark:text-gray-300">
-              我已读完以上全部内容，理解其中的风险，并自行承担后果。
-            </span>
-          </label>
-
-          <button
-            type="button"
-            onClick={handleAccept}
-            disabled={!checked}
-            className={cn(BUTTON.primary, 'mt-3 w-full py-2.5')}
-          >
-            同意并继续
-          </button>
-          <p className="mt-2.5 text-center text-xs text-gray-500 dark:text-ink-400">
-            不同意请直接关闭页面，并停止使用本项目。
-          </p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p id={progressId} aria-live="polite" className="text-sm text-gray-600 dark:text-ink-300">
+              {allChecked ? (
+                '已全部确认'
+              ) : (
+                <>
+                  已确认 <span className="font-semibold tabular-nums text-gray-900 dark:text-gray-100">{checked.size}</span>
+                  <span className="tabular-nums"> / {TERM_COUNT}</span> 条
+                </>
+              )}
+            </p>
+            <button
+              type="button"
+              onClick={handleAccept}
+              disabled={!allChecked}
+              aria-describedby={progressId}
+              className={cn(BUTTON.primary, 'w-full py-2.5 sm:w-auto sm:px-6')}
+            >
+              同意并继续
+            </button>
+          </div>
+          <p className="mt-3 text-xs text-gray-500 sm:mt-2.5 dark:text-ink-400">不同意请直接关闭页面，并停止使用本项目。</p>
         </div>
       </div>
     </PublicShell>
