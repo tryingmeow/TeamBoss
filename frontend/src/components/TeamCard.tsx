@@ -46,12 +46,13 @@ function BilledSeatBlock({
 }) {
   const style = SEAT_STYLE[seatType];
   const label = SEAT_TYPES[seatType].label;
-  const { inUse, paid, pending, free, unknown } = summary;
-  const over = inUse > paid && (paid > 0 || inUse > 0);
+  // 待接受邀请也占席位：在用 + 待接受超过已付就是超出，和添加弹窗、席位菜单同一套说法。
+  const { inUse, paid, pending, free, over: overBy, unknown } = summary;
+  const over = overBy > 0;
   const usedFill = paid > 0 ? Math.min(100, (inUse / paid) * 100) : inUse > 0 ? 100 : 0;
   const heldFill = paid > 0 ? Math.min(100, ((inUse + pending) / paid) * 100) : 0;
   const status = over
-    ? { text: `超出 ${inUse - paid}`, className: 'font-medium text-red-600 dark:text-red-400' }
+    ? { text: `超出 ${overBy}`, className: 'font-medium text-red-600 dark:text-red-400' }
     : unknown
       ? { text: '空位未知', className: 'text-gray-600 dark:text-ink-300' }
       : free > 0
@@ -60,7 +61,7 @@ function BilledSeatBlock({
   const title = [
     `${label} 在用 ${inUse} 个，已付 ${paid} 个`,
     pending > 0 ? `待接受 ${pending} 个` : '',
-    unknown ? '空位未知' : `空位 ${free} 个`,
+    over ? `超出 ${overBy} 个` : unknown ? '空位未知' : `空位 ${free} 个`,
   ].filter(Boolean).join('，');
   return (
     <div className={`rounded-xl px-3.5 py-3 ${style.surface} ${className}`} title={title}>
@@ -77,7 +78,7 @@ function BilledSeatBlock({
       </div>
       <div className={`relative mt-2 h-1 overflow-hidden rounded-full ${style.track}`} aria-hidden="true">
         {heldFill > usedFill && (
-          <div className={`absolute inset-y-0 left-0 rounded-full opacity-40 ${style.solid}`} style={{ width: `${heldFill}%` }} />
+          <div className={`absolute inset-y-0 left-0 rounded-full opacity-40 ${over ? 'bg-red-500' : style.solid}`} style={{ width: `${heldFill}%` }} />
         )}
         <div className={`relative h-full rounded-full ${over ? 'bg-red-500' : style.solid}`} style={{ width: `${usedFill}%` }} />
       </div>

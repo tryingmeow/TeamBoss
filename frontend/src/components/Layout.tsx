@@ -258,13 +258,15 @@ export default function Layout() {
     void refresh();
   };
 
-  const handleGptMembersAdded = async (result?: unknown) => {
+  const handleGptMembersAdded = async (result?: unknown, meta?: { shownInDialog?: boolean }) => {
     const data = result as Partial<BatchInviteOutcome> | undefined;
     const added = data?.added?.length ?? 0;
     const failed = data?.failed?.length ?? 0;
     const noPlace = data?.no_place_emails?.length ?? 0;
     const declined = data?.declined_emails?.length ?? 0;
     await refresh(false);
+    // 弹窗还开着并且已经列出了这一轮的结果：不再用 toast 重复一遍。
+    if (meta?.shownInDialog) return;
     const parts = [`已邀请 ${added} 个`];
     const purchase = overagePurchaseText(data?.added ?? []);
     if (purchase) parts.push(purchase);

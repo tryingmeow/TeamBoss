@@ -41,7 +41,8 @@ interface AddMemberDialogProps {
   title?: string;
   fixedSeatType?: SeatType;
   submitLabel?: string;
-  onSuccess: (result?: unknown) => void;
+  /** `meta.shownInDialog`: the dialog stays open and already shows this result (no toast needed). */
+  onSuccess: (result?: unknown, meta?: { shownInDialog?: boolean }) => void;
   submitInvites?: (data: {
     emails: string[];
     seat_type: SeatType;
@@ -200,6 +201,12 @@ export default function AddMemberDialog({
   const [batchResult, setBatchResult] = useState<BatchInviteOutcome | null>(null);
   // 批量模式：每个 Team 的缓存 ChatGPT 空位（已扣待接受邀请），用来在提交前说清楚会不会加购。
   const [freeByTeam, setFreeByTeam] = useState<Map<string, number> | null>(null);
+  // 每跑完一轮加一：上一轮刚用掉（或加购）的席位必须重新读，不能拿打开弹窗时的空位接着算。
+  const [usageRound, setUsageRound] = useState(0);
+  const [usageStale, setUsageStale] = useState(false);
+  const [emailsKey, setEmailsKey] = useState('');
+  // finishBatch 留在输入框里的「没加上的」邮箱；输入框还是它们时才算重试。
+  const [leftoverText, setLeftoverText] = useState('');
 
   const batchMode = !teamId && Boolean(submitInvites);
   const effectiveSeatType = fixedSeatType ?? seatType;
@@ -212,6 +219,13 @@ export default function AddMemberDialog({
   const gateText = gate ? gateMessage(gate) : null;
   const blocked = gate?.action === 'forbid';
 
+  // 邮箱列表变了（停顿一下之后）也重新读一次空位：弹窗可能开了很久。
+  useEffect(() => {
+    if (!open || !batchMode) return;
+    const timer = setTimeout(() => setEmailsKey(emails.join('\n')), 700);
+    return () => clearTimeout(timer);
+  }, [open, batchMode, email]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!open || !batchMode) return;
     let cancelled = false;
@@ -221,11 +235,14 @@ export default function AddMemberDialog({
       })
       .catch(() => {
         if (!cancelled) setFreeByTeam(null);
+      })
+      .finally(() => {
+        if (!cancelled) setUsageStale(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [open, batchMode]);
+  }, [open, batchMode, usageRound, emailsKey]);
 
   /** Batch: how many seats ChatGPT would add for these emails, and on which 超员自动 Teams. */
   const batchPreview = useMemo(() => {
@@ -237,10 +254,12 @@ export default function AddMemberDialog({
       && item.subscription_status !== 'expired'
       && item.auth_state !== 'rejected'
       && !item.sync_suspended_at);
-    const free = candidates.reduce(
-      (total, item) => total + (freeByTeam?.get(item.id) ?? cachedFreeSeats(item, 'default', teamPendingCounts(item)).free),
-      0,
-    );
+    // 两个来源都看：空位接口（含待接受）和 Team 列表缓存（含 pending_invite_counts），取小的。
+    const free = candidates.reduce((total, item) => {
+      const fromTeam = cachedFreeSeats(item, 'default', teamPendingCounts(item)).free;
+      const fromUsage = freeByTeam?.get(item.id);
+      return total + (fromUsage === undefined ? fromTeam : Math.min(fromUsage, fromTeam));
+    }, 0);
     const extra = Math.max(0, emails.length - free);
     const autoNames = candidates.filter((item) => parseOveragePolicy(item.overage_policy) === 'auto').map((item) => item.name);
     const hasConfirm = candidates.some((item) => parseOveragePolicy(item.overage_policy) === 'confirm');
@@ -252,10 +271,10 @@ export default function AddMemberDialog({
     const { free, extra, autoNames, hasConfirm } = batchPreview;
     const lead = `空闲 ChatGPT 席位约 ${free} 个，多出约 ${extra} 人。`;
     if (autoNames.length === 1) {
-      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team「${autoNames[0]}」，ChatGPT 自动加购约 ${extra} 个 ChatGPT 席位并扣费。` };
+      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team「${autoNames[0]}」，ChatGPT 会自动加购约 ${extra} 个席位并扣费。` };
     }
     if (autoNames.length > 1) {
-      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team（${quoteNames(autoNames)}），ChatGPT 自动加购约 ${extra} 个 ChatGPT 席位并扣费。` };
+      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team（${quoteNames(autoNames)}），ChatGPT 会自动加购约 ${extra} 个席位并扣费。` };
     }
     if (hasConfirm) return { tone: 'warn', text: `${lead}超出的部分要加购，提交后会先问你。` };
     return { tone: 'plain', text: `${lead}其余 Team 都是「禁止超员」，多出的不会邀请，也不会加购。` };
@@ -269,6 +288,8 @@ export default function AddMemberDialog({
     setError('');
     setAsk(null);
     setBatchResult(null);
+    setLeftoverText('');
+    setUsageStale(false);
   };
 
   // Esc / 点击遮罩关闭时 Radix 只会调用这里的 onOpenChange,不会走下面按钮上
@@ -285,15 +306,21 @@ export default function AddMemberDialog({
 
   /** Shows a finished batch and leaves only the emails that were not invited in the box. */
   const finishBatch = (outcome: BatchInviteOutcome) => {
-    onSuccess(outcome);
     const leftover = [...outcome.failed.map((item) => item.email), ...outcome.declined_emails];
+    // 这一轮用掉了空位（可能还加购了）：下一轮之前重新读空位，读到之前不让提交。
+    setUsageStale(true);
+    setUsageRound((round) => round + 1);
     if (leftover.length === 0 && !overagePurchaseText(outcome.added)) {
+      onSuccess(outcome);
       closeAll();
       return;
     }
     // 结果留在弹窗里（花了钱、或有人没加上）；输入框只留没邀请的，「重新提交」不会重复邀请。
+    // 全部成功时输入框清空、回到普通的「邮箱」状态，可以直接接着加下一批。
+    onSuccess(outcome, { shownInDialog: true });
     setBatchResult(outcome);
     setEmail(leftover.join('\n'));
+    setLeftoverText(leftover.join('\n'));
   };
 
   /** Batch (no teamId): the server picks the Teams and asks before overfilling a 超员需确认 Team. */
@@ -411,9 +438,10 @@ export default function AddMemberDialog({
       setError('请输入邮箱地址');
       return;
     }
-    if (blocked) return;
+    if (blocked || checkingSeats) return;
     setError('');
     setBatchResult(null);
+    setLeftoverText('');
     if (gate?.action === 'confirm') {
       // 缓存显示已满且这个 Team 要先问：先确认再发，确认后才带上 allow_overage。
       setAsk({ seatType: effectiveSeatType, emails, message: gateText ?? '' });
@@ -461,17 +489,23 @@ export default function AddMemberDialog({
   const declined = batchResult?.declined_emails ?? [];
   const addedCount = batchResult?.added.length ?? 0;
   const purchaseText = batchResult ? overagePurchaseText(batchResult.added) : null;
-  const hasLeftover = emails.length > 0;
+  // 输入框里还是上一轮没加上的那些邮箱：这是重试；改过或清空了就是新的一批。
+  const retrying = batchResult !== null && leftoverText !== '' && email === leftoverText;
+  // 上一轮刚结束、空位还没重新读到：不让提交，免得按旧空位悄悄加购。
+  const checkingSeats = batchMode && usageStale;
 
+  // 会花钱的说法优先：按钮上永远写着要加购几席。
   const submitText = loading
     ? '添加中…'
-    : batchResult
-      ? '重新提交没加上的'
+    : checkingSeats
+      ? '核对空位中…'
       : gate?.action === 'auto'
         ? `添加并加购 ${gate.extra} 席`
         : batchWillBuy && batchPreview
           ? `添加并加购约 ${batchPreview.extra} 席`
-          : submitLabel;
+          : retrying
+            ? '重新提交没加上的'
+            : submitLabel;
 
   return (
     <DialogFrame
@@ -494,18 +528,16 @@ export default function AddMemberDialog({
               {batchResult ? '完成' : '取消'}
             </button>
           </Dialog.Close>
-          {(!batchResult || hasLeftover) && (
-            <button
-              type="button"
-              onClick={() => { void handleSubmit(); }}
-              disabled={loading || blocked}
-              title={blocked ? gateText ?? undefined : undefined}
-              className={BUTTON.primary}
-            >
-              {loading && <Loader2 size={14} className="animate-spin" />}
-              {submitText}
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => { void handleSubmit(); }}
+            disabled={loading || blocked || checkingSeats}
+            title={blocked ? gateText ?? undefined : undefined}
+            className={BUTTON.primary}
+          >
+            {(loading || checkingSeats) && <Loader2 size={14} className="animate-spin" />}
+            {submitText}
+          </button>
         </>
       }
       nested={
@@ -526,7 +558,7 @@ export default function AddMemberDialog({
       <div className="space-y-5">
         <div>
           <label htmlFor="add-member-emails" className={LABEL}>
-            {batchResult ? '没加上的邮箱' : '邮箱'} <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>
+            {retrying ? '没加上的邮箱' : '邮箱'} <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>
           </label>
           <textarea
             id="add-member-emails"
@@ -585,7 +617,7 @@ export default function AddMemberDialog({
           </div>
         )}
 
-        {!batchResult && batchNote && (
+        {batchNote && (
           <div
             role="status"
             className={cn('flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm leading-6', batchNote.tone === 'warn' ? NOTE_WARN : NOTE_PLAIN)}
