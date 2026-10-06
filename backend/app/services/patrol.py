@@ -82,6 +82,7 @@ from ..seat_types import (
 from ..tg_format import detail_card
 from .member_expiry import compute_effective_kick_at, normalize_kick_mode
 from .seat_capacity import member_seat_usage_from_members, positive_seat_count
+from .snapshot_pages import SnapshotPageAccumulator, SnapshotPageError
 from .tg_member_bindings import deactivate_member_binding_if_inactive_sync
 from .tg_commands import sync_email_chat_commands_sync
 from .tg_notify import notify_admins_sync
@@ -1122,45 +1123,24 @@ def _patrol_revoke_invite(conn: sqlite3.Connection, client: ChatGPTClient, team_
 # ── 严格模式：动手前强制实时刷新 + 唯一踢人入口 ───────────────────────────────
 
 def _fetch_all_api_items_sync(method, *fallback_keys: str, limit: int = 100, max_items: int = 10000):
-    """分页拉取 API 列表的同步小工具，供严格模式"动手前强制实时刷新"使用。
+    """分页拉取 API 列表的同步小工具，供严格模式"动手前强制实时刷新"使用。返回 (条目, 错误)。
 
-    自成一体、不依赖 scheduler.py，与本文件顶部docstring里"自成一体"的原则一致。
+    每一页按 snapshot_pages.SnapshotPageAccumulator 判定（那里是"名单何时完整"的正本）：读不懂、
+    条数和 total 对不上、翻到上限还没完，都返回 (None, 原因)，调用方跳过整队、不写缓存、不踢人。
+    上游这一页本身报错时，原因沿用上游原样的 error（和以前一样）。
     """
-    items: list = []
-    offset = 0
-    while offset < max_items:
-        data = run_chatgpt_call_sync(method, offset=offset, limit=limit)
-        if isinstance(data, dict) and "error" in data:
-            return None, data["error"]
-        page_items: list = []
-        found_list = False
-        for key in ("items",) + fallback_keys:
-            candidate = data.get(key) if isinstance(data, dict) else None
-            if isinstance(candidate, list):
-                page_items = candidate
-                found_list = True
-                break
-        if not found_list:
-            # 200 但响应体没有任何可识别的成员/邀请列表（网关 JSON 挑战、契约漂移、
-            # 代理注入）。绝不能当成"这队空了"——那样严格模式会拿空快照去踢人。
-            # fail closed，让调用方跳过整队。
-            return None, "unrecognized member/invite response structure"
-        items.extend(page_items)
-        total = data.get("total") if isinstance(data, dict) else None
-        short_page = len(page_items) < limit
-        if isinstance(total, int):
-            if len(items) >= total:
-                break
-            if short_page:
-                # total 已知却提前收到短页 = 响应被截断，未见到的人不能判为缺席。
-                return None, "truncated member/invite response before reported total"
-        elif short_page:
-            break
-        offset += limit
-    else:
-        # 翻到上限还没结束 = 名单不完整，不能当完整快照写缓存、拿去对账。
-        return None, "member/invite list exceeds the paging limit"
-    return items, None
+    pages = SnapshotPageAccumulator(*fallback_keys, limit=limit)
+    # 100 条一页、最多 10000 条 = 最多 100 页，与 scheduler 的同步拉取相同。
+    max_pages = max(1, (max_items + pages.limit - 1) // pages.limit)
+    for _ in range(max_pages):
+        data = run_chatgpt_call_sync(method, offset=pages.next_offset, limit=pages.limit)
+        try:
+            if pages.add(data):
+                return pages.items, None
+        except SnapshotPageError as exc:
+            return None, exc.upstream_error or exc.reason
+    # 翻到上限还没结束 = 名单不完整，不能当完整快照写缓存、拿去对账。
+    return None, "member/invite list exceeds the paging limit"
 
 
 def _refresh_team_snapshot_sync(
