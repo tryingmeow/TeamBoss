@@ -208,6 +208,39 @@ async def init_database():
             )
         """)
 
+        # 这份快照的上游拉取是什么时候开始的（第一个列表请求发出之前取的 UTC 时间）。
+        # 写缓存时只允许开始得更晚的快照覆盖更早的；巡逻的 Premium 否决拿它比对
+        # TeamBoss 之后有没有动过这个人的席位。旧行为 NULL = 不知道，按最旧处理。
+        await _migrate(db, "ALTER TABLE member_cache ADD COLUMN fetch_started_at TEXT")
+
+        # 持久席位占用：邀请 / 切换已发出、上游空位数还不一定扣掉它的席位。正本说明见
+        # services/seat_holds.py。重启不清空，只由对账或上游明确拒绝放掉。
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS seat_holds (
+                team_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                seat_type TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (team_id, email)
+            )
+        """)
+
+        # 管理员确认过的加购额度：一次确认（confirmation_id，前端生成）绑定一个 Team、一个
+        # 计费席位类型和他看到的加购个数 seat_limit；每次没有确认空位的加席位先扣 1，
+        # 只有上游明确拒绝才退回。规则正本见 services/overage_policy.py。
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS overage_confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                team_id TEXT NOT NULL,
+                seat_type TEXT NOT NULL,
+                seat_limit INTEGER NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+        """)
+
         # 成员变动监视任务（邀请/踢人后轮询，直到变动反映到 API）
         await db.execute("""
             CREATE TABLE IF NOT EXISTS member_watch (
