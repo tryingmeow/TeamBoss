@@ -891,7 +891,7 @@ function OwnerList({
     />
   );
 
-  // Owner 列表没有待接受邀请的数据，按 0 算；服务端会用实时数据再判一次。
+  // Owner 列表没有待接受邀请的名单：用 Team 列表缓存的计数（缺失时按 0）；服务端会用实时数据再判一次。
   const seat = (owner: OwnerRow, variant: Variant) => (
     <SeatTypeCell
       variant={variant}
@@ -901,7 +901,7 @@ function OwnerList({
         teamId: owner.team_id,
         userId: owner.user_id,
         team: teamsById.get(owner.team_id) ?? null,
-        pendingByType: {},
+        pendingByType: teamsById.get(owner.team_id)?.pending_invite_counts ?? {},
         isCodexEnabled: owner.is_codex_enabled,
         onSwitched: () => setRefreshTrigger((v) => v + 1),
         showToast,

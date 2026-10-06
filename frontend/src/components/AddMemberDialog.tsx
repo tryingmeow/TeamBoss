@@ -118,31 +118,35 @@ function quoteNames(names: string[]): string {
   return names.map((name) => `「${name}」`).join('、');
 }
 
-function BatchPlanMessage({ plan, total, remaining, invited, invitedOverage, replan }: {
+/**
+ * The batch confirm step. The counts come from the server's own lead sentence (it knows how
+ * many free seats the emails will use first), then the plan: where seats get bought and how many.
+ */
+function BatchPlanMessage({ serverMessage, plan, total, invitedOverage, replan }: {
+  serverMessage: string;
   plan: OveragePlanItem[];
   total: number;
-  remaining: number;
-  invited: number;
-  /** Of `invited`, how many already made ChatGPT buy a seat (超员自动 Teams). */
+  /** Already invited onto 超员自动 Teams in this run (a seat was bought for each). */
   invitedOverage: number;
   replan: boolean;
 }) {
-  const leftover = Math.max(0, remaining - total);
+  const cut = serverMessage.indexOf('继续会让');
+  let lead = cut > 0 ? serverMessage.slice(0, cut).trim() : '';
+  if (replan && !lead.startsWith(REPLAN_NOTE)) lead = `${REPLAN_NOTE}${lead}`;
+  const note = lead.startsWith(REPLAN_NOTE) ? REPLAN_NOTE : '';
+  const facts = note ? lead.slice(note.length) : lead;
   return (
     <div className="space-y-2">
-      {replan && <p className="font-medium text-gray-900 dark:text-gray-100">{REPLAN_NOTE}</p>}
-      <p>
-        {invited > 0 && (
-          <>已邀请 {invited} 个{invitedOverage > 0 && <>（其中 {invitedOverage} 个已在「超员自动」的 Team 加购）</>}。</>
-        )}
-        {remaining} 个邮箱没有空位。
-        {plan.length === 1 && (
-          <>继续会让 ChatGPT 在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费。</>
-        )}
-        {plan.length > 1 && <>继续会让 ChatGPT 在这些 Team 自动加购 ChatGPT 席位并扣费：</>}
-      </p>
-      {plan.length > 1 && (
+      {note && <p className="font-medium text-gray-900 dark:text-gray-100">{note}</p>}
+      {facts && <p>{facts}</p>}
+      {invitedOverage > 0 && <p>已邀请的里有 {invitedOverage} 个在「超员自动」的 Team，已加购席位。</p>}
+      {plan.length === 1 ? (
+        <p className="font-medium text-gray-900 dark:text-gray-100">
+          继续会让 ChatGPT 在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费。
+        </p>
+      ) : (
         <>
+          <p>继续会让 ChatGPT 在这些 Team 自动加购 ChatGPT 席位并扣费：</p>
           <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 text-gray-700 dark:divide-ink-800 dark:border-ink-800 dark:text-ink-200">
             {plan.map((item) => (
               <li key={item.team_id || item.team_name} className="flex items-center justify-between gap-3 px-3 py-1.5">
@@ -154,7 +158,6 @@ function BatchPlanMessage({ plan, total, remaining, invited, invitedOverage, rep
           <p className="font-medium text-gray-900 dark:text-gray-100">共加购 {total} 个 ChatGPT 席位。</p>
         </>
       )}
-      {leftover > 0 && <p>其余 {leftover} 个邮箱没位置，不会邀请。</p>}
     </div>
   );
 }
@@ -227,8 +230,13 @@ export default function AddMemberDialog({
   /** Batch: how many seats ChatGPT would add for these emails, and on which 超员自动 Teams. */
   const batchPreview = useMemo(() => {
     if (!batchMode || !teams || emails.length === 0) return null;
-    // 与后端批量挑 Team 的候选一致：状态正常、订阅没到期。
-    const candidates = teams.filter((item) => item.status === 'active' && item.subscription_status !== 'expired');
+    // 后端批量挑 Team 的候选：状态正常、订阅没到期。再去掉登录失效、暂停同步的（它们接不了邀请）：
+    // 空位宁可少算，预告的加购数宁可多说。
+    const candidates = teams.filter((item) =>
+      item.status === 'active'
+      && item.subscription_status !== 'expired'
+      && item.auth_state !== 'rejected'
+      && !item.sync_suspended_at);
     const free = candidates.reduce(
       (total, item) => total + (freeByTeam?.get(item.id) ?? cachedFreeSeats(item, 'default', teamPendingCounts(item)).free),
       0,
@@ -331,10 +339,9 @@ export default function AddMemberDialog({
           message: err.overagePlan.length > 0
             ? (
               <BatchPlanMessage
+                serverMessage={err.message}
                 plan={err.overagePlan}
                 total={err.extraSeatsTotal}
-                remaining={remaining.length}
-                invited={added.length}
                 invitedOverage={added.filter((item) => item.overage).length}
                 replan={allowOverage || err.message.startsWith(REPLAN_NOTE)}
               />
