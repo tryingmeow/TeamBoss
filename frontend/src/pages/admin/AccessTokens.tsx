@@ -16,6 +16,8 @@ import PageShell from '../../components/PageShell';
 import PageLoading from '../../components/PageLoading';
 import Toast from '../../components/Toast';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
+import { CODE_SEAT_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, seatStyle } from '../../lib/seatType';
+import type { CodeSeatType } from '../../types';
 import { cn } from '../../lib/utils';
 
 interface ToastMessage {
@@ -85,6 +87,16 @@ function readDuration(text: string): string | null {
 function redeemDeadline(dateStr: string | null): string {
   return dateStr ? formatDate(dateStr) : '永不过期';
 }
+
+/** Codes from an older backend carry no seat type: they were all ChatGPT codes. */
+function SeatPill({ seatType }: { seatType?: string | null }) {
+  return <span className={cn(PILL, seatStyle(seatType).pill)}>{formatSeatTypeLabel(seatType)}</span>;
+}
+
+const CODE_SEAT_HINT: Record<CodeSeatType, string> = {
+  default: '只用已付的 ChatGPT 空位，兑换不会加购扣费。',
+  prolite: '只用已付的 Premium 空位，兑换不会加购扣费；没有空位时兑换失败，兑换码不作废。',
+};
 
 const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
 const LABEL_HINT = 'font-normal text-gray-400 dark:text-ink-500';
@@ -166,6 +178,7 @@ export default function AccessTokens() {
   const [grant, setGrant] = useState('30d');
   const [ttl, setTtl] = useState('7d');
   const [note, setNote] = useState('');
+  const [codeSeat, setCodeSeat] = useState<CodeSeatType>('default');
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<AccessTokenResponse | null>(null);
   const [copied, setCopied] = useState(false);
@@ -228,6 +241,7 @@ export default function AccessTokens() {
         grant_expires_in: grantValue,
         token_ttl: ttlValue || '7d',
         note: note.trim() || undefined,
+        seat_type: codeSeat,
       });
       setCreated(token);
       setCopied(false);
@@ -356,6 +370,7 @@ export default function AccessTokens() {
                     <code className="truncate rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-800 dark:bg-ink-800 dark:text-ink-200">
                       {token.token_prefix}…
                     </code>
+                    <SeatPill seatType={token.seat_type} />
                     <span className={cn(PILL, STATUS_TONE[status])}>{status}</span>
                   </div>
                   {disableButton(token)}
@@ -384,10 +399,11 @@ export default function AccessTokens() {
         </ul>
 
         <div className="hidden overflow-x-auto md:block">
-          <table className="w-full min-w-[52rem] text-sm">
+          <table className="w-full min-w-[56rem] text-sm">
             <thead className="bg-gray-50 text-left text-xs font-medium text-gray-500 dark:bg-ink-950/40 dark:text-ink-400">
               <tr className="[&>th]:whitespace-nowrap [&>th]:px-4 [&>th]:py-2.5 [&>th]:font-medium">
                 <th>兑换码</th>
+                <th>席位</th>
                 <th>授予时长</th>
                 <th>状态</th>
                 <th>备注</th>
@@ -406,6 +422,9 @@ export default function AccessTokens() {
                       <code className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-xs text-gray-800 dark:bg-ink-800 dark:text-ink-200">
                         {token.token_prefix}…
                       </code>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <SeatPill seatType={token.seat_type} />
                     </td>
                     <td className="whitespace-nowrap px-4 py-2.5 text-gray-700 dark:text-ink-200">
                       {durationLabel(token.grant_expires_in)}
@@ -483,6 +502,32 @@ export default function AccessTokens() {
               </button>
             </div>
 
+            <div className="mt-4">
+              <div className={LABEL}>
+                席位类型 <span className={LABEL_HINT}>· 兑换后得到的席位</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 sm:inline-grid sm:w-72 dark:bg-ink-950" role="group" aria-label="席位类型">
+                {CODE_SEAT_OPTIONS.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    onClick={() => setCodeSeat(value)}
+                    aria-pressed={codeSeat === value}
+                    className={cn(
+                      'inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-medium transition-colors',
+                      codeSeat === value
+                        ? cn('shadow-sm', SEAT_STYLE[value].pill)
+                        : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
+                    )}
+                  >
+                    <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="mt-1.5 text-xs text-gray-500 dark:text-ink-400">{CODE_SEAT_HINT[codeSeat]}</p>
+            </div>
+
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <DurationField
                 label="授予时长"
@@ -525,7 +570,7 @@ export default function AccessTokens() {
                   已生成，请立即复制
                 </div>
                 <div className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300/80">
-                  授予 {durationLabel(created.grant_expires_in)} ·{' '}
+                  {formatSeatTypeLabel(created.seat_type)} · 授予 {durationLabel(created.grant_expires_in)} ·{' '}
                   {created.token_expires_at ? `${formatDate(created.token_expires_at)} 前有效` : '永不过期'}
                 </div>
                 <div className="mt-2 flex items-center gap-2">

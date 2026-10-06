@@ -42,6 +42,17 @@ import SegmentedTabs from '../../components/SegmentedTabs';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { SEAT_STYLE } from '../../lib/seatType';
 
+/** Premium seats have no upstream price; the backend estimates them. Always labelled 估算. */
+function premiumEstimateText(
+  team: { premium_monthly_estimate_base?: number | null; premium_monthly_estimate_usd?: number },
+  baseCurrency: string,
+): string {
+  if (typeof team.premium_monthly_estimate_base === 'number') {
+    return `≈ ${formatMoney(team.premium_monthly_estimate_base, baseCurrency)}`;
+  }
+  return formatMoney(team.premium_monthly_estimate_usd ?? 0, 'USD');
+}
+
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
 
 type FinanceCardLike = Pick<
@@ -877,6 +888,15 @@ export default function Finance() {
 
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
           <StatCard label="月预计支出" loading={overviewLoading} value={formatMoney(overview?.monthly_total_base ?? 0, baseCurrency)}>
+            {(overview?.premium_monthly_estimate_base_total ?? 0) > 0 && (
+              <p>
+                另加 <span className={cn('font-medium', SEAT_STYLE.prolite.text)}>Premium 估算</span>{' '}
+                <span className="whitespace-nowrap">≈ {formatMoney(overview?.premium_monthly_estimate_base_total, baseCurrency)}</span>
+                <span className="block text-[11px] text-gray-400 dark:text-ink-500">
+                  按每席 {formatMoney(overview?.premium_seat_price_estimate_usd ?? 125, '$')}/月估算，上游没有 Premium 单价
+                </span>
+              </p>
+            )}
             {overview?.excluded_teams_count ? <p>{overview.excluded_teams_count} 个 Team 未计入</p> : null}
             {overview?.last_paid_total_base != null && (
               <p>上期实付合计 <span className="whitespace-nowrap">≈ {formatMoney(overview.last_paid_total_base, baseCurrency)}</span></p>
@@ -1069,6 +1089,9 @@ export default function Finance() {
                   ) : (
                     overview.teams.map((team) => {
                       const sym = teamUnit(team, null);
+                      // 月费乘的是已付 ChatGPT 席位；老后端没有这个字段时退回 seats_entitled。
+                      const chatgptBilled = team.chatgpt_seats_billed ?? team.seats_entitled;
+                      const premiumPaid = team.premium_seats_paid ?? 0;
                       const subscription = SUBSCRIPTION_STATUS[team.subscription_status] ?? SUBSCRIPTION_STATUS.renewing;
                       const monthlyConverted = team.monthly_total_base !== null && !sameCurrency(team.billing_currency, overview.base_currency);
                       let daysBadge: string = TONE.neutral;
@@ -1114,8 +1137,15 @@ export default function Finance() {
                             <div className="whitespace-nowrap">
                               <span className={cn('text-xs font-medium', SEAT_STYLE.default.text)}>ChatGPT </span>
                               <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{team.chatgpt_in_use}</span>
-                              <span className="tabular-nums text-gray-400 dark:text-ink-500">/{team.seats_entitled}</span>
+                              <span className="tabular-nums text-gray-400 dark:text-ink-500">/{chatgptBilled}</span>
                             </div>
+                            {premiumPaid > 0 && (
+                              <div className="mt-0.5 whitespace-nowrap">
+                                <span className={cn('text-xs font-medium', SEAT_STYLE.prolite.text)}>Premium </span>
+                                <span className="text-xs text-gray-500 dark:text-ink-400">已付 </span>
+                                <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{premiumPaid}</span>
+                              </div>
+                            )}
                             <span className={cn(PILL, 'mt-1', team.is_codex_enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral)}>
                               <Zap className="size-2.5" />
                               {team.is_codex_enabled ? 'Codex 已开' : 'Codex 未开'}
@@ -1126,9 +1156,15 @@ export default function Finance() {
                             <div className="whitespace-nowrap tabular-nums text-gray-900 dark:text-gray-100">
                               {team.price_per_seat !== null && formatMoney(team.price_per_seat, sym)}
                               <span className="text-gray-500 dark:text-ink-400">
-                                {team.price_per_seat !== null ? ' × ' : ''}{team.seats_entitled} 席
+                                {team.price_per_seat !== null ? ' × ' : ''}{chatgptBilled} 席
                               </span>
                             </div>
+                            {premiumPaid > 0 && (
+                              <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
+                                <span className={SEAT_STYLE.prolite.text}>Premium</span>{' '}
+                                {formatMoney(overview.premium_seat_price_estimate_usd ?? 125, '$')} × {premiumPaid} 席 · 估算
+                              </div>
+                            )}
                             {team.price_per_seat === null && (
                               <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">单价未知</div>
                             )}
@@ -1157,6 +1193,12 @@ export default function Finance() {
                             ) : monthlyConverted && (
                               <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
                                 {formatMoney(team.monthly_total_native, sym)}
+                              </div>
+                            )}
+                            {premiumPaid > 0 && (
+                              <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums">
+                                <span className={SEAT_STYLE.prolite.text}>+ Premium 估算</span>{' '}
+                                <span className="text-gray-700 dark:text-ink-200">{premiumEstimateText(team, overview.base_currency)}</span>
                               </div>
                             )}
                           </td>

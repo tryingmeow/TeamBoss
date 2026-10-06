@@ -349,7 +349,16 @@ export default function TeamManagement() {
               <StatCard
                 title="月预计支出"
                 value={formatMoney(finance?.monthly_total_base, baseCurrency)}
-                detail={finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常 Team` : '只计入活跃且自动续费的 Team'}
+                detail={(
+                  <>
+                    {(finance?.premium_monthly_estimate_base_total ?? 0) > 0 && (
+                      <span className="block">
+                        另加 <span className={SEAT_STYLE.prolite.text}>Premium 估算</span> ≈ {formatMoney(finance?.premium_monthly_estimate_base_total, baseCurrency)}
+                      </span>
+                    )}
+                    {finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常 Team` : '只计入活跃且自动续费的 Team'}
+                  </>
+                )}
                 icon={Wallet}
               />
               <StatCard

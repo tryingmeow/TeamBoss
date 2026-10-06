@@ -5,6 +5,7 @@
  * still shows up — just untranslated.
  */
 import { formatDateSafe } from './formatDate';
+import { formatSeatTypeLabel, overagePolicyLabel } from './seatType';
 
 const ACTION_LABELS: Record<string, string> = {
   // Admin account and settings
@@ -27,6 +28,7 @@ const ACTION_LABELS: Record<string, string> = {
   update_team_remark: '修改 Team 备注',
   get_workspace_settings: '读取工作区设置',
   change_default_seat_type: '修改默认席位',
+  set_overage_policy: '修改超员策略',
   sync_team: '同步 Team',
   sync_all: '同步全部 Team',
   refresh_token: '刷新登录令牌',
@@ -61,6 +63,8 @@ const ACTION_LABELS: Record<string, string> = {
   self_service_invite_admin_confirmed: '自助兑换：管理员确认',
   self_service_invite_admin_released: '自助兑换：管理员退回',
   self_service_renew: '自助续期',
+  redeem_no_premium_seat: '兑换失败：没有 Premium 空位',
+  redeem_seat_type_mismatch: '兑换失败：席位类型不符',
 
   // Scheduler
   auto_kick: '到期自动移出',
@@ -99,6 +103,7 @@ const ACTION_LABELS: Record<string, string> = {
   patrol_kick_batch_capped: '巡逻移出数已达上限',
   patrol_team_initialize: '巡逻登记新 Team',
   patrol_skip_invalid_entitlement: '巡逻跳过：席位数未知',
+  patrol_premium_alert: '巡逻提醒：Premium 席位',
 
   // Telegram and notifications
   tg_summary: 'TG 汇总推送',
@@ -223,10 +228,16 @@ export function logCodesMatchingLabel(text: string): { actions: string[]; values
 
 const BOOL: Record<string, string> = { true: '是', false: '否', '1': '是', '0': '否' };
 
+/** Registry labels (Premium, 其他（raw）); old rows may still say codex / chatgpt. */
 function seatLabel(value: string): string {
-  if (value === 'usage_based' || value === 'codex') return 'Codex';
-  if (value === 'default' || value === 'chatgpt') return 'ChatGPT';
-  return value;
+  if (value === 'codex') return 'Codex';
+  if (value === 'chatgpt') return 'ChatGPT';
+  return formatSeatTypeLabel(value);
+}
+
+/** Python writes booleans as True / False. */
+function isTrue(value: string): boolean {
+  return BOOL[value.toLowerCase()] === '是';
 }
 
 /** "30d" → "30 天", "12h" → "12 小时", "3m" → "3 分钟", "never" → "永久". */
@@ -263,9 +274,14 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   delivered_to: (v) => `送达 ${v} 人`,
   timed_out: (v) => (v.toLowerCase() === 'true' ? '等待超时' : '已在 ChatGPT 生效'),
   seat_type: (v) => `席位 ${seatLabel(v)}`,
+  from_seat_type: (v) => `原席位 ${seatLabel(v)}`,
+  overage_policy: (v) => `超员策略 ${overagePolicyLabel(v)}`,
+  previous: (v) => `原为 ${overagePolicyLabel(v)}`,
+  policy: (v) => `策略 ${overagePolicyLabel(v)}`,
+  overage: (v) => (isTrue(v) ? '超员加购' : null),
   expires_at: (v) => `到期 ${timeLabel(v)}`,
   expires_in: (v) => `时长 ${durationLabel(v)}`,
-  allow_overage: (v) => (BOOL[v.toLowerCase()] === '是' ? '允许超员' : null),
+  allow_overage: (v) => (isTrue(v) ? '已确认加购' : null),
   user_id: () => null,
   request_id: () => null,
   token_use_id: (v) => `兑换记录 #${v}`,
@@ -311,7 +327,7 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   api_concurrency: (v) => `并发 ${v}`,
   expiry_kick_mode: (v) => (v === 'day_end' ? '到期当天结束时移出' : '到期后延迟移出'),
   expiry_kick_delay_hours: (v) => `宽限 ${v} 小时`,
-  skip_overage_confirmation: (v) => `跳过超员确认 ${BOOL[v.toLowerCase()] === '是' ? '开' : '关'}`,
+  skip_overage_confirmation: (v) => `跳过超员确认（旧设置） ${isTrue(v) ? '开' : '关'}`,
   ip: (v) => `IP ${v}`,
   failures_remaining: (v) => `剩余尝试 ${v} 次`,
   shared_identity_failures: (v) => `同源失败 ${v} 次`,
@@ -328,7 +344,13 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   updated_currencies: (v) => `更新 ${v} 种货币`,
   base_currency: (v) => `本位币 ${v}`,
   low_balance_threshold: (v) => `余额提醒阈值 ${v}`,
-  reason: (v) => ({ no_available_seat: '没有空余席位', invite: '邀请后', kick: '移出后' } as Record<string, string>)[v] ?? v,
+  reason: (v) => ({
+    no_available_seat: '没有空余席位',
+    invite: '邀请后',
+    kick: '移出后',
+    overage_forbidden: '席位已满，禁止超员',
+    overage_needs_confirmation: '席位已满，等你确认加购',
+  } as Record<string, string>)[v] ?? v,
   action: (v) => ({ renewed: '已续期', extended: '已延长', renewed_member: '续期成员', renewed_invite: '续期邀请' } as Record<string, string>)[v] ?? v,
   force: () => '强制同步',
   failed: (v) => `失败 ${v}`,
