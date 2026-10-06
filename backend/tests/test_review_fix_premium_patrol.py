@@ -3,12 +3,12 @@
 - K1：快照按"开始拉取的时间"（member_cache.fetch_started_at）定先后。开始得早的刷新不能覆盖
   开始得晚的快照；Premium 否决拿 TeamBoss 的席位改动和开始时间比，不和写入时间比。每个完整快照
   的写入方都随快照给持久席位占用对账。
-- K2：TeamBoss 以前拉过 / 卖过席位的人（system / self_service 记录或兑换，开着关着都算），
-  重新被检测成外部 Premium 成员时不踢，只进限频的席位提醒。
+- K2：TeamBoss 还在管、或因为名单里不见了才没在管的人（system / self_service 记录开着，或被同步
+  因缺席关掉），以及在这个 Team 兑换过的人，重新被检测成外部 Premium 成员时不踢，只进限频的席位提醒。
 - K3：Premium 的"别一次踢一片"护栏数全部外部成员，不看严格模式；一个 Team 一轮在 Premium
   和超员两条路上一共最多踢 NON_STRICT_KICK_ABS_CAP 个。
-- 超员踢人同样套用 K2 的记录否决（不进候选、claim 后复查、限频提醒）和 K3 的异常护栏；
-  over_by 的算法不变。
+- 超员踢人同样套用 K2 的记录否决（先取最新 over_by 个再剔除、claim 后复查、限频提醒），
+  不套 K3 的异常护栏；over_by 的算法不变。
 
 所有上游调用都是记录调用的假客户端，绝不触网。
 """
@@ -148,11 +148,12 @@ class StaleRefreshTest(_Fixture):
 
         result = self._patrol(dry_run=False)
 
+        # 管理员动过他的席位：候选筛选就挡住，交给席位提醒。
         self.assertEqual(self._calls("remove_member"), [])
         self.assertEqual(result["kicked"], 0)
-        deferred = [l for l in self._logs("patrol_kick") if l["result"] == "skipped"]
-        self.assertEqual(len(deferred), 1)
-        self.assertIn("deferred", deferred[0]["detail"])
+        self.assertEqual(self._logs("patrol_kick"), [])
+        logged = self._logs("patrol_premium_alert")
+        self.assertIn("kind=premium_detected_with_record", logged[0]["detail"])
         self.assertIsNone(self._kicked(team_id, "u-p")[1])
 
     def test_older_started_refresh_does_not_overwrite_newer_snapshot(self):
@@ -526,7 +527,7 @@ class PremiumRoundLimitsTest(_Fixture):
                          [("remove_member", "u-new"), ("remove_member", "u-old")])
 
 
-# ═══ 超员踢人也套用 K2 的记录否决和 K3 的异常护栏 ═══════════════════════════════
+# ═══ 超员踢人套用 K2 的记录否决，不套 K3 的异常护栏 ═══════════════════════════════
 
 class OverQuotaHistoryAndGuardTest(_Fixture):
     _history_row = ManagedHistoryVetoTest._history_row
@@ -537,7 +538,7 @@ class OverQuotaHistoryAndGuardTest(_Fixture):
 
     def _rejoined_over_quota_team(self, team_id):
         # 2 个 ChatGPT 席位、3 个人在用 ChatGPT：超 1 个。最新混进来的 payer 其实是付费成员：
-        # 掉出过一次完整名单、记录被关掉，回来时成了一条新的 detected 记录（没有到期时间）。
+        # 掉出过一次完整名单、记录被同步关掉，回来时成了一条新的 detected 记录（没有到期时间）。
         payer = _member("payer@example.com", "u-pay", first_seen_at="2026-08-02T00:00:00+00:00")
         outsider = _member("outsider@example.com", "u-out", first_seen_at="2026-07-10T00:00:00+00:00")
         self._history_row(team_id, "payer@example.com", "u-pay", source="self_service", kicked=1,
@@ -552,10 +553,11 @@ class OverQuotaHistoryAndGuardTest(_Fixture):
 
         result = self._patrol(dry_run=False)
 
-        # 超的那 1 个从剩下的外部成员里按原顺序取：付费成员不进候选，over_by 的算法不变。
-        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-out")])
-        self.assertEqual(result["kicked"], 1)
+        # 最新的 1 个是付费成员，受保护不踢；他的名额不往后补给更老的 outsider。
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
         self.assertIsNone(self._kicked("team-oq-k2", "u-pay")[1])
+        self.assertIsNone(self._kicked("team-oq-k2", "u-out")[1])
         alerts = self._over_quota_alerts()
         self.assertEqual(len(alerts), 1)
         self.assertIn("payer", alerts[0])
@@ -571,7 +573,7 @@ class OverQuotaHistoryAndGuardTest(_Fixture):
         conn.close()
         self.assertFalse(ok)
         self.assertIn("placed or sold a seat", reason)
-        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-out")])
+        self.assertEqual(self._calls("remove_member"), [])
 
     def test_redemption_alone_keeps_a_member_out_of_over_quota_candidates(self):
         team_id = "team-oq-k2-redeem"
@@ -606,8 +608,9 @@ class OverQuotaHistoryAndGuardTest(_Fixture):
         deferred = [l for l in self._logs("patrol_kick") if l["result"] == "skipped"]
         self.assertIn("reason=over_quota, deferred=teamboss_record", deferred[0]["detail"])
 
-    def _abnormal_team(self, team_id):
-        # 4 人队阈值 = 2；3 个外部成员，ChatGPT 席位 1 个：超 2 个，但这份名单按异常处理。
+    def _many_outsiders_team(self, team_id):
+        # 4 人队，Premium 护栏的阈值是 2；3 个外部成员，ChatGPT 席位 1 个：超 2 个。
+        # 超员踢人不套这道护栏：踢最新的 2 个。
         members = [
             OWNER,
             _member("d1@example.com", "u-d1", first_seen_at="2026-07-10T00:00:00+00:00"),
@@ -617,39 +620,37 @@ class OverQuotaHistoryAndGuardTest(_Fixture):
         self._armed_team(team_id, members, seats_entitled=1)
         return members
 
-    def test_abnormal_outsider_count_blocks_over_quota_kicks_and_alerts(self):
-        self._abnormal_team("team-oq-k3")
+    def test_outsider_count_does_not_block_over_quota_kicks(self):
+        self._many_outsiders_team("team-oq-k3")
 
         result = self._patrol(dry_run=False)
 
-        self.assertEqual(self._calls("remove_member"), [])
-        self.assertEqual(result["kicked"], 0)
-        capped = self._logs("patrol_kick_batch_capped")
-        self.assertEqual(len(capped), 1)
-        self.assertIn("reason=over_quota, batch_guard=outsiders", capped[0]["detail"])
-        self.assertIn("capped_to=0", capped[0]["detail"])
+        self.assertEqual(self._calls("remove_member"),
+                         [("remove_member", "u-d3"), ("remove_member", "u-d2")])
+        self.assertEqual(result["kicked"], 2)
+        self.assertEqual(self._logs("patrol_kick_batch_capped"), [])
         over_quota_card = [t for t in self.notify_calls if "巡逻发现超员" in t]
-        self.assertIn("外部成员数量异常（3 / 团队共 4 人）", over_quota_card[0])
-        self.assertTrue(any(e.get("action") == "over_quota_batch_guard" for e in result["events"]))
+        self.assertNotIn("外部成员数量异常", over_quota_card[0])
+        self.assertFalse(any(e.get("action") == "over_quota_batch_guard" for e in result["events"]))
 
-    def test_abnormal_outsider_count_blocks_the_dry_run_too(self):
-        self._abnormal_team("team-oq-k3-dry")
+    def test_outsider_count_does_not_block_the_dry_run(self):
+        self._many_outsiders_team("team-oq-k3-dry")
 
         result = self._patrol(dry_run=True)
 
-        self.assertEqual(result["would_kick"], 0)
-        self.assertEqual(self._logs("patrol_would_kick"), [])
+        self.assertEqual(result["would_kick"], 2)
+        self.assertEqual([l["target_email"] for l in self._logs("patrol_would_kick")],
+                         ["d3@example.com", "d2@example.com"])
 
-    def test_kick_gate_rejects_an_abnormal_snapshot(self):
-        members = self._abnormal_team("team-oq-k3-gate")
+    def test_kick_gate_does_not_apply_the_outsider_guard_to_over_quota(self):
+        members = self._many_outsiders_team("team-oq-k3-gate")
 
         conn = self._conn()
         ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-oq-k3-gate", members[3])
         conn.close()
 
-        self.assertFalse(ok)
-        self.assertIn("abnormal number of detected outsiders", reason)
-        self.assertEqual(self._calls("remove_member"), [])
+        self.assertTrue(ok, reason)
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-d3")])
 
 
 if __name__ == "__main__":

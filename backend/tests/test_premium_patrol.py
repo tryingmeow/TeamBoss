@@ -501,11 +501,12 @@ class PremiumOutsiderKickTest(_Base):
                                          rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
         conn.close()
         self.assertFalse(ok)
-        self.assertIn("Premium record", reason)
+        self.assertIn("seat or invite record", reason)
         self.assertEqual(self._calls("remove_member"), [])
 
-    def test_policy_refused_premium_invite_is_not_a_teamboss_record(self):
-        # 被超员策略拒绝的 Premium 邀请上游什么都没发生：不算 TeamBoss 开过 Premium。
+    def test_policy_refused_premium_invite_still_blocks_the_kick(self):
+        # 被超员策略拒绝的 Premium 邀请上游什么都没发生，但管理员动过这个人：任何改席位 / 邀请记录
+        # （任何结果）都挡 Premium 踢人，交给席位提醒。
         self._armed_team("team-ref", [
             OWNER, _member("keeper@example.com", "u-k", source="system"),
             _member("refused@example.com", "u-r", seat_type="prolite"),
@@ -526,11 +527,14 @@ class PremiumOutsiderKickTest(_Base):
 
         self._patrol(dry_run=False)
 
-        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-r")])
+        self.assertEqual(self._calls("remove_member"), [])
+        logged = self._logs("patrol_premium_alert")
+        self.assertEqual([l["target_email"] for l in logged], ["refused@example.com"])
+        self.assertIn("kind=premium_detected_with_record", logged[0]["detail"])
 
-    def test_seat_change_after_the_snapshot_defers_the_kick(self):
+    def test_seat_change_after_the_snapshot_blocks_the_kick(self):
         # 场景 B：管理员把 detected 的 Premium 成员切回 ChatGPT，切换后的刷新失败，快照还写着
-        # prolite。最新记录是 default（不算 Premium 记录），但它比快照新：这一轮不踢。
+        # prolite。TeamBoss 有他的改席位记录：不踢，交给席位提醒。
         snapshot_at = "2026-09-01T00:00:00+00:00"
         member = _member("downgraded@example.com", "u-down", seat_type="prolite")
         members = [OWNER, _member("keeper@example.com", "u-k", source="system"), member]
@@ -551,15 +555,12 @@ class PremiumOutsiderKickTest(_Base):
 
         self.assertEqual(self._calls("remove_member"), [])
         self.assertEqual(result["kicked"], 0)
-        deferred = [l for l in self._logs("patrol_kick") if l["result"] == "skipped"]
-        self.assertEqual(len(deferred), 1)
-        self.assertIn("deferred", deferred[0]["detail"])
-        self.assertIn("reason=premium_outsider", deferred[0]["detail"])
-        kick_events = [e for e in result["events"] if e.get("action") == "kick"]
-        self.assertEqual(kick_events[0]["result"], "deferred")
-        # 推迟不是失败：不推"处理失败"，也不进席位提醒（下一轮按新快照判断）。
+        # 候选筛选就挡住了：没有走到踢人入口，不推"处理失败"。
+        self.assertEqual(self._logs("patrol_kick"), [])
         self.assertFalse(any("处理失败" in t for t in self.notify_calls))
-        self.assertEqual(self._alerts(), [])
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("改过他的席位或邀请过他", alerts[0])
 
         # 下一轮刷新成功，快照里他已经是 ChatGPT：不再是 Premium 候选。
         refreshed = [OWNER, _member("keeper@example.com", "u-k", source="system"),
@@ -623,7 +624,7 @@ class PremiumOutsiderKickTest(_Base):
                                          rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
         conn.close()
         self.assertFalse(ok)
-        self.assertIn("Premium record", reason)
+        self.assertIn("seat or invite record", reason)
 
         self._patrol(dry_run=False)
         self.assertEqual(self._calls("remove_member"), [])
