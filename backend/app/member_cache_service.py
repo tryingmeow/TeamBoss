@@ -21,7 +21,6 @@ from fastapi import HTTPException, status
 from .database import get_db
 from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call
-from .seat_types import normalize_seat_type
 from .services.seat_capacity import update_member_seat_usage_cache
 
 logger = logging.getLogger(__name__)
@@ -263,7 +262,7 @@ def _build_members_list(members_data: dict, pending_data: dict, expiry_map: dict
             "email": email,
             "name": m.get("name"),
             "role": m.get("role", "standard-user"),
-            "seat_type": normalize_seat_type(m.get("seat_type")),
+            "seat_type": m.get("seat_type", "default"),
             "is_owner": m.get("role") == "account-owner",
             "expires_at": expiry_info["expires_at"] if expiry_info else None,
             "first_seen_at": expiry_info.get("first_seen_at") if expiry_info else None,
@@ -282,7 +281,7 @@ def _build_members_list(members_data: dict, pending_data: dict, expiry_map: dict
             "email": email,
             "name": None,
             "role": inv.get("role", "standard-user"),
-            "seat_type": normalize_seat_type(inv.get("seat_type")),
+            "seat_type": inv.get("seat_type", "default"),
             "is_owner": False,
             "expires_at": expiry_info["expires_at"] if expiry_info else None,
             "first_seen_at": expiry_info.get("first_seen_at") if expiry_info else None,
