@@ -29,7 +29,8 @@ class FakeTeamClient:
 
     * 读：``get_subscription`` / ``get_seat_type_counts`` / ``get_pending_invites``。
       ``fail_reads=True`` 时订阅接口回 ``{"error": ...}``（= 读失败）。
-    * 写：``invite_member`` / ``change_seat_type`` 只记录到 ``mutations`` 并回成功。
+    * 写：``invite_member`` / ``change_seat_type`` 只记录到 ``mutations`` 并回成功
+      （``invite_result`` 给了就回它，例如上游明确拒绝）。
       其他写接口一律记录并抛错，让误调用的用例当场失败。
     """
 
@@ -41,12 +42,14 @@ class FakeTeamClient:
         seat_capacity=None,
         pending=(),
         fail_reads=False,
+        invite_result=None,
     ):
         self.seats_entitled = seats_entitled
         self.counts = dict(counts if counts is not None else {"default": 0, "usage_based": 0})
         self.seat_capacity = seat_capacity
         self.pending = list(pending)
         self.fail_reads = fail_reads
+        self.invite_result = invite_result
         self.reads: list[str] = []
         self.mutations: list[tuple] = []
 
@@ -74,6 +77,8 @@ class FakeTeamClient:
     # ---- 写 ----
     def invite_member(self, email, seat_type="default"):
         self.mutations.append(("invite_member", email, seat_type))
+        if self.invite_result is not None:
+            return dict(self.invite_result)
         return {
             "account_invites": [{"email_address": email}],
             "errored_emails": [],

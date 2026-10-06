@@ -46,7 +46,7 @@ class _BatchHarness(TempDbMixin, unittest.TestCase):
             seats_entitled=seats, counts={"default": live, "usage_based": 0}
         )
 
-    def submit(self, emails, *, allow_overage=False):
+    def submit(self, emails, *, allow_overage=False, overage_team_ids=None):
         for team_id in self.clients:
             for email in emails:
                 self.track_reservation(team_id, email)
@@ -64,7 +64,10 @@ class _BatchHarness(TempDbMixin, unittest.TestCase):
             return asyncio.run(
                 gpt_members.invite_gpt_members(
                     gpt_members.InviteGptMembersRequest(
-                        emails=emails, expires_in="30d", allow_overage=allow_overage
+                        emails=emails,
+                        expires_in="30d",
+                        allow_overage=allow_overage,
+                        **({} if overage_team_ids is None else {"overage_team_ids": overage_team_ids}),
                     )
                 )
             ), None
@@ -143,14 +146,87 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertIn("「t-confirm-old-name」2 个", detail["message"])
         self.assertEqual(self.all_mutations(), {})
 
+    def _confirm_plan(self, emails):
+        """先拿 409 的计划，再带 allow_overage + 计划里的 team_id 重发（前端确认后的做法）。"""
+        _result, exc = self.submit(emails)
+        self.assertEqual(exc.status_code, 409)
+        return [item["team_id"] for item in exc.detail["overage_plan"]]
+
     def test_after_confirmation_overfills_the_planned_team_only(self):
-        result, exc = self.submit(["a@example.com", "b@example.com"], allow_overage=True)
+        emails = ["a@example.com", "b@example.com"]
+        planned = self._confirm_plan(emails)
+
+        result, exc = self.submit(emails, allow_overage=True, overage_team_ids=planned)
 
         self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(planned, ["t-confirm-old"])
         self.assertEqual(self.invited("t-confirm-old"), ["a@example.com", "b@example.com"])
         self.assertEqual(self.invited("t-confirm-new"), [])
         self.assertEqual(self.invited("t-forbid"), [])
         self.assertEqual(result["no_place_emails"], [])
+
+    def test_confirmation_without_team_ids_charges_nobody(self):
+        for ids in (None, []):
+            with self.subTest(overage_team_ids=ids):
+                _result, exc = self.submit(["a@example.com"], allow_overage=True, overage_team_ids=ids)
+
+                self.assertEqual(exc.status_code, 409)
+                self.assertEqual(exc.detail["overage_plan"][0]["team_id"], "t-confirm-old")
+                self.assertIn("你确认过的超员计划已经不成立", exc.detail["message"])
+                self.assertEqual(self.all_mutations(), {})
+
+    def test_planned_team_turned_forbid_asks_again_and_charges_no_other_team(self):
+        emails = ["a@example.com", "b@example.com"]
+        planned = self._confirm_plan(emails)
+        self.set_policy("t-confirm-old", "forbid")
+
+        _result, exc = self.submit(emails, allow_overage=True, overage_team_ids=planned)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(
+            exc.detail["overage_plan"],
+            [{"team_id": "t-confirm-new", "team_name": "t-confirm-new-name", "extra_seats": 2}],
+        )
+        self.assertEqual(exc.detail["remaining_emails"], emails)
+        self.assertEqual(self.all_mutations(), {}, "不能把加购挪到管理员没看到的 Team 上")
+
+    def test_planned_team_turned_forbid_mid_request_asks_again_with_remaining(self):
+        emails = ["a@example.com", "b@example.com"]
+        planned = self._confirm_plan(emails)
+        original = gpt_invites.load_team_policy
+        calls = {"n": 0}
+
+        async def _flip_after_first(team_id):
+            calls["n"] += 1
+            if calls["n"] == 2:  # 第一个邮箱超员成功之后，管理员把它改成了禁止超员
+                self.set_policy("t-confirm-old", "forbid")
+            return await original(team_id)
+
+        with patch.object(gpt_invites, "load_team_policy", new=_flip_after_first):
+            _result, exc = self.submit(emails, allow_overage=True, overage_team_ids=planned)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual([item["email"] for item in exc.detail["added"]], ["a@example.com"])
+        self.assertEqual(exc.detail["remaining_emails"], ["b@example.com"])
+        self.assertEqual(exc.detail["overage_plan"][0]["team_id"], "t-confirm-new")
+        self.assertEqual(exc.detail["overage_plan"][0]["extra_seats"], 1)
+        self.assertEqual(self.invited("t-confirm-old"), ["a@example.com"])
+        self.assertEqual(self.invited("t-confirm-new"), [])
+
+    def test_upstream_rejection_on_planned_team_does_not_overfill_an_unlisted_team(self):
+        planned = self._confirm_plan(["a@example.com"])
+        self.clients["t-confirm-old"].invite_result = {
+            "error": "invalid email", "_mutation_status": "rejected",
+        }
+
+        result, exc = self.submit(["a@example.com"], allow_overage=True, overage_team_ids=planned)
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(self.invited("t-confirm-old"), ["a@example.com"])
+        self.assertEqual(self.invited("t-confirm-new"), [], "被拒后不能换到没列出的 confirm Team")
+        self.assertEqual(self.invited("t-forbid"), [])
+        self.assertEqual(result["added"], [])
+        self.assertEqual(result["failed"], [{"email": "a@example.com", "error": "invalid email"}])
 
     def test_cache_said_free_but_live_is_full_asks_with_remaining(self):
         # 缓存说 t-stale 有 1 个空位（不问），现拉发现满了：问一次，计划加在 confirm Team 上。

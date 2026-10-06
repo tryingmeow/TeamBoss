@@ -342,7 +342,12 @@ class GptBatchInviteStaysInTeamTest(_TempDbAsync, unittest.IsolatedAsyncioTestCa
         ):
             try:
                 result = await gpt_invites.invite_gpt_member_any_team(
-                    EMAIL, None, allow_overage=allow_overage, action="invite_gpt_member"
+                    EMAIL,
+                    None,
+                    allow_overage=allow_overage,
+                    # 超员确认绑定在计划上：确认时两个 Team 都列在管理员看到的计划里。
+                    overage_team_ids=[TEAM_A, TEAM_B] if allow_overage else [],
+                    action="invite_gpt_member",
                 )
                 return result, None, clients, fetched
             except (gpt_invites.GptInviteFailed, gpt_invites.NoGptSeatAvailable) as exc:
