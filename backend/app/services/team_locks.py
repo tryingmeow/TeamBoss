@@ -10,7 +10,8 @@ from ..database import get_db
 
 _locks: dict[str, asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
-_reservations: dict[tuple[str, str], float] = {}
+# (team_id, email) -> (到期 monotonic 时间, 席位类型)。一个邮箱在一个 Team 里同时只占一个预留。
+_reservations: dict[tuple[str, str], tuple[float, str]] = {}
 _reservations_guard = asyncio.Lock()
 DEFAULT_RESERVATION_TTL_SECONDS = 900
 MEMBER_OPERATION_TTL_SECONDS = 600
@@ -35,9 +36,26 @@ def _reservation_key(team_id: str, email: str) -> tuple[str, str]:
 
 
 def _drop_expired_reservations(now: float) -> None:
-    expired = [key for key, expires_at in _reservations.items() if expires_at <= now]
+    expired = [key for key, (expires_at, _seat) in _reservations.items() if expires_at <= now]
     for key in expired:
         _reservations.pop(key, None)
+
+
+async def reserve_seat(
+    team_id: str,
+    email: str,
+    seat_type: str = "default",
+    ttl_seconds: int = DEFAULT_RESERVATION_TTL_SECONDS,
+) -> None:
+    """Temporarily reserve one seat of ``seat_type`` while ChatGPT member caches catch up."""
+    key = _reservation_key(team_id, email)
+    if not key[0] or not key[1]:
+        return
+    seat = str(seat_type or "default").strip() or "default"
+    async with _reservations_guard:
+        now = monotonic()
+        _drop_expired_reservations(now)
+        _reservations[key] = (now + max(1, ttl_seconds), seat)
 
 
 async def reserve_default_seat(
@@ -46,13 +64,7 @@ async def reserve_default_seat(
     ttl_seconds: int = DEFAULT_RESERVATION_TTL_SECONDS,
 ) -> None:
     """Temporarily reserve one default seat while ChatGPT member caches catch up."""
-    key = _reservation_key(team_id, email)
-    if not key[0] or not key[1]:
-        return
-    async with _reservations_guard:
-        now = monotonic()
-        _drop_expired_reservations(now)
-        _reservations[key] = now + max(1, ttl_seconds)
+    await reserve_seat(team_id, email, "default", ttl_seconds)
 
 
 async def release_default_seat_reservation(team_id: str, email: str) -> None:
@@ -62,16 +74,27 @@ async def release_default_seat_reservation(team_id: str, email: str) -> None:
         _reservations.pop(key, None)
 
 
-async def reserved_default_seats(team_id: str, *, exclude_email: str = "") -> int:
+async def reserved_seats(
+    team_id: str,
+    seat_type: str = "default",
+    *,
+    exclude_email: str = "",
+) -> int:
+    """Live in-memory reservations of ``seat_type`` on ``team_id`` (excluding one email)."""
     key_team = str(team_id or "").strip()
     excluded = str(exclude_email or "").strip().lower()
+    wanted = str(seat_type or "default").strip() or "default"
     async with _reservations_guard:
         _drop_expired_reservations(monotonic())
         return sum(
             1
-            for reserved_team, reserved_email in _reservations
-            if reserved_team == key_team and reserved_email != excluded
+            for (reserved_team, reserved_email), (_expires, seat) in _reservations.items()
+            if reserved_team == key_team and reserved_email != excluded and seat == wanted
         )
+
+
+async def reserved_default_seats(team_id: str, *, exclude_email: str = "") -> int:
+    return await reserved_seats(team_id, "default", exclude_email=exclude_email)
 
 
 def _member_operation_key(team_id: str, email: str = "", user_id: str = "") -> str:

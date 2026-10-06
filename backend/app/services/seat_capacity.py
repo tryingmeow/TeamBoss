@@ -6,6 +6,7 @@ from typing import Any
 
 from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db
+from ..seat_types import DEFAULT_SEAT_TYPE, is_billed_seat_type, normalize_seat_type
 from ..utils.durations import utc_now
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,138 @@ def subscription_column_updates(subscription: dict[str, Any], *, team_id: Any) -
     if "will_renew" in subscription:
         will_renew_raw = subscription.get("will_renew")
         updates["will_renew"] = None if will_renew_raw is None else (1 if will_renew_raw else 0)
+
+    # 分类型席位容量。缺字段不写（保留上一次的值）；字段在但结构不对写 NULL（= 未知，
+    # 读的一方按「没有可信的分类型容量」处理：default 回落旧公式，其他计费类型空位 = 0）。
+    if "seat_capacity" in subscription:
+        entries = parse_seat_capacity(subscription)
+        updates["seat_capacity_json"] = (
+            json.dumps(entries, sort_keys=True) if entries is not None else None
+        )
     return updates
+
+
+def _non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def parse_seat_capacity(subscription: Any) -> dict[str, dict[str, int]] | None:
+    """``subscription.seat_capacity`` → ``{type: {"paid": int, "available": int}}``。
+
+    字段缺失或不是列表 → None（整体未知）。单个条目结构不对（type 不是非空字符串、
+    paid / available 不是非负整数）就丢掉那一条，那个类型按未知处理。
+    同一类型出现多次时取 available 更小的那条（宁可少卖）。
+    """
+    if not isinstance(subscription, dict):
+        return None
+    raw = subscription.get("seat_capacity")
+    if not isinstance(raw, list):
+        return None
+    entries: dict[str, dict[str, int]] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        seat_type = item.get("type")
+        if not isinstance(seat_type, str) or not seat_type.strip():
+            continue
+        paid = _non_negative_int(item.get("paid"))
+        available = _non_negative_int(item.get("available"))
+        if paid is None or available is None:
+            continue
+        key = seat_type.strip()
+        previous = entries.get(key)
+        if previous is None or available < previous["available"]:
+            entries[key] = {"paid": paid, "available": available}
+    return entries
+
+
+def cached_seat_capacity(raw: Any) -> dict[str, dict[str, int]] | None:
+    """读 ``teams.seat_capacity_json``：结构不对一律 None（未知）。"""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entries: dict[str, dict[str, int]] = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        paid = _non_negative_int(value.get("paid"))
+        available = _non_negative_int(value.get("available"))
+        if paid is None or available is None:
+            continue
+        entries[key] = {"paid": paid, "available": available}
+    return entries
+
+
+def seat_counts_column_updates(seat_counts: Any) -> dict[str, Any]:
+    """一次成功的 ``get_seat_type_counts`` 响应 → ``teams.seat_type_counts_json``。
+
+    保留所有上游给出的类型（含未知类型，界面要显示「其他（<原值>）」），只收非负整数。
+    响应结构不对就不写这一列。
+    """
+    if not isinstance(seat_counts, dict) or chatgpt_api_error(seat_counts):
+        return {}
+    counts = seat_counts.get("seat_type_counts")
+    if not isinstance(counts, dict):
+        return {}
+    clean = {
+        str(key): value
+        for key, value in counts.items()
+        if isinstance(key, str) and _non_negative_int(value) is not None
+    }
+    return {"seat_type_counts_json": json.dumps(clean, sort_keys=True)}
+
+
+def cached_seat_type_counts(raw: Any) -> dict[str, int]:
+    """读 ``teams.seat_type_counts_json``：未知 / 结构不对返回空 dict。"""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in data.items()
+        if isinstance(key, str) and _non_negative_int(value) is not None
+    }
+
+
+def billed_free_seats(
+    seat_type: str,
+    *,
+    entries: dict[str, dict[str, int]] | None,
+    pending: Any = 0,
+    legacy_available: Any = None,
+) -> int:
+    """计费类型 T 的空位数（尚未扣进程内预留）。
+
+    * 分类型值 = ``seat_capacity[T].available − 待接受的 T 类邀请``。
+    * ``default``：分类型值和旧公式（``legacy_available`` = seats_entitled − 在用 default
+      − 待接受 default）都有时取**更小**的；只有一个时用那一个；都没有时 0。
+    * 其他计费类型（Premium）：没有可信的分类型值时 0。
+    * 非计费 / 未知类型：0（调用方本来就不该为它们问空位）。
+    """
+    seat_type = normalize_seat_type(seat_type)
+    if not is_billed_seat_type(seat_type):
+        return 0
+    per_type: int | None = None
+    entry = (entries or {}).get(seat_type)
+    if entry is not None:
+        per_type = max(0, safe_int(entry.get("available")) - max(0, safe_int(pending)))
+    legacy: int | None = None
+    if seat_type == DEFAULT_SEAT_TYPE and legacy_available is not None:
+        legacy = max(0, safe_int(legacy_available))
+    candidates = [value for value in (per_type, legacy) if value is not None]
+    return min(candidates) if candidates else 0
 
 
 @dataclass(frozen=True)
@@ -85,7 +217,12 @@ class ChatGPTSeatCapacity:
     codex_count: int
     active_chatgpt: int
     pending_default: int
+    # 最终的 ChatGPT 空位（未扣进程内预留）：旧公式与分类型值都有时取更小的。
     available: int
+    # 旧公式 seats_entitled − active_chatgpt − pending_default。
+    legacy_available: int = 0
+    # seat_capacity.default.available − pending_default；没有可信的分类型值时 None。
+    per_type_available: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,7 +239,10 @@ def chatgpt_seat_capacity(
     codex_count: Any,
     active_chatgpt: Any = None,
     pending_default: Any = 0,
+    seat_capacity: dict[str, dict[str, int]] | None = None,
 ) -> ChatGPTSeatCapacity:
+    """``seat_capacity`` 是 ``parse_seat_capacity`` / ``cached_seat_capacity`` 的结果；
+    给了且含 default 条目时，空位取旧公式与分类型值中更小的一个（见 billed_free_seats）。"""
     entitled = safe_int(seats_entitled)
     total_in_use = safe_int(seats_in_use)
     codex = safe_int(codex_count)
@@ -112,7 +252,17 @@ def chatgpt_seat_capacity(
         if active_chatgpt is None
         else max(0, safe_int(active_chatgpt))
     )
-    available = max(0, entitled - resolved_chatgpt - pending)
+    legacy_available = max(0, entitled - resolved_chatgpt - pending)
+    entry = (seat_capacity or {}).get(DEFAULT_SEAT_TYPE)
+    per_type_available = (
+        max(0, safe_int(entry.get("available")) - pending) if entry is not None else None
+    )
+    available = billed_free_seats(
+        DEFAULT_SEAT_TYPE,
+        entries=seat_capacity,
+        pending=pending,
+        legacy_available=legacy_available,
+    )
     return ChatGPTSeatCapacity(
         seats_entitled=entitled,
         seats_in_use_total=total_in_use,
@@ -120,6 +270,8 @@ def chatgpt_seat_capacity(
         active_chatgpt=resolved_chatgpt,
         pending_default=pending,
         available=available,
+        legacy_available=legacy_available,
+        per_type_available=per_type_available,
     )
 
 
@@ -191,13 +343,22 @@ async def update_member_seat_usage_cache(team_id: str, members: Any) -> MemberSe
     return usage
 
 
-def pending_default_count_from_api(pending_data: dict[str, Any]) -> int:
+def pending_count_from_api(pending_data: dict[str, Any], seat_type: str) -> int:
+    """待接受邀请里席位类型为 ``seat_type`` 的个数（缺失的 seat_type 按 default）。"""
     items = pending_data.get("items") if isinstance(pending_data, dict) else None
     if not isinstance(items, list):
         items = pending_data.get("invites") if isinstance(pending_data, dict) else None
     if not isinstance(items, list):
         return 0
-    return sum(1 for item in items if (item.get("seat_type") or "default") == "default")
+    wanted = normalize_seat_type(seat_type)
+    return sum(
+        1 for item in items
+        if isinstance(item, dict) and normalize_seat_type(item.get("seat_type")) == wanted
+    )
+
+
+def pending_default_count_from_api(pending_data: dict[str, Any]) -> int:
+    return pending_count_from_api(pending_data, DEFAULT_SEAT_TYPE)
 
 
 def chatgpt_api_error(result: dict[str, Any]) -> str | None:
@@ -242,8 +403,88 @@ async def fetch_live_chatgpt_seat_capacity(client: Any, pending_limit: int = 100
         codex_count=codex_count_from_seat_counts(seat_counts),
         active_chatgpt=chatgpt_count_from_seat_counts(seat_counts),
         pending_default=pending_default_count_from_api(pending),
+        seat_capacity=parse_seat_capacity(subscription),
     )
     return capacity, subscription, seat_counts, pending
+
+
+@dataclass(frozen=True)
+class SeatTypeCapacity:
+    """一个计费席位类型的现拉容量（未扣进程内预留）。"""
+    seat_type: str
+    available: int
+    paid: int | None
+    in_use: int | None
+    pending: int
+
+    def describe(self) -> str:
+        """给日志 / 409 文案用的一行摘要，不含邮箱。"""
+        return (
+            f"seat_type={self.seat_type}, paid={self.paid}, in_use={self.in_use}, "
+            f"pending={self.pending}, available={self.available}"
+        )
+
+
+async def fetch_live_seat_type_capacity(
+    client: Any,
+    seat_type: str,
+    pending_limit: int = 100,
+) -> tuple[SeatTypeCapacity, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """现拉计费类型 ``seat_type`` 的空位。任何一个读接口失败都抛 SeatCapacityFetchError，
+    调用方按「没有空位」处理（失败关闭）。
+
+    ``default`` 走 ``fetch_live_chatgpt_seat_capacity``（含 seats_entitled 校验和取小规则）；
+    其他计费类型只认 ``seat_capacity[T]``，缺失 = 0 空位。非计费 / 未知类型是调用方的
+    编程错误，抛 ValueError。
+    """
+    seat_type = normalize_seat_type(seat_type)
+    if not is_billed_seat_type(seat_type):
+        raise ValueError(f"not a billed seat type: {seat_type!r}")
+    if seat_type == DEFAULT_SEAT_TYPE:
+        capacity, subscription, seat_counts, pending = await fetch_live_chatgpt_seat_capacity(
+            client, pending_limit
+        )
+        entry = (parse_seat_capacity(subscription) or {}).get(DEFAULT_SEAT_TYPE)
+        return (
+            SeatTypeCapacity(
+                seat_type=seat_type,
+                available=capacity.available,
+                paid=entry["paid"] if entry else capacity.seats_entitled,
+                in_use=capacity.active_chatgpt,
+                pending=capacity.pending_default,
+            ),
+            subscription,
+            seat_counts,
+            pending,
+        )
+
+    subscription, seat_counts, pending = await asyncio.gather(
+        run_chatgpt_call(client.get_subscription),
+        run_chatgpt_call(client.get_seat_type_counts),
+        run_chatgpt_call(client.get_pending_invites, 0, pending_limit),
+    )
+    for result in (subscription, seat_counts, pending):
+        error = chatgpt_api_error(result)
+        if error:
+            raise SeatCapacityFetchError(error)
+    if not isinstance(subscription, dict):
+        raise SeatCapacityFetchError("subscription response is not an object")
+
+    entries = parse_seat_capacity(subscription)
+    entry = (entries or {}).get(seat_type)
+    pending_count = pending_count_from_api(pending, seat_type)
+    return (
+        SeatTypeCapacity(
+            seat_type=seat_type,
+            available=billed_free_seats(seat_type, entries=entries, pending=pending_count),
+            paid=entry["paid"] if entry else None,
+            in_use=seat_type_count_from_seat_counts(seat_counts, seat_type),
+            pending=pending_count,
+        ),
+        subscription,
+        seat_counts,
+        pending,
+    )
 
 
 async def update_capacity_cache(
@@ -296,6 +537,7 @@ async def update_capacity_cache(
         # seats_entitled only when it is a positive integer). seats_in_use is
         # resolved above with member-cache fallbacks, so it overrides the raw one.
         updates: dict[str, Any] = subscription_column_updates(subscription, team_id=team_id)
+        updates.update(seat_counts_column_updates(seat_counts))
         updates.update({
             "seats_in_use": seats_in_use,
             "codex_count": codex_count,

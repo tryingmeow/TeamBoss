@@ -610,6 +610,33 @@ async def init_database():
                  )""",
         )
 
+        # 分类型席位缓存（JSON）：subscription.seat_capacity 解析后的
+        # {type: {paid, available}}，以及 seat_type_counts 的原样计数（含未知类型）。
+        # 写入规则见 services/seat_capacity.subscription_column_updates / seat_counts_column_updates。
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN seat_capacity_json TEXT")
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN seat_type_counts_json TEXT")
+        # 兑换码的席位类型（default = ChatGPT，prolite = Premium）。历史码都是 ChatGPT 码。
+        await _migrate(
+            db, "ALTER TABLE access_tokens ADD COLUMN seat_type TEXT NOT NULL DEFAULT 'default'"
+        )
+
+        # 每个 Team 的超员策略（forbid / confirm / auto）。全局开关 skip_overage_confirmation
+        # 折进来：只在这一列第一次加上时迁移一次——全局开着的库全部 Team 设成 auto，
+        # 否则保持默认 confirm。之后新加的 Team 用列默认值 confirm，全局开关不再生效。
+        team_columns = {
+            row[1] for row in await (await db.execute("PRAGMA table_info(teams)")).fetchall()
+        }
+        if "overage_policy" not in team_columns:
+            await db.execute(
+                "ALTER TABLE teams ADD COLUMN overage_policy TEXT NOT NULL DEFAULT 'confirm'"
+            )
+            cursor = await db.execute(
+                "SELECT value FROM settings WHERE key = 'skip_overage_confirmation'"
+            )
+            skip_row = await cursor.fetchone()
+            if skip_row is not None and str(skip_row[0]).strip().lower() == "true":
+                await db.execute("UPDATE teams SET overage_policy = 'auto'")
+
         # 历史库先用旧等式回填，保证升级后 API 合同立即可用；下一轮官方
         # seat_type_counts 同步会用 default 字段覆盖为权威值。
         await db.execute(

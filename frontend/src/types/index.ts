@@ -9,7 +9,7 @@ export interface Team {
   codex_count: number;
   chatgpt_count: number;
   is_codex_enabled: boolean;
-  default_seat_type: SeatType | null;
+  default_seat_type: WorkspaceDefaultSeatType | null;
   billing_currency: string;
   billing_symbol: string | null;
   billing_period: string | null;
@@ -43,12 +43,30 @@ export interface Team {
   /** 定时同步被挂起的时刻。非空 = 已停止每轮请求，只按低频探活。 */
   sync_suspended_at: string | null;
   cached_member_emails: string[];
+  /** 超员策略：满了时邀请 / 切到计费席位怎么办。 */
+  overage_policy: OveragePolicy;
+  /** 缓存的分类型容量 {type: {paid, available}}；null = 未知。 */
+  seat_capacity: Record<string, SeatCapacityEntry> | null;
+  /** 缓存的 seat_type_counts 原样计数（含未知类型）；{} = 未知。 */
+  seat_type_counts: Record<string, number>;
 }
 
-export type SeatType = 'default' | 'usage_based';
+/** 注册表里的席位类型（正本：lib/seatType.ts 与后端 app/seat_types.py）。 */
+export type SeatType = 'default' | 'usage_based' | 'prolite';
+/** 工作区「默认邀请席位」只允许这两种。 */
+export type WorkspaceDefaultSeatType = 'default' | 'usage_based';
+/** 兑换码可选的席位类型。 */
+export type CodeSeatType = 'default' | 'prolite';
+
+export type OveragePolicy = 'forbid' | 'confirm' | 'auto';
+
+export interface SeatCapacityEntry {
+  paid: number;
+  available: number;
+}
 
 export interface TeamWorkspaceSettings {
-  default_seat_type: SeatType;
+  default_seat_type: WorkspaceDefaultSeatType;
   settings?: unknown;
   cached?: boolean;
   cached_at?: string | null;
@@ -104,7 +122,8 @@ export interface Settings {
   api_concurrency: number;
   expiry_kick_mode: 'delay_hours' | 'day_end';
   expiry_kick_delay_hours: number;
-  skip_overage_confirmation: boolean;
+  /** 已退役：由每个 Team 的 overage_policy 取代，界面不再读写。 */
+  skip_overage_confirmation?: boolean;
 }
 
 export type ToastType = 'success' | 'error';

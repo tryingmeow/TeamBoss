@@ -1,5 +1,11 @@
 from pydantic import BaseModel, Field
-from typing import Literal, Optional, List
+from typing import Dict, Literal, Optional, List
+
+from .seat_types import (
+    OveragePolicyLiteral,
+    SeatTypeLiteral,
+    WorkspaceDefaultSeatTypeLiteral,
+)
 
 
 class TeamSession(BaseModel):
@@ -21,7 +27,7 @@ class TeamResponse(BaseModel):
     codex_count: int
     chatgpt_count: int
     is_codex_enabled: bool = False
-    default_seat_type: Optional[Literal['default', 'usage_based']] = None
+    default_seat_type: Optional[WorkspaceDefaultSeatTypeLiteral] = None
     billing_currency: str
     billing_symbol: Optional[str] = None
     billing_period: Optional[str] = None
@@ -54,6 +60,12 @@ class TeamResponse(BaseModel):
     sync_failing_since: Optional[str] = None
     sync_suspended_at: Optional[str] = None
     cached_member_emails: List[str] = []
+    # 超员策略：forbid（禁止超员）/ confirm（超员需确认）/ auto（超员自动）。
+    overage_policy: OveragePolicyLiteral = "confirm"
+    # 缓存的分类型容量 {type: {paid, available}}；None = 未知（上游没给或结构不对）。
+    seat_capacity: Optional[Dict[str, Dict[str, int]]] = None
+    # 缓存的 seat_type_counts 原样计数（含未知类型）；{} = 未知。
+    seat_type_counts: Dict[str, int] = {}
 
 
 class ProxyCreate(BaseModel):
@@ -104,17 +116,24 @@ class PendingInvite(BaseModel):
 
 class InviteMemberRequest(BaseModel):
     email: str
-    seat_type: str = "default"
+    seat_type: SeatTypeLiteral = "default"
     expires_in: Optional[str] = None
+    # 确认标记：超员策略为 confirm 的 Team 满了时，带 true 才会超员加购。
     allow_overage: bool = False
 
 
 class ChangeSeatRequest(BaseModel):
-    seat_type: str
+    seat_type: SeatTypeLiteral
+    # 同上：切到计费类型而该类型没有空位时，confirm 策略需要带 true。
+    allow_overage: bool = False
 
 
 class DefaultSeatTypeRequest(BaseModel):
-    seat_type: Literal["default", "usage_based"]
+    seat_type: WorkspaceDefaultSeatTypeLiteral
+
+
+class OveragePolicyRequest(BaseModel):
+    overage_policy: OveragePolicyLiteral
 
 
 class SetExpiryRequest(BaseModel):
