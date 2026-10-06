@@ -31,9 +31,22 @@ from ..services.open_redemptions import (
     INTERRUPTED_INVITE_AFTER_SECONDS as _INTERRUPTED_INVITE_AFTER_SECONDS,
     STALE_LOCAL_REDEMPTION_AFTER_SECONDS as _STALE_LOCAL_REDEMPTION_AFTER_SECONDS,
 )
+from ..seat_types import (
+    CODE_SEAT_TYPES,
+    CODEX_SEAT_TYPE,
+    DEFAULT_SEAT_TYPE,
+    PREMIUM_SEAT_TYPE,
+    CodeSeatTypeLiteral,
+    is_known_seat_type,
+    normalize_seat_type,
+    seat_type_label,
+)
 from ..services.seat_capacity import (
     SeatCapacityFetchError,
+    billed_free_seats,
+    cached_seat_capacity,
     fetch_live_chatgpt_seat_capacity,
+    fetch_live_seat_type_capacity,
     update_capacity_cache,
 )
 from ..services.team_clients import (
@@ -44,10 +57,13 @@ from ..services.team_clients import (
 from ..services.team_locks import (
     member_operation_claim,
     reserve_default_seat,
+    reserve_seat,
     reserved_default_seats,
+    reserved_seats,
     team_invite_lock,
 )
-from ..services.tg_notify import notify_member_event
+from ..services.tg_notify import mask_email_for_notice, notify_admins, notify_member_event
+from ..tg_format import detail_card
 from ..utils.durations import (
     DurationError,
     expiry_from_duration,
@@ -185,6 +201,79 @@ class _LocalRefusal(HTTPException):
     ``redeem_access_token`` 据此把这次尝试的预算（单码 + 全站）全部退回，见
     ``_RedeemLookupBudget.refund_untouched``。
     """
+
+
+# ---- 兑换码的席位类型 ------------------------------------------------------------
+# ChatGPT 码（default）照旧；Premium 码（prolite）只进「有已付 Premium 空位」的 Team，
+# 不看超员策略、绝不超员（没有空位时邀请会让 ChatGPT 自动加购并扣费）。
+# 续期要求码的类型和成员当前的席位类型对得上，见 _renewal_seat_type_block。
+
+_NO_PREMIUM_SEAT_DETAIL = "暂时没有可用的 Premium 席位，兑换码未使用。请稍后再试或联系管理员。"
+_INVALID_CODE_SEAT_TYPE_DETAIL = "这张兑换码的席位类型无效，暂不能兑换。兑换码未使用，请联系管理员。"
+_UNKNOWN_MEMBER_SEAT_TYPE_DETAIL = "你当前的席位类型不能用兑换码续期。兑换码未使用，如需处理请联系管理员。"
+# 告诉管理员 Premium 码没位置时，最多列出这么多个 Team 的原因。
+_NOTICE_MAX_TEAMS = 8
+
+
+def _renewal_seat_type_block(code_seat_type: str, member_seat_type: Any) -> Optional[str]:
+    """码能不能给当前席位类型的成员续期：能 → None；不能 → 原因码。
+
+    * Premium 码只续 Premium（prolite）成员；
+    * ChatGPT 码续 ChatGPT（default）和 Codex（usage_based）成员（与以前一样），不续 Premium；
+    * 成员的席位类型缺失按 ChatGPT；不在注册表里的类型一律不续（``unknown_member_seat_type``）。
+    """
+    member = normalize_seat_type(member_seat_type)
+    if not is_known_seat_type(member):
+        return "unknown_member_seat_type"
+    if normalize_seat_type(code_seat_type) == PREMIUM_SEAT_TYPE:
+        allowed: tuple[str, ...] = (PREMIUM_SEAT_TYPE,)
+    else:
+        allowed = (DEFAULT_SEAT_TYPE, CODEX_SEAT_TYPE)
+    return None if member in allowed else "seat_type_mismatch"
+
+
+def _seat_type_mismatch_detail(code_seat_type: str, member_seat_type: Any, reason: str) -> str:
+    if reason == "unknown_member_seat_type":
+        return _UNKNOWN_MEMBER_SEAT_TYPE_DETAIL
+    return (
+        f"兑换码是 {seat_type_label(code_seat_type)} 码，你当前是 "
+        f"{seat_type_label(member_seat_type)} 席位，不能用它续期。兑换码未使用。"
+    )
+
+
+class _SeatTypeMismatch(Exception):
+    """续期时码的席位类型和成员当前的席位类型对不上。在任何本地写入之前抛出，码不消耗。"""
+
+    def __init__(
+        self,
+        *,
+        team_id: str,
+        user_id: str,
+        code_seat_type: str,
+        member_seat_type: Any,
+        reason: str,
+    ) -> None:
+        super().__init__(reason)
+        self.team_id = team_id
+        self.user_id = user_id
+        self.code_seat_type = normalize_seat_type(code_seat_type)
+        self.member_seat_type = normalize_seat_type(member_seat_type)
+        self.reason = reason
+        self.detail = _seat_type_mismatch_detail(code_seat_type, member_seat_type, reason)
+
+
+class _NoPremiumSeat(HTTPException):
+    """Premium 码没有任何一个 Team 有空的已付 Premium 席位：拒绝，码不消耗。
+
+    ``checked``：[(Team 名, 给管理员看的原因)]；``reasons``：[(team_id, 机器可读原因)]。
+    """
+
+    def __init__(self, checked: list[tuple[str, str]], reasons: list[tuple[str, str]]) -> None:
+        super().__init__(status_code=status.HTTP_409_CONFLICT, detail=_NO_PREMIUM_SEAT_DETAIL)
+        self.checked = checked
+        self.reasons = reasons
+
+
 _PUBLIC_USE_ACTION_ALIASES = {"renew_owner_rejected": "renew_permanent_rejected"}
 _PUBLIC_USE_ERROR_ALIASES = {"owner_email": "permanent_membership"}
 
@@ -215,6 +304,8 @@ class GenerateAccessTokenRequest(BaseModel):
     token_ttl: str = Field("7d", description="token 自身有效期，如 1d/7d/never")
     max_uses: int = Field(1, ge=1, le=1, description="固定为 1：token 一经兑换即失效")
     note: Optional[str] = None
+    # default = ChatGPT 码，prolite = Premium 码（只进有已付 Premium 空位的 Team）。
+    seat_type: CodeSeatTypeLiteral = DEFAULT_SEAT_TYPE
 
 
 class AccessTokenResponse(BaseModel):
@@ -226,6 +317,7 @@ class AccessTokenResponse(BaseModel):
     max_uses: int
     used_count: int
     note: Optional[str]
+    seat_type: str
     created_at: str
 
 
@@ -237,6 +329,7 @@ class AccessTokenListItem(BaseModel):
     max_uses: int
     used_count: int
     note: Optional[str]
+    seat_type: str = DEFAULT_SEAT_TYPE
     disabled: bool
     created_at: str
     last_used_at: Optional[str]
@@ -763,6 +856,8 @@ async def _find_all_memberships(
                     "is_owner": bool(member.get("is_owner")),
                     "expires_at": member.get("expires_at"),
                     "source": member.get("source"),
+                    # 续期按它核对码的席位类型（见 _renewal_seat_type_block），缺失 = ChatGPT。
+                    "seat_type": normalize_seat_type(member.get("seat_type")),
                     "cache_updated_at": snapshot.get("updated_at"),
                 }
                 break
@@ -777,6 +872,8 @@ async def _find_all_memberships(
                         "is_owner": False,
                         "expires_at": invite.get("expires_at"),
                         "source": invite.get("source"),
+                        # 待接受邀请接受后就是这个席位类型，续期按它核对。
+                        "seat_type": normalize_seat_type(invite.get("seat_type")),
                         "cache_updated_at": snapshot.get("updated_at"),
                     }
                     break
@@ -1098,6 +1195,8 @@ async def _query_token(raw_token: str) -> dict[str, Any]:
                 "disabled": "已禁用",
             }.get(status_value, status_value),
             "grant_expires_in": token_row["grant_expires_in"],
+            "seat_type": normalize_seat_type(token_row.get("seat_type")),
+            "seat_type_label": seat_type_label(token_row.get("seat_type")),
             "token_expires_at": token_row.get("token_expires_at"),
             "max_uses": 1,
             "used_count": int(token_row.get("used_count") or 0),
@@ -1144,6 +1243,58 @@ async def _chatgpt_available(client: ChatGPTClient, team_id: str, *, email: str 
     return True, f"available={available_after_reservations}, active_chatgpt={capacity.active_chatgpt}"
 
 
+async def _cached_premium_free(team_ids: list[str]) -> dict[str, int]:
+    """缓存（teams.seat_capacity_json）里各 Team 的 Premium 空位，只用来预筛。
+
+    缓存没有可信的 Premium 条目 = 0（见 billed_free_seats）。预筛只会少问几个 Team，
+    真正放行要看锁内的实时复查（_premium_available）。
+    """
+    if not team_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in team_ids)
+    async with get_db() as db:
+        cursor = await db.execute(
+            f"SELECT id, seat_capacity_json FROM teams WHERE id IN ({placeholders})",
+            tuple(team_ids),
+        )
+        rows = await cursor.fetchall()
+    return {
+        row["id"]: billed_free_seats(
+            PREMIUM_SEAT_TYPE, entries=cached_seat_capacity(row["seat_capacity_json"])
+        )
+        for row in rows
+    }
+
+
+async def _premium_available(
+    client: ChatGPTClient, team_id: str, *, email: str = ""
+) -> tuple[bool, str, str]:
+    """锁内实时复查 Premium 空位：seat_capacity.prolite.available − 待接受的 Premium 邀请
+    − 进程内 Premium 预留。读不到 = 没有空位（失败关闭）。
+
+    返回 (有没有空位, 给日志的原因, 给管理员通知的原因)。超员策略在这里**不看**：
+    兑换永远不超员，哪怕 Team 设成「超员自动」。
+    """
+    try:
+        capacity, subscription, seat_counts, _pending = await fetch_live_seat_type_capacity(
+            client, PREMIUM_SEAT_TYPE
+        )
+    except SeatCapacityFetchError as exc:
+        return False, f"no_premium_seat: capacity_unknown: {exc}", "读不到席位容量，按已满处理"
+
+    await update_capacity_cache(team_id, subscription, seat_counts)
+    reserved = await reserved_seats(team_id, PREMIUM_SEAT_TYPE, exclude_email=email)
+    free = capacity.available - reserved
+    if free <= 0:
+        paid = "?" if capacity.paid is None else capacity.paid
+        return (
+            False,
+            f"no_premium_seat: {capacity.describe()}, reserved={reserved}",
+            f"已付 {paid}，待接受 {capacity.pending}，预留 {reserved}，没有空位",
+        )
+    return True, f"premium_available={free}, {capacity.describe()}", ""
+
+
 async def _invite_to_available_team(
     email: str,
     grant_duration: str,
@@ -1152,8 +1303,13 @@ async def _invite_to_available_team(
     token_use_id: int,
     on_invite_confirmed: Optional[Callable[[], None]] = None,
     on_invite_rejected: Optional[Callable[[], None]] = None,
+    seat_type: str = DEFAULT_SEAT_TYPE,
 ) -> dict[str, Any]:
-    """给 email 在第一个有空位的 Team 上发邀请。
+    """给 email 在第一个有 ``seat_type`` 空位的 Team 上发邀请。
+
+    ``seat_type``：码的席位类型。ChatGPT（default）照旧；Premium（prolite）先按缓存
+    预筛，再在 Team 锁内实时复查已付 Premium 空位。两种都不看超员策略、绝不超员；
+    Premium 一个 Team 都不合格时抛 ``_NoPremiumSeat``（码由调用方退回）。
 
     ``on_invite_confirmed``：在**向 OpenAI 发出这个不可幂等的写操作之前**同步调用
     一次，把这次兑换标记为已消耗。请求一旦发出就没有任何办法证明远端没有副作用，
@@ -1164,15 +1320,35 @@ async def _invite_to_available_team(
     把上面的标记撤回。那一次调用确实没有创建任何成员或邀请，码要还给用户，函数
     接着换下一个 Team 重试。
     """
+    seat_type = normalize_seat_type(seat_type)
+    if seat_type not in CODE_SEAT_TYPES:
+        raise ValueError(f"redemption cannot invite into seat type {seat_type!r}")
+    premium = seat_type == PREMIUM_SEAT_TYPE
     last_error: Optional[str] = None
+    # 仅 Premium：每个没放行的 Team 的原因，给拒绝通知和日志用。
+    premium_checked: list[tuple[str, str]] = []
+    premium_reasons: list[tuple[str, str]] = []
+    cached_premium_free = (
+        await _cached_premium_free([team["id"] for team in teams]) if premium else {}
+    )
 
     for team in teams:
+        if premium and cached_premium_free.get(team["id"], 0) <= 0:
+            premium_checked.append((team.get("name") or team["id"], "缓存显示没有空的 Premium 席位"))
+            premium_reasons.append((team["id"], "no_premium_seat: cached"))
+            continue
         async with team_invite_lock(team["id"]):
             _proxy_url_inv = await _get_proxy_url(team.get("proxy_id"))
             client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=_proxy_url_inv)
-            ok, reason = await _chatgpt_available(client, team["id"], email=email)
+            if premium:
+                ok, reason, notice_reason = await _premium_available(client, team["id"], email=email)
+            else:
+                ok, reason = await _chatgpt_available(client, team["id"], email=email)
             if not ok:
                 last_error = reason
+                if premium:
+                    premium_checked.append((team.get("name") or team["id"], notice_reason))
+                    premium_reasons.append((team["id"], reason))
                 continue
 
             # 进入不可幂等的远端写操作前先持久化目标 Team。进程即使在请求
@@ -1189,7 +1365,7 @@ async def _invite_to_available_team(
                 on_invite_confirmed()
 
             mutation_task = asyncio.create_task(
-                run_chatgpt_call(client.invite_member, email, "default")
+                run_chatgpt_call(client.invite_member, email, seat_type)
             )
             try:
                 result = await asyncio.shield(mutation_task)
@@ -1248,7 +1424,7 @@ async def _invite_to_available_team(
                         team["id"],
                         "self_service_invite",
                         email,
-                        "seat_type=default",
+                        f"seat_type={seat_type}",
                         "uncertain",
                         error,
                         "manual",
@@ -1259,6 +1435,16 @@ async def _invite_to_available_team(
                         team["id"],
                         email,
                     )
+                if premium:
+                    # 这个 Premium 邀请可能已经生效、只是名单里还看不见：先占住这个
+                    # 空位，免得下一次兑换按「还有空位」再发一个、触发自动加购。
+                    try:
+                        await reserve_seat(team["id"], email, PREMIUM_SEAT_TYPE)
+                    except Exception:
+                        logger.exception(
+                            "failed to reserve uncertain Premium invite seat team=%s",
+                            team["id"],
+                        )
                 return {
                     "status": "pending_confirmation",
                     "team": team,
@@ -1282,12 +1468,15 @@ async def _invite_to_available_team(
                 if on_invite_rejected is not None:
                     on_invite_rejected()
                 last_error = str(result.get("error") or "OpenAI rejected the invite")
+                if premium:
+                    premium_checked.append((team.get("name") or team["id"], "上游拒绝了邀请"))
+                    premium_reasons.append((team["id"], f"rejected: {last_error}"))
                 try:
                     await log_operation(
                         team["id"],
                         "self_service_invite",
                         email,
-                        "seat_type=default",
+                        f"seat_type={seat_type}",
                         "failed",
                         last_error,
                         "manual",
@@ -1320,7 +1509,7 @@ async def _invite_to_available_team(
                     team["id"],
                     "self_service_invite",
                     email,
-                    f"expires_at={expires_iso}",
+                    f"seat_type={seat_type}, expires_at={expires_iso}",
                     "success",
                     None,
                     "manual",
@@ -1356,7 +1545,10 @@ async def _invite_to_available_team(
                     )
             if not _snapshot_contains_email(snapshot, email):
                 try:
-                    await reserve_default_seat(team["id"], email)
+                    if premium:
+                        await reserve_seat(team["id"], email, PREMIUM_SEAT_TYPE)
+                    else:
+                        await reserve_default_seat(team["id"], email)
                 except Exception:
                     logger.exception(
                         "failed to reserve confirmed invite seat team=%s email=%s",
@@ -1370,7 +1562,11 @@ async def _invite_to_available_team(
                     team["id"],
                     email=email,
                     source="self_service",
-                    detail=f"expires_at={expires_iso}",
+                    detail=(
+                        f"{seat_type_label(seat_type)} 席位，expires_at={expires_iso}"
+                        if premium
+                        else f"expires_at={expires_iso}"
+                    ),
                 )
             except Exception:
                 logger.exception(
@@ -1386,6 +1582,10 @@ async def _invite_to_available_team(
                 "user_id": "",
                 "expires_at": expires_iso,
             }
+
+    if premium:
+        # 日志、退码和给管理员的通知由调用方在退码之后做（_report_no_premium_seat）。
+        raise _NoPremiumSeat(premium_checked, premium_reasons)
 
     # 这是匿名接口。上游 OpenAI 的原始报错可能夹带请求头（access token / session
     # cookie）、内部路径或库名，一律不回给调用方；详情只写进操作日志供管理员排查。
@@ -1591,7 +1791,10 @@ async def _get_latest_token_use_by_id(token_use_id: int) -> Optional[dict[str, A
 
 
 async def _build_team_choices(
-    email: str, memberships: list[dict[str, Any]]
+    email: str,
+    memberships: list[dict[str, Any]],
+    *,
+    code_seat_type: str = DEFAULT_SEAT_TYPE,
 ) -> list[dict[str, Any]]:
     """多 Team 选择提示里每个 Team 一项。
 
@@ -1602,6 +1805,9 @@ async def _build_team_choices(
 
     这是公开响应：Owner 那一项和「没有到期时间、不能续」的成员长得完全一样
     （is_owner 为兼容响应结构保留，恒为 False），见 _NOT_RENEWABLE_DETAIL。
+
+    席位类型和码对不上的队（见 _renewal_seat_type_block）同样不可续，
+    ``blocked_reason='seat_type_mismatch'``；服务端续期时还会在 claim 内按实时名单再核一次。
     """
     choices: list[dict[str, Any]] = []
     for hit in memberships:
@@ -1616,6 +1822,8 @@ async def _build_team_choices(
             blocked_reason = "permanent_membership"
         elif expiry_state == "permanent":
             blocked_reason = "permanent_membership"
+        elif _renewal_seat_type_block(code_seat_type, hit.get("seat_type")):
+            blocked_reason = "seat_type_mismatch"
         choices.append(
             {
                 "team_id": team["id"],
@@ -1638,8 +1846,12 @@ async def _renew_existing_membership(
     token_use_id: int,
     *,
     rescan_teams: Optional[list[dict[str, Any]]] = None,
+    code_seat_type: str = DEFAULT_SEAT_TYPE,
 ) -> Optional[dict[str, Any]]:
     """续期前与踢人任务互斥，并在拿锁后重新确认远端成员仍存在。
+
+    ``code_seat_type``：码的席位类型。拿锁后按刚拉到的实时名单核对成员当前的席位
+    类型，对不上抛 ``_SeatTypeMismatch``（此时什么都还没写，码由调用方退回）。
 
     ``rescan_teams``：只有"用户没有指定 Team"的路径需要传。第一次全量扫描发生在
     拿锁之前，这中间用户可能又进了第二个 Team；续期是花钱操作，落到哪个队不能替
@@ -1684,6 +1896,15 @@ async def _renew_existing_membership(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=_NOT_RENEWABLE_DETAIL,
             )
+        seat_block = _renewal_seat_type_block(code_seat_type, refreshed.get("seat_type"))
+        if seat_block:
+            raise _SeatTypeMismatch(
+                team_id=team["id"],
+                user_id=refreshed.get("user_id") or "",
+                code_seat_type=code_seat_type,
+                member_seat_type=refreshed.get("seat_type"),
+                reason=seat_block,
+            )
 
         action = "renewed_member" if refreshed["kind"] == "member" else "renewed_invite"
         await _set_token_use_phase(
@@ -1717,12 +1938,13 @@ async def generate_access_token(req: GenerateAccessTokenRequest):
     now = utc_now()
     token_expires_at = expiry_from_duration(token_ttl, base=now)
 
+    seat_type = req.seat_type
     async with get_db() as db:
         cursor = await db.execute(
             """INSERT INTO access_tokens
                (token_hash, token_prefix, grant_expires_in, token_expires_at,
-                max_uses, used_count, note, disabled, created_at)
-               VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?)""",
+                max_uses, used_count, note, disabled, created_at, seat_type)
+               VALUES (?, ?, ?, ?, ?, 0, ?, 0, ?, ?)""",
             (
                 _hash_token(token),
                 token[:12],
@@ -1731,10 +1953,26 @@ async def generate_access_token(req: GenerateAccessTokenRequest):
                 max_uses,
                 req.note,
                 now.isoformat(),
+                seat_type,
             ),
         )
         await db.commit()
         token_id = cursor.lastrowid
+
+    try:
+        await log_operation(
+            None,
+            "create_access_token",
+            None,
+            f"token_id={token_id}, grant_expires_in={grant_expires_in}, "
+            f"token_ttl={token_ttl}, seat_type={seat_type}",
+            "success",
+            None,
+            "manual",
+        )
+    except Exception:
+        # 码已经落库；审计日志写失败不能让管理员以为没生成、再生成一张。
+        logger.exception("failed to log access token creation token_id=%s", token_id)
 
     return {
         "id": token_id,
@@ -1745,6 +1983,7 @@ async def generate_access_token(req: GenerateAccessTokenRequest):
         "max_uses": max_uses,
         "used_count": 0,
         "note": req.note,
+        "seat_type": seat_type,
         "created_at": now.isoformat(),
     }
 
@@ -1754,7 +1993,8 @@ async def list_access_tokens():
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT id, token_prefix, grant_expires_in, token_expires_at,
-                      max_uses, used_count, note, disabled, created_at, last_used_at
+                      max_uses, used_count, note, disabled, created_at, last_used_at,
+                      seat_type
                FROM access_tokens
                ORDER BY created_at DESC"""
         )
@@ -1765,6 +2005,7 @@ async def list_access_tokens():
             **dict(row),
             "max_uses": 1,
             "disabled": bool(row["disabled"]),
+            "seat_type": normalize_seat_type(row["seat_type"]),
         }
         for row in rows
     ]
@@ -1979,6 +2220,53 @@ async def _release_uncertain_token_use(token_use_id: int, *, error_message: str)
         return True
 
 
+async def _report_no_premium_seat(
+    email: str,
+    token_row: dict[str, Any],
+    token_use_id: int,
+    no_seat: _NoPremiumSeat,
+    *,
+    released: bool,
+) -> None:
+    """Premium 码没位置：记一条 ``redeem_no_premium_seat`` 日志，并发 Telegram 通知管理员。
+
+    best-effort：日志或 Telegram 失败都不影响给客户的答复。通知里邮箱脱敏，码只给前缀。
+    """
+    reasons = "; ".join(f"{team_id}: {reason}" for team_id, reason in no_seat.reasons)
+    try:
+        await log_operation(
+            None,
+            "redeem_no_premium_seat",
+            email,
+            f"seat_type={PREMIUM_SEAT_TYPE}, token_use_id={token_use_id}, "
+            f"teams_checked={len(no_seat.reasons)}, released={released}",
+            "failed",
+            reasons or "no active team",
+            "manual",
+        )
+    except Exception:
+        logger.exception("failed to log no-Premium-seat refusal token_use_id=%s", token_use_id)
+
+    checked = [f"{name}：{why}" for name, why in no_seat.checked[:_NOTICE_MAX_TEAMS]]
+    if len(no_seat.checked) > _NOTICE_MAX_TEAMS:
+        checked.append(f"另有 {len(no_seat.checked) - _NOTICE_MAX_TEAMS} 个 Team 同样没有空位")
+    rows = [
+        f"兑换码：{token_row.get('token_prefix') or '?'}…",
+        f"客户：{mask_email_for_notice(email)}",
+        *(checked or ["没有可用的 Team"]),
+        (
+            "兑换码未消耗。要接这单：先在某个 Team 买好 Premium 席位，在面板里同步这个 Team"
+            "（或等下一次自动同步），再让客户用同一个码重试。"
+            if released
+            else "兑换码状态待核对，请在兑换记录里查看这笔兑换。"
+        ),
+    ]
+    try:
+        await notify_admins(detail_card("⚠️ Premium 兑换码没有可用席位", rows))
+    except Exception:
+        logger.exception("failed to notify admins about no Premium seat token_use_id=%s", token_use_id)
+
+
 @public_router.post("/redeem", response_model=RedeemAccessTokenResponse)
 async def redeem_access_token(req: RedeemAccessTokenRequest, request: Request):
     # 限流检查：兑换操作严格限制
@@ -2042,6 +2330,25 @@ async def _redeem_valid_token(
     # 绝不能拿这个值直接覆盖成员现有的到期时间——那会把客户已购时长清零。
     nominal_expires_at = expiry_from_duration(grant_duration)
     nominal_expires_iso = nominal_expires_at.isoformat() if nominal_expires_at else None
+
+    # 码的席位类型。库里只该有 default / prolite；别的值（手工改库、未来的类型）不猜，
+    # 占用之前就拒绝：什么都没写、没碰上游。
+    code_seat_type = normalize_seat_type(token_row.get("seat_type"))
+    if code_seat_type not in CODE_SEAT_TYPES:
+        try:
+            await log_operation(
+                None,
+                "self_service_redeem",
+                email,
+                f"reason=invalid_code_seat_type, token_id={token_id}, seat_type={code_seat_type}",
+                "failed",
+            )
+        except Exception:
+            logger.exception("failed to log invalid code seat type token_id=%s", token_id)
+        raise _LocalRefusal(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_INVALID_CODE_SEAT_TYPE_DETAIL,
+        )
 
     # token 一经兑换成功即失效；先原子占用次数挡住并发重放（同一个 token 只有一次
     # 占用能成功），兑换流程中途真正失败时会在 finally 里把占用释放掉，让用户可以
@@ -2154,7 +2461,9 @@ async def _redeem_valid_token(
                 )
             # 人同时在可用 Team 和不可用 Team 里：续哪一个不能替他选。走多 Team 提示，
             # 不可用的队列出但不可续；他选了可用的队再提交，就走上面"已选 Team"的路径。
-            choices = await _build_team_choices(email, memberships)
+            choices = await _build_team_choices(
+                email, memberships, code_seat_type=code_seat_type
+            )
             choices += await _unavailable_team_choices(email, unavailable)
             failure_recorded = await _fail_and_release_token_use(
                 token_use_id,
@@ -2175,7 +2484,9 @@ async def _redeem_valid_token(
             }
 
         if len(memberships) > 1:
-            choices = await _build_team_choices(email, memberships)
+            choices = await _build_team_choices(
+                email, memberships, code_seat_type=code_seat_type
+            )
             failure_recorded = await _fail_and_release_token_use(
                 token_use_id,
                 action="renew_multi_team_prompt",
@@ -2213,7 +2524,38 @@ async def _redeem_valid_token(
                     grant_duration,
                     token_use_id,
                     rescan_teams=None if selected_team_id else teams,
+                    code_seat_type=code_seat_type,
                 )
+            except _SeatTypeMismatch as mismatch:
+                # 码的席位类型和成员当前的不一致（或成员在一个不认识的席位类型上）：
+                # 在任何本地写入之前拒绝，码退回。不替用户换席位，也不另发邀请。
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="redeem_failed",
+                    team_id=mismatch.team_id,
+                    user_id=mismatch.user_id or None,
+                    error_message=mismatch.detail,
+                )
+                try:
+                    await log_operation(
+                        mismatch.team_id,
+                        "redeem_seat_type_mismatch",
+                        email,
+                        f"seat_type={mismatch.code_seat_type}, "
+                        f"member_seat_type={mismatch.member_seat_type}, "
+                        f"reason={mismatch.reason}, token_use_id={token_use_id}",
+                        "failed",
+                        None,
+                        "manual",
+                    )
+                except Exception:
+                    logger.exception(
+                        "failed to log seat type mismatch token_use_id=%s", token_use_id
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=mismatch.detail,
+                ) from None
             except PermanentMembershipError:
                 # 当前成员没有到期时间（永久）。给他续一段有限时长只会是降级，
                 # 所以拒绝并保留兑换码（finally 里会把占用退回）。
@@ -2230,7 +2572,9 @@ async def _redeem_valid_token(
                 )
             if renewed and renewed.get("needs_selection"):
                 # 拿锁后重扫才出现的第二个 Team：与拿锁前发现多队走完全一样的出口。
-                choices = await _build_team_choices(email, renewed["needs_selection"])
+                choices = await _build_team_choices(
+                    email, renewed["needs_selection"], code_seat_type=code_seat_type
+                )
                 failure_recorded = await _fail_and_release_token_use(
                     token_use_id,
                     action="renew_multi_team_prompt",
@@ -2302,14 +2646,34 @@ async def _redeem_valid_token(
         # 所以通过 on_invite_confirmed 在那一刻同步标记（见该函数注释）。
         # 新席位不发到订阅已到期的 Team（规则同管理员邀请）。只过滤这里：上面找人和
         # 续期仍覆盖这些 Team，否则那里的成员会被当成"不在任何 Team"另开一个席位。
-        joined = await _invite_to_available_team(
-            email,
-            grant_duration,
-            [team for team in teams if not subscription_lapsed(team)],
-            token_use_id=token_use_id,
-            on_invite_confirmed=consumption.confirm,
-            on_invite_rejected=consumption.revert_for_rejected,
-        )
+        try:
+            joined = await _invite_to_available_team(
+                email,
+                grant_duration,
+                [team for team in teams if not subscription_lapsed(team)],
+                token_use_id=token_use_id,
+                on_invite_confirmed=consumption.confirm,
+                on_invite_rejected=consumption.revert_for_rejected,
+                seat_type=code_seat_type,
+            )
+        except _NoPremiumSeat as no_seat:
+            # Premium 码没有任何 Team 有空的已付 Premium 席位。没有发出过成功或结果未定
+            # 的邀请（那两种都会直接返回），码按普通「没位置」一样退回；退回之后才记日志、
+            # 通知管理员，通知里「码未消耗」才是真的。
+            if not consumption.confirmed:
+                failure_recorded = await _fail_and_release_token_use(
+                    token_use_id,
+                    action="redeem_failed",
+                    error_message=no_seat.detail,
+                )
+                await _report_no_premium_seat(
+                    email,
+                    token_row,
+                    token_use_id,
+                    no_seat,
+                    released=failure_recorded,
+                )
+            raise
         if joined["status"] == "pending_confirmation":
             return {
                 "status": "pending_confirmation",

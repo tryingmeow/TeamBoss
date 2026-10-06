@@ -163,6 +163,21 @@ def notify_admins_sync(text: str, *, parse_mode: Optional[str] = None) -> int:
     return sent
 
 
+def mask_email_for_notice(email: Optional[str]) -> str:
+    """推送给管理员的通知里只放脱敏邮箱：本地部分前 5 位 + 服务商名（如 abcde…@gmail）。
+
+    规则与 Telegram 机器人里车主邮箱的脱敏一致（tg_bot._mask_owner_email）。
+    """
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return email or "?"
+    local, _, domain = email.partition("@")
+    provider = domain.split(".", 1)[0] if domain else ""
+    ell = "…" if len(local) > 5 else ""
+    head = local[:5]
+    return f"{head}{ell}@{provider}" if provider else f"{head}{ell}"
+
+
 def _team_name_sync(team_id: Optional[str]) -> str:
     if not team_id:
         return "未知 Team"
