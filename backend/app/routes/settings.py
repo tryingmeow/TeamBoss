@@ -17,6 +17,9 @@ PUBLIC_SETTINGS_KEYS = (
     "api_concurrency",
     "expiry_kick_mode",
     "expiry_kick_delay_hours",
+    # 已退役：超员改成每个 Team 自己的 overage_policy（services/overage_policy.py），
+    # 这个全局开关只在那一列第一次加上时迁移过一次（database.py）。旧前端还会读写它，
+    # 这里照收照存，但没有任何代码再读它。
     "skip_overage_confirmation",
 )
 
@@ -75,6 +78,7 @@ async def update_settings(req: SettingsUpdate):
         updates["expiry_kick_delay_hours"] = req.expiry_kick_delay_hours
 
     if req.skip_overage_confirmation is not None:
+        # 已退役，存了也不生效，见 PUBLIC_SETTINGS_KEYS 的注释。
         updates["skip_overage_confirmation"] = "true" if req.skip_overage_confirmation else "false"
 
     if updates:
