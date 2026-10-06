@@ -249,6 +249,7 @@ const PREMIUM_ALERT_KIND: Record<string, string> = {
   premium_outsider: PREMIUM_OUTSIDER,
   premium_detected_with_record: '外部加入的 Premium 成员，但 TeamBoss 有他的 Premium 记录',
   premium_detected_was_managed: '外部加入的 Premium 成员，但 TeamBoss 以前拉过他或他兑换过',
+  chatgpt_detected_was_managed: 'Team 超员，但这个外部加入的 ChatGPT 成员 TeamBoss 以前拉过或他兑换过，没有移除',
   premium_unswitched: 'TeamBoss 管理的成员在 Premium 席位上，但不是 TeamBoss 切的',
   unknown_seat_type: '席位类型 TeamBoss 不认识',
 };
@@ -386,6 +387,7 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
     overage_forbidden: '席位已满，禁止超员',
     overage_needs_confirmation: '席位已满，等你确认加购',
     premium_outsider: PREMIUM_OUTSIDER,
+    over_quota: '超员',
     seat_type_mismatch: '兑换码和成员的席位类型不符',
     unknown_member_seat_type: '成员的席位类型 TeamBoss 不认识，未处理',
     unknown_seat_type: '席位类型 TeamBoss 不认识，未处理',

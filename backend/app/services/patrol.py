@@ -14,7 +14,12 @@
        管理员开启自动踢人时会先把当时的现有成员全部保护起来；巡逻自动给 Team 建立
        基线时只有该 Team 第一次才保护，token_expired 恢复/重新导入后的自动重建不保护
        ——见 _protect_team_snapshot_sync）
+    7. TeamBoss 以前没有拉过他、他也没在这个 Team 兑换过（member_expiry 里 system / self_service
+       的行，开着关着都算；成功 / 待定 / 处理中的兑换）。付费成员掉出一次完整名单后再出现，会是
+       一条新的 detected 记录；这样的人不进候选，只进限频提醒（select_over_quota_kick_candidates_sync）
   最多踢 over_by 个，按 first_seen_at（缺失则退回 created_time）新→旧排序，优先踢最新混进来的。
+  over_by 的算法不变。名单里外部成员（任何席位类型）多到超过"别一次踢一片"阈值时，这一轮这个
+  Team 超员一个都不踢、只提醒（outsider_batch_guard，与 Premium 外部成员共用）。
 - dry-run 判定：effective_dry_run = dry_run 参数 OR settings.patrol_kick_enabled != '1'。
 - 真正执行踢人只能通过 `_patrol_kick()` 这一个函数：进函数先重新校验候选资格
   （source/is_owner/seat_type），任一不满足直接拒绝、不踢 —— 纵深防御，防止上游逻辑
@@ -755,6 +760,8 @@ KICK_RULE_OVER_QUOTA = "over_quota"
 KICK_RULE_PREMIUM_OUTSIDER = "premium_outsider"
 # _patrol_kick 的 Premium 规则在 claim 里发现快照已过期时返回的原因（不是失败，下一轮再判）。
 PREMIUM_KICK_DEFERRED = "deferred: seat changed in TeamBoss after the member snapshot"
+# _patrol_kick 的超员规则在 claim 里发现 TeamBoss 刚有了这个人的拉人 / 兑换记录时返回的原因。
+KICK_DEFERRED_TEAMBOSS_RECORD = "deferred: TeamBoss has a record for this member"
 
 
 def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
@@ -908,12 +915,28 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
             reason = f"rejected: seat_type={cached_member.get('seat_type')!r} != 'default'"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
+        if _teamboss_managed_history_sync(conn, team_id, cached_email, cached_user_id):
+            reason = "rejected: TeamBoss placed or sold a seat to this member before"
+            _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
+            return False, reason
 
-        allowed = select_kick_candidates(cached_members)[:status["over_by"]]
+        over_quota_candidates, _vetoed = select_over_quota_kick_candidates_sync(
+            conn, team_id, cached_members
+        )
+        allowed = over_quota_candidates[:status["over_by"]]
         if cached_member not in allowed:
             reason = "rejected: target is not within the newest over-quota candidates"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
+    # 同一份快照里外部成员多到异常：两条规则都不踢（run_patrol 已经不选人，这里再挡一次）。
+    guard_tripped, outsider_count = outsider_batch_guard(cached_members)
+    if guard_tripped:
+        reason = (
+            f"rejected: abnormal number of detected outsiders "
+            f"({outsider_count} of {len(cached_members)})"
+        )
+        _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
+        return False, reason
     # 使用缓存里重新定位出的 id，禁止调用方替换目标。
     user_id = cached_user_id
     email = cached_email or email
@@ -950,6 +973,15 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
                 deferred_because = "seat_changed_after_snapshot"
             elif _premium_kick_veto_sync(conn, team_id, email, user_id):
                 deferred_because = "teamboss_record"
+        elif _teamboss_managed_history_sync(conn, team_id, email, user_id):
+            # 超员踢人：claim 期间刚有了 TeamBoss 拉人 / 兑换记录，这一轮不踢；下一轮他不再是候选。
+            reason = KICK_DEFERRED_TEAMBOSS_RECORD
+            _log_operation_sync(
+                team_id, "patrol_kick", email,
+                f"user_id={user_id}, reason={KICK_RULE_OVER_QUOTA}, deferred=teamboss_record",
+                "skipped",
+            )
+            return False, reason
         if deferred_because:
             # 快照之后 TeamBoss 动过他的席位（切换超时、切换后刷新失败等），快照里的 prolite
             # 不可信；或者 claim 期间刚有了 TeamBoss 的记录（Premium 记录、拉人 / 兑换记录）。
@@ -1369,6 +1401,7 @@ _PREMIUM_FINDING_KINDS = (
     "premium_detected_was_managed",
     "premium_unswitched",
     "unknown_seat_type",
+    "chatgpt_detected_was_managed",
 )
 _ALERT_NAME_LIMIT = 10
 
@@ -1523,6 +1556,40 @@ def _premium_kick_veto_sync(conn: sqlite3.Connection, team_id: str, email: str, 
     return None
 
 
+def select_over_quota_kick_candidates_sync(
+    conn: sqlite3.Connection, team_id: str, members: Any
+) -> tuple[list[dict], list[dict]]:
+    """超员踢人的候选，返回 (候选, 因 TeamBoss 记录剔除的人)。
+
+    候选 = select_kick_candidates 里去掉 TeamBoss 以前拉过、或在这个 Team 兑换过的人
+    （_teamboss_managed_history_sync：付费成员掉出名单后又回来，会是一条新的 detected 记录）。
+    顺序不变；over_by 的算法不变，只是从剩下的人里按原顺序取最新的 over_by 个。
+    run_patrol 选人和 _patrol_kick 的闸门都用这一份，两边对"最新的 over_by 个"理解一致。
+    """
+    candidates: list[dict] = []
+    vetoed: list[dict] = []
+    for member in select_kick_candidates(members):
+        email = member.get("email") or ""
+        user_id = member.get("id") or member.get("user_id") or ""
+        if _teamboss_managed_history_sync(conn, team_id, email, user_id):
+            vetoed.append(member)
+        else:
+            candidates.append(member)
+    return candidates, vetoed
+
+
+def outsider_batch_guard(members: Any) -> tuple[bool, int]:
+    """"别一次踢一片"护栏：(这份名单是否异常, 外部成员数)。
+
+    数的是全部非 Owner、source == 'detected' 的成员（select_detected_outsiders，不看席位类型、
+    不看严格模式开没开），阈值同 strict_kick_batch_guard_exceeded。异常时这一轮这个 Team
+    Premium 外部成员和超员两条路都一个不踢、只提醒。
+    """
+    count = len(select_detected_outsiders(members))
+    team_size = len(members) if isinstance(members, list) else 0
+    return strict_kick_batch_guard_exceeded(count, team_size), count
+
+
 def _teamboss_set_premium_sync(conn: sqlite3.Connection, team_id: str, email: str, user_id: str) -> bool:
     """TeamBoss 最近一次给这个人定席位时，定的是不是 Premium（只用于 TeamBoss 成员的提醒）。
 
@@ -1570,6 +1637,7 @@ def premium_seat_findings_sync(
     outsiders_tracked: bool,
     pending_outsiders_revoked: bool,
     handled_ids: Iterable[str] = (),
+    over_quota_vetoed: Iterable[dict] = (),
 ) -> list[dict]:
     """找出要提醒管理员的席位（只读，不动手），每条 {kind, email, user_id, seat_type, source, status}：
 
@@ -1586,6 +1654,8 @@ def premium_seat_findings_sync(
       但 TeamBoss 最近一次给他定的席位不是 Premium（_teamboss_set_premium_sync）。
     - unknown_seat_type：注册表外的席位类型（如 automation）。TeamBoss 对这些人什么都不做（包括到期
       踢人），所以列给管理员；外部的同样要求 outsiders_tracked。
+    - chatgpt_detected_was_managed：超员 Team 上本来会进超员踢人候选、但 TeamBoss 以前拉过他或他兑换过
+      的人（调用方传入 over_quota_vetoed，见 select_over_quota_kick_candidates_sync）。不踢，交给管理员。
     Owner、没有来源记录（source 为空）的人不算。
     """
     handled = {str(x) for x in handled_ids}
@@ -1639,6 +1709,22 @@ def premium_seat_findings_sync(
                 "source": source,
                 "status": status,
             })
+    if outsiders_tracked:
+        for item in over_quota_vetoed:
+            if not isinstance(item, dict):
+                continue
+            email = (item.get("email") or "").strip().lower()
+            user_id = str(item.get("id") or item.get("user_id") or "")
+            if not email and not user_id:
+                continue
+            findings.append({
+                "kind": "chatgpt_detected_was_managed",
+                "email": email,
+                "user_id": user_id,
+                "seat_type": normalize_seat_type(item.get("seat_type")),
+                "source": item.get("source"),
+                "status": "member",
+            })
     return findings
 
 
@@ -1672,6 +1758,7 @@ def _premium_alert_card(
     was_managed = [f for f in findings if f["kind"] == "premium_detected_was_managed"]
     unswitched = [f for f in findings if f["kind"] == "premium_unswitched"]
     unknown = [f for f in findings if f["kind"] == "unknown_seat_type"]
+    chatgpt_managed = [f for f in findings if f["kind"] == "chatgpt_detected_was_managed"]
     has_premium = bool(outsider_members or outsider_invites or with_record or was_managed or unswitched)
 
     rows = []
@@ -1692,17 +1779,26 @@ def _premium_alert_card(
         rows.append("🔀 TeamBoss 成员被切到 Premium，但不是 TeamBoss 切的：" + names(unswitched))
     if unknown:
         rows.append("❔ TeamBoss 不认识的席位类型：" + names(unknown, with_seat=True))
+    if chatgpt_managed:
+        rows.append(
+            "🔎 Team 超员，但这些外部加入的 ChatGPT 成员 TeamBoss 以前拉过或他兑换过（可能是老用户重新进来），"
+            "巡逻没有移除：" + names(chatgpt_managed)
+        )
     rows.append("🛑 以上的人 TeamBoss 没有移除、没有撤邀请、没有改席位")
     if has_premium:
         rows.append("💡 Premium 席位单独计费：请到 ChatGPT 后台确认是否需要，不需要就手动移出或改回 ChatGPT 席位")
     if unknown:
         rows.append("💡 不认识的席位类型 TeamBoss 一律不处理（包括到期踢人），请到 ChatGPT 后台人工确认")
+    if chatgpt_managed:
+        rows.append("💡 请在成员列表核对他们的到期时间；确实不该在的，手动移出")
     rows.append(f"🔕 名单不变时 {PREMIUM_ALERT_INTERVAL.days} 天内不再重复提醒")
 
     if has_premium:
         title = "🔁 Premium 席位提醒（仍存在）" if is_reminder else "💎 Premium 席位提醒"
-    else:
+    elif unknown:
         title = "🔁 未知席位类型提醒（仍存在）" if is_reminder else "❔ 未知席位类型提醒"
+    else:
+        title = "🔁 超员未移除提醒（仍存在）" if is_reminder else "🔎 超员未移除提醒"
     return detail_card(f"{title} · {name}", rows)
 
 
@@ -2017,6 +2113,22 @@ def run_patrol(
             # 空跑也提醒（和本函数里其他巡逻通知一致）；同一份名单按 PREMIUM_ALERT_INTERVAL 限频。
             # 出任何错都只记日志，绝不影响下面的撤邀请 / 严格模式 / 超员处理。
             try:
+                # 超员 Team 上因为 TeamBoss 记录没进超员踢人候选的人，也走这条限频提醒。
+                # 条件和下面超员小节真正选人时一致（豁免 / Codex / 席位数未确认的 Team 不选人）。
+                over_quota_vetoed: list[dict] = []
+                if (
+                    not is_exempt
+                    and not codex_enabled
+                    and seats_entitled is not None
+                    and str(team_id) not in skip_over_quota_ids
+                    and classify_team(
+                        team_id=team_id, name=name, codex_enabled=codex_enabled,
+                        seats_entitled=seats_entitled, members=members,
+                    )["risk"] == "over"
+                ):
+                    _candidates, over_quota_vetoed = select_over_quota_kick_candidates_sync(
+                        conn, team_id, members
+                    )
                 premium_findings = premium_seat_findings_sync(
                     conn, team_id, members, pending,
                     outsiders_tracked=team_baseline_ready,
@@ -2025,6 +2137,7 @@ def run_patrol(
                         team_baseline_ready and not is_exempt and not effective_dry_run
                     ),
                     handled_ids=premium_handled_ids,
+                    over_quota_vetoed=over_quota_vetoed,
                 )
                 if is_exempt:
                     unhandled_reason = "🛡️ Team 已豁免巡逻，外部 Premium 成员不会被自动移除"
@@ -2308,8 +2421,32 @@ def run_patrol(
                 continue
 
             over_by = status["over_by"]
-            candidates = select_kick_candidates(members)
+            # TeamBoss 以前拉过、或在这个 Team 兑换过的人不进候选（上面的限频提醒里列给管理员）。
+            candidates, history_vetoed = select_over_quota_kick_candidates_sync(conn, team_id, members)
             selected = candidates[:over_by]
+
+            # "别一次踢一片"：外部成员（不分席位类型）多到异常，就当数据出了问题，这一轮这个 Team
+            # 超员一个都不踢、只提醒。阈值和 Premium 那段相同。
+            guard_tripped, outsider_count = outsider_batch_guard(members)
+            guard_note = None
+            if guard_tripped and selected:
+                guard_note = (
+                    f"🚨 外部成员数量异常（{outsider_count} / 团队共 {len(members)} 人），"
+                    "怀疑数据异常，本轮超员一个都没移除，请人工核查"
+                )
+                _log_operation_sync(
+                    team_id, "patrol_kick_batch_capped", None,
+                    f"reason={KICK_RULE_OVER_QUOTA}, batch_guard=outsiders, "
+                    f"outsiders={outsider_count}, over_by={over_by}, candidates={len(candidates)}, "
+                    f"team_size={len(members)}, capped_to=0",
+                    "capped",
+                )
+                events.append({
+                    "team_id": team_id, "team_name": name, "action": "over_quota_batch_guard",
+                    "guard": "outsiders", "count": outsider_count,
+                    "over_by": over_by, "team_size": len(members),
+                })
+                selected = []
 
             # 绝对保险丝：单轮踢人数封顶，挡住 over_by 因数据异常被抬高导致的"一趟踢光"。
             # 本轮 Premium 那段已经动过的人数先扣掉（两条路合计封顶）。命中说明这轮踢得不正常，
@@ -2382,10 +2519,12 @@ def run_patrol(
                 if ok:
                     kicked_emails.append(email)
                     kicked += 1
+                deferred = not ok and err == KICK_DEFERRED_TEAMBOSS_RECORD
                 events.append({
                     "team_id": team_id, "team_name": name, "email": email, "user_id": user_id,
-                    "action": "kick", "result": "success" if ok else "failed", "over_by": over_by,
-                    "position": position, "reason": reason, "error": err,
+                    "action": "kick",
+                    "result": "success" if ok else ("deferred" if deferred else "failed"),
+                    "over_by": over_by, "position": position, "reason": reason, "error": err,
                 })
 
             rows = [
@@ -2402,6 +2541,12 @@ def run_patrol(
                     rows.append("✅ 已移除：" + "、".join(kicked_emails))
                 else:
                     rows.append("⚠️ 处理结果：没有成员被移除")
+            if guard_note:
+                rows.append(guard_note)
+            if history_vetoed:
+                rows.append(
+                    f"🔎 另有 {len(history_vetoed)} 个外部加入的成员 TeamBoss 以前拉过或他兑换过，没有移除"
+                )
             if insufficient_note:
                 rows.append(f"👤 人工核查：{insufficient_note}")
             notify_admins_sync(detail_card(f"🚨 巡逻发现超员 · {name}", rows))

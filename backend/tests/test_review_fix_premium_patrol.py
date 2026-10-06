@@ -7,6 +7,8 @@
   重新被检测成外部 Premium 成员时不踢，只进限频的席位提醒。
 - K3：Premium 的"别一次踢一片"护栏数全部外部成员，不看严格模式；一个 Team 一轮在 Premium
   和超员两条路上一共最多踢 NON_STRICT_KICK_ABS_CAP 个。
+- 超员踢人同样套用 K2 的记录否决（不进候选、claim 后复查、限频提醒）和 K3 的异常护栏；
+  over_by 的算法不变。
 
 所有上游调用都是记录调用的假客户端，绝不触网。
 """
@@ -522,6 +524,132 @@ class PremiumRoundLimitsTest(_Fixture):
 
         self.assertEqual(sorted(self._calls("remove_member")),
                          [("remove_member", "u-new"), ("remove_member", "u-old")])
+
+
+# ═══ 超员踢人也套用 K2 的记录否决和 K3 的异常护栏 ═══════════════════════════════
+
+class OverQuotaHistoryAndGuardTest(_Fixture):
+    _history_row = ManagedHistoryVetoTest._history_row
+    _redemption = ManagedHistoryVetoTest._redemption
+
+    def _over_quota_alerts(self):
+        return [t for t in self.notify_calls if "超员未移除提醒" in t]
+
+    def _rejoined_over_quota_team(self, team_id):
+        # 2 个 ChatGPT 席位、3 个人在用 ChatGPT：超 1 个。最新混进来的 payer 其实是付费成员：
+        # 掉出过一次完整名单、记录被关掉，回来时成了一条新的 detected 记录（没有到期时间）。
+        payer = _member("payer@example.com", "u-pay", first_seen_at="2026-08-02T00:00:00+00:00")
+        outsider = _member("outsider@example.com", "u-out", first_seen_at="2026-07-10T00:00:00+00:00")
+        self._history_row(team_id, "payer@example.com", "u-pay", source="self_service", kicked=1,
+                          created_at="2026-07-01T00:00:00+00:00",
+                          kicked_at="2026-08-01T00:00:00+00:00",
+                          expires_at="2026-12-01T00:00:00+00:00")
+        self._armed_team(team_id, [OWNER, KEEPER, payer, outsider], seats_entitled=2)
+        return payer, outsider
+
+    def test_redetected_paying_member_is_not_an_over_quota_candidate_and_alerts(self):
+        payer, _outsider = self._rejoined_over_quota_team("team-oq-k2")
+
+        result = self._patrol(dry_run=False)
+
+        # 超的那 1 个从剩下的外部成员里按原顺序取：付费成员不进候选，over_by 的算法不变。
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-out")])
+        self.assertEqual(result["kicked"], 1)
+        self.assertIsNone(self._kicked("team-oq-k2", "u-pay")[1])
+        alerts = self._over_quota_alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("payer", alerts[0])
+        logged = [l for l in self._logs("patrol_premium_alert") if "u-pay" in (l["detail"] or "")
+                  or (l["target_email"] or "") == "payer@example.com"]
+        self.assertIn("kind=chatgpt_detected_was_managed", logged[0]["detail"])
+        over_quota_card = [t for t in self.notify_calls if "巡逻发现超员" in t]
+        self.assertIn("TeamBoss 以前拉过或他兑换过，没有移除", over_quota_card[0])
+
+        # 踢人入口自己也挡：调用方把他传进来也不踢。
+        conn = self._conn()
+        ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-oq-k2", payer)
+        conn.close()
+        self.assertFalse(ok)
+        self.assertIn("placed or sold a seat", reason)
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-out")])
+
+    def test_redemption_alone_keeps_a_member_out_of_over_quota_candidates(self):
+        team_id = "team-oq-k2-redeem"
+        buyer = _member("buyer@example.com", "u-buy", first_seen_at="2026-08-02T00:00:00+00:00")
+        self._redemption(team_id, "buyer@example.com", result="pending")
+        self._armed_team(team_id, [OWNER, KEEPER, buyer], seats_entitled=1)
+
+        result = self._patrol(dry_run=True)
+
+        self.assertEqual(result["would_kick"], 0)
+        self.assertEqual(self._logs("patrol_would_kick"), [])
+
+    def test_record_appearing_during_claim_defers_the_over_quota_kick(self):
+        team_id = "team-oq-k2-race"
+        member = _member("x@example.com", "u-x")
+        self._armed_team(team_id, [OWNER, KEEPER, member], seats_entitled=1)
+        fixture = self
+
+        @contextlib.contextmanager
+        def claim_with_redemption(*args, **kwargs):
+            fixture._redemption(team_id, "x@example.com", result="uncertain")
+            yield True
+
+        with patch.object(patrol, "member_operation_claim_sync", claim_with_redemption):
+            conn = self._conn()
+            ok, reason = patrol._patrol_kick(conn, RecordingClient(), team_id, member)
+            conn.close()
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, patrol.KICK_DEFERRED_TEAMBOSS_RECORD)
+        self.assertEqual(self._calls("remove_member"), [])
+        deferred = [l for l in self._logs("patrol_kick") if l["result"] == "skipped"]
+        self.assertIn("reason=over_quota, deferred=teamboss_record", deferred[0]["detail"])
+
+    def _abnormal_team(self, team_id):
+        # 4 人队阈值 = 2；3 个外部成员，ChatGPT 席位 1 个：超 2 个，但这份名单按异常处理。
+        members = [
+            OWNER,
+            _member("d1@example.com", "u-d1", first_seen_at="2026-07-10T00:00:00+00:00"),
+            _member("d2@example.com", "u-d2", first_seen_at="2026-07-11T00:00:00+00:00"),
+            _member("d3@example.com", "u-d3", first_seen_at="2026-07-12T00:00:00+00:00"),
+        ]
+        self._armed_team(team_id, members, seats_entitled=1)
+        return members
+
+    def test_abnormal_outsider_count_blocks_over_quota_kicks_and_alerts(self):
+        self._abnormal_team("team-oq-k3")
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
+        capped = self._logs("patrol_kick_batch_capped")
+        self.assertEqual(len(capped), 1)
+        self.assertIn("reason=over_quota, batch_guard=outsiders", capped[0]["detail"])
+        self.assertIn("capped_to=0", capped[0]["detail"])
+        over_quota_card = [t for t in self.notify_calls if "巡逻发现超员" in t]
+        self.assertIn("外部成员数量异常（3 / 团队共 4 人）", over_quota_card[0])
+        self.assertTrue(any(e.get("action") == "over_quota_batch_guard" for e in result["events"]))
+
+    def test_abnormal_outsider_count_blocks_the_dry_run_too(self):
+        self._abnormal_team("team-oq-k3-dry")
+
+        result = self._patrol(dry_run=True)
+
+        self.assertEqual(result["would_kick"], 0)
+        self.assertEqual(self._logs("patrol_would_kick"), [])
+
+    def test_kick_gate_rejects_an_abnormal_snapshot(self):
+        members = self._abnormal_team("team-oq-k3-gate")
+
+        conn = self._conn()
+        ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-oq-k3-gate", members[3])
+        conn.close()
+
+        self.assertFalse(ok)
+        self.assertIn("abnormal number of detected outsiders", reason)
+        self.assertEqual(self._calls("remove_member"), [])
 
 
 if __name__ == "__main__":

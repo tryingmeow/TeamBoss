@@ -536,7 +536,13 @@ class PatrolInvalidEntitlementTest(_Base):
                 )
 
     def test_valid_entitlement_still_kicks_newest_over_quota_member(self):
-        self._armed_team("team-valid", 1)
+        # 加一个系统拉入的 Codex 成员：4 人里 2 个外部成员不算异常（异常护栏另有测试）。
+        self._armed_team("team-valid", 1, members=[
+            _owner(),
+            _member("sys@team-valid", "us-team-valid", source="system", seat_type="usage_based"),
+            _member("a@team-valid", "ua-team-valid", first_seen_at="2026-07-10T00:00:00Z"),
+            _member("b@team-valid", "ub-team-valid", first_seen_at="2026-07-11T00:00:00Z"),
+        ])
 
         result = patrol.run_patrol(dry_run=False, allow_team_ids=["team-valid"])
 

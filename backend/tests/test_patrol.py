@@ -211,6 +211,9 @@ class PatrolTest(unittest.TestCase):
         _insert_team(conn, "team-overage", seats_entitled=1)  # over_by 用 active_chatgpt - 1 算
         _insert_member_cache(conn, "team-overage", [
             _member("owner@x.com", "u-owner", is_owner=True, source=None, seat_type="usage_based"),
+            # 两个系统拉入的 Codex 成员：Team 6 人，3 个外部成员不算异常（异常护栏另有测试）。
+            _member("sys1@x.com", "u-sys1", source="system", seat_type="usage_based"),
+            _member("sys2@x.com", "u-sys2", source="system", seat_type="usage_based"),
             _member("oldest@x.com", "u-old", first_seen_at="2026-07-01T00:00:00Z"),
             _member("middle@x.com", "u-mid", first_seen_at="2026-07-05T00:00:00Z"),
             _member("newest@x.com", "u-new", first_seen_at="2026-07-10T00:00:00Z"),
