@@ -207,12 +207,22 @@ function fullPhrase(gate: SeatGate): string {
 }
 
 /**
+ * "会让 ChatGPT 自动加购 N 个 Premium 席位并扣费" — but for ChatGPT seats just "会自动加购 N 个
+ * ChatGPT 席位并扣费", so the sentence doesn't say ChatGPT twice.
+ */
+function willBuy(label: string, count: number): string {
+  return label === SEAT_TYPES.default.label
+    ? `会自动加购 ${count} 个 ${label} 席位并扣费`
+    : `会让 ChatGPT 自动加购 ${count} 个 ${label} 席位并扣费`;
+}
+
+/**
  * One line that says what will happen to the operator's money. Null when nothing will be
  * bought. Used for the add-member dialog and as the confirm text.
  */
 export function gateMessage(gate: SeatGate): string | null {
   if (gate.action === 'free') return null;
-  const charge = `ChatGPT 自动加购 ${gate.extra} 个 ${gate.label} 席位并扣费`;
+  const charge = willBuy(gate.label, gate.extra);
   // 前半句已经以「这个 Team」开头时不再重复主语。
   const setTo = gate.noSeats && gate.over === 0 ? '且设为' : '这个 Team 设为';
   if (gate.action === 'forbid') {
@@ -220,8 +230,8 @@ export function gateMessage(gate: SeatGate): string | null {
       ? `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，最多再加 ${gate.free} 人。`
       : `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，不会自动加购。要加人请先在 Team 设置里改超员策略。`;
   }
-  if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续会让 ${charge}。`;
-  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交后 ${charge}。`;
+  if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续${charge}。`;
+  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交后${charge}。`;
 }
 
 /** Short hint under an option in a seat-switch menu. */
@@ -242,7 +252,7 @@ export function switchConfirmText(gate: SeatGate): string {
     : gate.noSeats
       ? `这个 Team 还没有 ${gate.label} 席位，`
       : gate.capacityUnknown ? `读不到 ${gate.label} 空位，按已满处理：` : `${gate.label} 席位已满，`;
-  return `${lead}切换到 ${gate.label} 会让 ChatGPT 自动加购 1 个 ${gate.label} 席位并扣费。`;
+  return `${lead}切换过去${willBuy(gate.label, 1)}。`;
 }
 
 /** "其中 22 个在「Aurora」自动加购并扣费" — the invites that made ChatGPT buy a seat. */

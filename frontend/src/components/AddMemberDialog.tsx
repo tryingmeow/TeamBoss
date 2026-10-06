@@ -143,11 +143,11 @@ function BatchPlanMessage({ serverMessage, plan, total, invitedOverage, replan }
       {invitedOverage > 0 && <p>已邀请的里有 {invitedOverage} 个在「超员自动」的 Team，已加购席位。</p>}
       {plan.length === 1 ? (
         <p className="font-medium text-gray-900 dark:text-gray-100">
-          继续会让 ChatGPT 在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费。
+          继续会在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费。
         </p>
       ) : (
         <>
-          <p>继续会让 ChatGPT 在这些 Team 自动加购 ChatGPT 席位并扣费：</p>
+          <p>继续会在这些 Team 自动加购 ChatGPT 席位并扣费：</p>
           <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 text-gray-700 dark:divide-ink-800 dark:border-ink-800 dark:text-ink-200">
             {plan.map((item) => (
               <li key={item.team_id || item.team_name} className="flex items-center justify-between gap-3 px-3 py-1.5">
@@ -489,8 +489,10 @@ export default function AddMemberDialog({
   const declined = batchResult?.declined_emails ?? [];
   const addedCount = batchResult?.added.length ?? 0;
   const purchaseText = batchResult ? overagePurchaseText(batchResult.added) : null;
-  // 输入框里还是上一轮没加上的那些邮箱：这是重试；改过或清空了就是新的一批。
-  const retrying = batchResult !== null && leftoverText !== '' && email === leftoverText;
+  // 输入框里还是上一轮留下的内容（没加上的邮箱，或全部成功时的空框）：结果还有效，照常显示；
+  // 一开始填新的一批，上一轮的结果就收起来，免得两轮混在一起。
+  const showResult = batchResult !== null && email === leftoverText;
+  const retrying = showResult && leftoverText !== '';
   // 上一轮刚结束、空位还没重新读到：不让提交，免得按旧空位悄悄加购。
   const checkingSeats = batchMode && usageStale;
 
@@ -525,7 +527,7 @@ export default function AddMemberDialog({
         <>
           <Dialog.Close asChild>
             <button type="button" onClick={resetForm} className={BUTTON.secondary}>
-              {batchResult ? '完成' : '取消'}
+              {showResult ? '完成' : '取消'}
             </button>
           </Dialog.Close>
           <button
@@ -636,7 +638,7 @@ export default function AddMemberDialog({
           <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>
         )}
 
-        {batchResult && (
+        {showResult && batchResult && (
           <div className="space-y-3" role="status">
             <div className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
               {(otherFailed.length > 0 || noPlaceList.length > 0) && <AlertTriangle size={15} className="shrink-0 text-amber-500" />}
