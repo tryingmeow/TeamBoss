@@ -419,14 +419,14 @@ class PremiumOutsiderKickTest(_Base):
         self.assertEqual(RecordingClient.calls, [])
         self.assertEqual(result["kicked"], 0)
         guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
-        self.assertEqual(guard[0]["guard"], "premium")
+        self.assertEqual(guard[0]["guard"], "outsiders")
         self.assertEqual((guard[0]["count"], guard[0]["team_size"]), (12, 13))
         capped = self._logs("patrol_kick_batch_capped")
-        self.assertIn("batch_guard=premium", capped[0]["detail"])
+        self.assertIn("batch_guard=outsiders", capped[0]["detail"])
         self.assertIn("capped_to=0", capped[0]["detail"])
         alerts = self._alerts()
         self.assertEqual(len(alerts), 1)  # 第二轮同一份名单：限频
-        self.assertIn("外部 Premium 成员数量异常（12 / 团队共 13 人）", alerts[0])
+        self.assertIn("外部成员数量异常（12 / 团队共 13 人）", alerts[0])
         self.assertIn("等 12 人", alerts[0])
 
     def test_batch_guard_threshold_boundary(self):
@@ -443,8 +443,8 @@ class PremiumOutsiderKickTest(_Base):
         self.assertEqual(sorted(self._calls("remove_member")),
                          [("remove_member", "u-p1"), ("remove_member", "u-p2")])
 
-    def test_strict_guard_on_same_snapshot_also_stops_premium_kicks(self):
-        # 6 人队阈值 = 3：1 个 Premium 外部成员自己不超，但严格模式数到 4 个疑似陌生成员已判异常。
+    def test_outsider_guard_stops_premium_kicks_with_or_without_strict_mode(self):
+        # 6 人队阈值 = 3：只有 1 个 Premium 外部成员，但外部成员一共 4 个，已判异常。
         members = [
             OWNER, _member("keeper@example.com", "u-k", source="system"),
             _member("premiumguy@example.com", "u-p", seat_type="prolite", first_seen_at=OLD),
@@ -461,15 +461,17 @@ class PremiumOutsiderKickTest(_Base):
         actions = {e.get("action") for e in result["events"]}
         self.assertIn("strict_batch_guard", actions)
         guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
-        self.assertEqual(guard[0]["guard"], "strict")
+        self.assertEqual(guard[0]["guard"], "outsiders")
         alerts = self._alerts()
         self.assertEqual(len(alerts), 1)
-        self.assertIn("严格模式判定这份名单陌生成员过多", alerts[0])
+        self.assertIn("外部成员数量异常（4 / 团队共 6 人）", alerts[0])
 
-        # 严格模式关掉，同一份快照：Premium 自己没超阈值，照常踢。
+        # 严格模式关掉，同一份快照：护栏照样数全部外部成员，照样不踢。
         self._setting("patrol_strict_mode_enabled", "0")
-        self._patrol(dry_run=False)
-        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-p")])
+        result = self._patrol(dry_run=False)
+        self.assertEqual(self._calls("remove_member"), [])
+        guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
+        self.assertEqual(guard[0]["count"], 4)
 
     def test_timed_out_switch_to_premium_blocks_the_kick(self):
         # 场景 A：管理员把一个 detected 成员切到 Premium，上游生效了但响应超时，TeamBoss 记了

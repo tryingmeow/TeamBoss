@@ -43,9 +43,10 @@
   Team 生效（总开关开、已建基线、未豁免、没开 Codex——Codex 队和以前一样不踢人）时，
   source == 'detected' 的非 Owner Premium（prolite）成员不看超员、不看严格模式直接踢——每人
   都是 ChatGPT 自动加购、按月扣费的席位。真踢仍只走 `_patrol_kick`（rule="premium_outsider"），
-  除席位类型 / 超员这一关外闸门与超员踢人完全相同；单轮同样受 NON_STRICT_KICK_ABS_CAP 封顶，
-  并套用严格模式的"别一次踢一片"阈值（外部 Premium 成员过多、或严格模式护栏已判这份快照
-  异常，这一轮一个都不踢）。TeamBoss 有给他开 Premium 的任何记录（含超时 / 失败的切换）、以前
+  除席位类型 / 超员这一关外闸门与超员踢人完全相同。一个 Team 一轮在这条路和超员踢人上一共最多
+  踢 NON_STRICT_KICK_ABS_CAP 个；并套用严格模式的"别一次踢一片"阈值，但数的是这份名单里全部
+  外部成员（不看席位类型、不看严格模式开没开），超了这一轮这个 Team 一个 Premium 成员都不踢、
+  只提醒。TeamBoss 有给他开 Premium 的任何记录（含超时 / 失败的切换）、以前
   拉过他或他在这个 Team 兑换过（记录开着关着都算）都不踢；快照开始拉取之后 TeamBoss 动过他的
   席位，这一轮不踢。日志沿用 patrol_kick / patrol_would_kick / patrol_kick_batch_capped，
   detail 带 seat_type=prolite、reason=premium_outsider。
@@ -571,6 +572,20 @@ def select_strict_outsiders(members: Any) -> list[dict]:
     return candidates
 
 
+def select_detected_outsiders(members: Any) -> list[dict]:
+    """Premium 踢人"别一次踢一片"护栏数的人：非 Owner、source == 'detected' 的全部成员。
+
+    不看席位类型、到期、严格模式开没开：外部成员一下子多到超过阈值，最可能是数据出了问题
+    （例如来源记录没对上），这时一个 Premium 成员都不该踢。
+    """
+    if not isinstance(members, list):
+        return []
+    return [
+        m for m in members
+        if isinstance(m, dict) and m.get("is_owner") is False and m.get("source") == "detected"
+    ]
+
+
 def strict_kick_batch_limit(team_size: int) -> int:
     """"别一次踢一片"阈值：3 人和团队总人数一半，取更小的那个。
 
@@ -584,8 +599,9 @@ def strict_kick_batch_guard_exceeded(candidate_count: int, team_size: int) -> bo
     return candidate_count > strict_kick_batch_limit(team_size)
 
 
-# 非严格模式的绝对保险丝：无论 over_by 算成多少，单轮最多踢这么多人。
-# over_by 一旦因上游数据异常被抬高，这道闸挡住"一趟踢光整队"；超出的下一轮再处理。
+# 非严格模式的绝对保险丝：一个 Team 单轮在 Premium 外部成员和超员两条路上合计最多踢这么多人，
+# 无论 over_by 算成多少。over_by 一旦因上游数据异常被抬高，这道闸挡住"一趟踢光整队"；超出的
+# 下一轮再处理。
 # （seats_entitled 为 NULL/0 这类未知值已在 run_patrol 里整段跳过，不会走到这里。）
 # 想更激进/更保守改这一个数即可。
 NON_STRICT_KICK_ABS_CAP = 10
@@ -1885,46 +1901,40 @@ def run_patrol(
             # 每个外部 Premium 成员都是 ChatGPT 自动加购、按月扣费的席位，所以不看超员、不看
             # 严格模式。豁免和以前一样生效：豁免 Team、开了 Codex 的 Team 都不踢，只进席位提醒。
             # 动手只走 _patrol_kick(rule="premium_outsider")，那里的闸门（武装、基线、来源、Owner、
-            # 对账屏障、member claim、claim 后复查）和超员踢人完全相同。单轮同样受
-            # NON_STRICT_KICK_ABS_CAP 封顶。
+            # 对账屏障、member claim、claim 后复查）和超员踢人完全相同。
             # 本轮已移除、或推迟到下一轮的人：都不进下面的席位提醒。
             premium_handled_ids: set[str] = set()
             premium_guard_reason = ""
+            # 本轮这个 Team 已经动过（或空跑里会动）的人数，Premium 和超员两条路合计不超过
+            # NON_STRICT_KICK_ABS_CAP。真踢时请求发出去之前就算上，结果不明也算；被闸门拦下、
+            # 推迟的没发请求，不算。
+            round_kicks_used = 0
             # 这一段出错（例如读不了记录）只跳过本 Team 的 Premium 处理，不拖垮整轮巡逻。
             try:
                 if team_baseline_ready and not is_exempt and not codex_enabled:
                     premium_outsiders = select_premium_kick_candidates(members)
-                    # "别一次踢一片"：外部 Premium 成员多到超过严格模式同一个阈值，或者严格模式的
-                    # 护栏已经判这份快照异常，就当数据出了问题，这一轮这个 Team 一个都不踢、只提醒。
-                    guard_name = None
+                    # "别一次踢一片"：这份名单里的外部成员（不分席位类型，不看严格模式开没开）多到
+                    # 超过严格模式同一个阈值，就当数据出了问题，这一轮这个 Team 一个 Premium 成员都
+                    # 不踢、只提醒。超员踢人照它自己的规则走。
+                    outsider_count = len(select_detected_outsiders(members))
                     if premium_outsiders and strict_kick_batch_guard_exceeded(
-                        len(premium_outsiders), len(members)
+                        outsider_count, len(members)
                     ):
-                        guard_name = "premium"
                         premium_guard_reason = (
-                            f"🚨 外部 Premium 成员数量异常（{len(premium_outsiders)} / 团队共 "
-                            f"{len(members)} 人），怀疑数据异常，本轮一个都没移除，请人工核查"
+                            f"🚨 外部成员数量异常（{outsider_count} / 团队共 {len(members)} 人），"
+                            "怀疑数据异常，本轮 Premium 成员一个都没移除，请人工核查"
                         )
-                    elif premium_outsiders and strict_mode_enabled and select_strict_kick_candidates(
-                        members
-                    ) and strict_kick_batch_guard_exceeded(
-                        len(select_strict_outsiders(members)), len(members)
-                    ):
-                        guard_name = "strict"
-                        premium_guard_reason = (
-                            "🚨 严格模式判定这份名单陌生成员过多，怀疑数据异常，本轮一个都没移除，请人工核查"
-                        )
-                    if guard_name:
                         _log_operation_sync(
                             team_id, "patrol_kick_batch_capped", None,
-                            f"reason=premium_outsider, batch_guard={guard_name}, "
-                            f"candidates={len(premium_outsiders)}, team_size={len(members)}, capped_to=0",
+                            f"reason=premium_outsider, batch_guard=outsiders, "
+                            f"outsiders={outsider_count}, candidates={len(premium_outsiders)}, "
+                            f"team_size={len(members)}, capped_to=0",
                             "capped",
                         )
                         events.append({
                             "team_id": team_id, "team_name": name, "action": "premium_batch_guard",
-                            "guard": guard_name, "count": len(premium_outsiders),
-                            "team_size": len(members),
+                            "guard": "outsiders", "count": outsider_count,
+                            "premium_count": len(premium_outsiders), "team_size": len(members),
                         })
                         premium_outsiders = []
                     # TeamBoss 有记录的人（开过 Premium、以前拉过他或他兑换过）不进候选，交给席位提醒。
@@ -1957,6 +1967,7 @@ def run_patrol(
                             # 空跑只记日志、计数；Telegram 走下面限频的席位提醒，不每轮推一条。
                             _log_operation_sync(team_id, "patrol_would_kick", email, reason, "dryrun")
                             would_kick += 1
+                            round_kicks_used += 1
                             events.append({
                                 "team_id": team_id, "team_name": name, "email": email, "user_id": user_id,
                                 "action": "would_kick", "result": "dryrun", "rule": "premium_outsider",
@@ -1968,11 +1979,14 @@ def run_patrol(
                             premium_client = ChatGPTClient(
                                 team["access_token"], team_id, team["device_id"], proxy_url=proxy_url
                             )
+                        round_kicks_used += 1
                         ok, err = _patrol_kick(
                             conn, premium_client, team_id, cand,
                             kick_source="patrol_premium", rule="premium_outsider",
                         )
                         deferred = not ok and err == PREMIUM_KICK_DEFERRED
+                        if not ok and (deferred or str(err or "").startswith("rejected:")):
+                            round_kicks_used -= 1
                         if ok:
                             kicked += 1
                             premium_kicked_emails.append(email)
@@ -2298,14 +2312,19 @@ def run_patrol(
             selected = candidates[:over_by]
 
             # 绝对保险丝：单轮踢人数封顶，挡住 over_by 因数据异常被抬高导致的"一趟踢光"。
-            # 命中说明这轮的超额判定不正常，记一条日志让人来查，超出的部分留给下一轮。
-            if len(selected) > NON_STRICT_KICK_ABS_CAP:
-                _log_operation_sync(
-                    team_id, "patrol_kick_batch_capped", None,
-                    f"over_by={over_by} candidates={len(candidates)} capped_to={NON_STRICT_KICK_ABS_CAP}",
-                    "capped",
+            # 本轮 Premium 那段已经动过的人数先扣掉（两条路合计封顶）。命中说明这轮踢得不正常，
+            # 记一条日志让人来查，超出的部分留给下一轮。
+            over_quota_cap = max(0, NON_STRICT_KICK_ABS_CAP - round_kicks_used)
+            if len(selected) > over_quota_cap:
+                capped_detail = (
+                    f"over_by={over_by} candidates={len(candidates)} capped_to={over_quota_cap}"
                 )
-                selected = selected[:NON_STRICT_KICK_ABS_CAP]
+                if round_kicks_used:
+                    capped_detail += f" premium_kicks={round_kicks_used}"
+                _log_operation_sync(
+                    team_id, "patrol_kick_batch_capped", None, capped_detail, "capped",
+                )
+                selected = selected[:over_quota_cap]
 
             insufficient_note = None
             if len(candidates) < over_by:

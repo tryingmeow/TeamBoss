@@ -439,5 +439,90 @@ class ManagedHistoryVetoTest(_Fixture):
         self.assertIn("deferred=teamboss_record", deferred[0]["detail"])
 
 
+
+# ═══ K3：护栏数全部外部成员；Premium + 超员合计封顶 ══════════════════════════════
+
+class PremiumRoundLimitsTest(_Fixture):
+    def test_guard_counts_every_detected_outsider_with_strict_mode_off(self):
+        # 6 人队阈值 = 3。外部 Premium 成员只有 1 个，但外部成员一共 4 个（含一个带到期时间的），
+        # 严格模式关着（生产就是这样）：这份名单按异常处理，一个 Premium 成员都不踢。
+        members = [
+            OWNER, KEEPER,
+            _member("premiumguy@example.com", "u-p", seat_type="prolite"),
+            _member("plain1@example.com", "u-d1"),
+            _member("plain2@example.com", "u-d2"),
+            _member("dated@example.com", "u-d3", expires_at="2026-12-01T00:00:00+00:00"),
+        ]
+        self._armed_team("team-k3", members, seats_entitled=99)
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
+        guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
+        self.assertEqual((guard[0]["guard"], guard[0]["count"], guard[0]["team_size"]),
+                         ("outsiders", 4, 6))
+        capped = self._logs("patrol_kick_batch_capped")
+        self.assertIn("batch_guard=outsiders", capped[0]["detail"])
+        self.assertIn("capped_to=0", capped[0]["detail"])
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("外部成员数量异常（4 / 团队共 6 人）", alerts[0])
+        self.assertIn("本轮 Premium 成员一个都没移除", alerts[0])
+
+    def _shared_cap_team(self, team_id):
+        # 7 人队阈值 = 3，外部成员正好 3 个（不触发护栏）；ChatGPT 席位 5 / 3，超员 2。
+        members = [
+            OWNER,
+            _member("keeper1@example.com", "u-k1", source="system"),
+            _member("keeper2@example.com", "u-k2", source="system"),
+            _member("keeper3@example.com", "u-k3", source="system"),
+            _member("premiumguy@example.com", "u-p", seat_type="prolite"),
+            _member("older@example.com", "u-old", first_seen_at="2026-07-10T00:00:00+00:00"),
+            _member("newer@example.com", "u-new", first_seen_at="2026-07-20T00:00:00+00:00"),
+        ]
+        self._armed_team(team_id, members, seats_entitled=3)
+
+    def test_premium_and_over_quota_kicks_share_one_per_round_cap(self):
+        self._shared_cap_team("team-cap")
+
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 2):
+            result = self._patrol(dry_run=False)
+
+        # Premium 先踢 1 个，超员那段只剩 1 个名额：最新的那个。
+        self.assertEqual(self._calls("remove_member"),
+                         [("remove_member", "u-p"), ("remove_member", "u-new")])
+        self.assertEqual(result["kicked"], 2)
+        capped = [l for l in self._logs("patrol_kick_batch_capped") if "over_by=" in l["detail"]]
+        self.assertEqual(len(capped), 1)
+        self.assertIn("capped_to=1", capped[0]["detail"])
+        self.assertIn("premium_kicks=1", capped[0]["detail"])
+
+    def test_dry_run_reports_the_same_shared_cap(self):
+        self._shared_cap_team("team-cap-dry")
+
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 2):
+            result = self._patrol(dry_run=True)
+
+        self.assertEqual(RecordingClient.calls, [])
+        self.assertEqual(result["would_kick"], 2)
+        would = [l["target_email"] for l in self._logs("patrol_would_kick")]
+        self.assertEqual(would, ["premiumguy@example.com", "newer@example.com"])
+
+    def test_premium_kick_that_never_reached_upstream_leaves_the_cap(self):
+        # Premium 那个人这一轮被推迟（快照开始之后 TeamBoss 动过他的席位），请求没发出去：
+        # 超员那段仍有 2 个名额。
+        self._shared_cap_team("team-cap-deferred")
+        self._log("team-cap-deferred", "change_seat", "premiumguy@example.com",
+                  "user_id=u-p, seat_type=default, from_seat_type=prolite, policy=confirm",
+                  "failed", created_at=(datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat())
+
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 2):
+            self._patrol(dry_run=False)
+
+        self.assertEqual(sorted(self._calls("remove_member")),
+                         [("remove_member", "u-new"), ("remove_member", "u-old")])
+
+
 if __name__ == "__main__":
     unittest.main()
