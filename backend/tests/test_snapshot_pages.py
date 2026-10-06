@@ -98,5 +98,84 @@ class SnapshotPageAccumulatorTests(unittest.TestCase):
         self.assertTrue(pages.add({"invites": [{"email_address": "a@example.com"}], "total": 1}))
 
 
+class SnapshotRowIdentityTests(unittest.TestCase):
+    """每行要认得出是谁；同一份名单里 id / 邮箱不能重复（跨页也算）。"""
+
+    def assert_incomplete(self, pages, *, limit=100):
+        acc = SnapshotPageAccumulator("users", limit=limit)
+        with self.assertRaises(SnapshotPageError):
+            for page in pages:
+                acc.add(page)
+
+    def test_row_without_identity_is_incomplete(self):
+        for row in (
+            {},
+            {"id": "", "email": ""},
+            {"id": "   ", "user_id": " ", "email": "  ", "email_address": ""},
+            {"id": None, "email": None, "role": "standard-user"},
+        ):
+            with self.subTest(row=row):
+                self.assert_incomplete([{"items": _members(1) + [row], "total": 2}])
+
+    def test_owner_twice_is_incomplete(self):
+        owner = {"id": "u-owner", "email": "owner@example.com", "role": "account-owner"}
+        self.assert_incomplete([{"items": [owner, dict(owner)], "total": 2}])
+
+    def test_same_id_with_different_emails_is_incomplete(self):
+        self.assert_incomplete([{
+            "items": [{"id": "u1", "email": "a@example.com"}, {"id": "u1", "email": "b@example.com"}],
+            "total": 2,
+        }])
+
+    def test_same_email_in_different_case_is_incomplete(self):
+        self.assert_incomplete([{
+            "items": [
+                {"id": "u1", "email": "Same@Example.com"},
+                {"id": "u2", "email": " same@example.COM "},
+            ],
+            "total": 2,
+        }])
+
+    def test_duplicate_split_across_pages_is_incomplete(self):
+        first = _members(2)
+        self.assert_incomplete(
+            [
+                {"items": first, "total": 3},
+                {"items": [{"id": "u-new", "email": first[0]["email"].upper()}], "total": 3},
+            ],
+            limit=2,
+        )
+
+    def test_fallback_identity_fields_count_for_duplicates(self):
+        # id 落空时取 user_id，email 落空时取 email_address。
+        self.assert_incomplete([{
+            "items": [{"user_id": "u1", "email": "a@example.com"}, {"id": "u1", "email": "b@example.com"}],
+            "total": 2,
+        }])
+        acc = SnapshotPageAccumulator("invites", limit=100)
+        with self.assertRaises(SnapshotPageError):
+            acc.add({
+                "invites": [{"email_address": "x@example.com"}, {"email": "X@example.com"}],
+                "total": 2,
+            })
+
+    def test_rows_with_only_one_identity_field_are_fine(self):
+        acc = SnapshotPageAccumulator("invites", limit=100)
+        self.assertTrue(acc.add({
+            "items": [{"email_address": "a@example.com"}, {"id": "inv-2"}, {"user_id": "u-3"}],
+            "total": 3,
+        }))
+
+    def test_realistic_multi_page_list_is_complete(self):
+        owner = {"id": "user-owner", "email": "Owner@Example.com", "role": "account-owner"}
+        rest = _members(204)
+        rows = [owner] + rest
+        acc = SnapshotPageAccumulator("users", limit=100)
+        self.assertFalse(acc.add({"items": rows[:100], "total": 205, "limit": 100, "offset": 0}))
+        self.assertFalse(acc.add({"items": rows[100:200], "total": 205, "limit": 100, "offset": 100}))
+        self.assertTrue(acc.add({"items": rows[200:], "total": 205, "limit": 100, "offset": 200}))
+        self.assertEqual(len(acc.items), 205)
+
+
 if __name__ == "__main__":
     unittest.main()

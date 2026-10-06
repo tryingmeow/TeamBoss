@@ -16,6 +16,12 @@
 - 报了总数：累计条数**恰好等于**总数才算完；超过总数、或者凑够之前来了短页，都是不完整。
 - 没报总数：短页（不足 ``limit`` 条，含空页）就是最后一页。
 - 翻页次数的上限由调用方的循环决定，翻到上限还没结束同样是不完整。
+- 每一行都要认得出是谁：id 取 ``id``（去空白后非空的字符串），没有再取 ``user_id``；
+  邮箱取 ``email``（去空白、转小写后非空），没有再取 ``email_address``。id 和邮箱都没有的行
+  （例如 ``{}``）让整份名单不完整——它照样被算进条数、凑满 total，却对不上任何人。
+- 同一份名单（一个累加器，跨页也算）里两行 id 相同、或邮箱相同（不分大小写），整份名单
+  不完整。绝不悄悄去重：重复行同样凑了条数，掩盖的是没拉到的那个人；重复的 owner 还会
+  让按人头数的席位判断多算一个，把正当的人当成超员。成员名单和邀请名单同一条规则。
 """
 from __future__ import annotations
 
@@ -42,6 +48,20 @@ def _page_total(data: dict) -> tuple[bool, Optional[int]]:
     return True, raw
 
 
+def _row_text(item: dict, *keys: str) -> str:
+    """按顺序取第一个去空白后非空的字符串字段；都没有返回空串。"""
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def row_identity(item: dict) -> tuple[str, str]:
+    """一行名单的 (id, 小写邮箱)；拿不到的一项是空串。"""
+    return _row_text(item, "id", "user_id"), _row_text(item, "email", "email_address").lower()
+
+
 class SnapshotPageAccumulator:
     """按页累积一份名单，并判定它什么时候完整。
 
@@ -62,6 +82,8 @@ class SnapshotPageAccumulator:
         self._pages = 0
         self._has_total: Optional[bool] = None
         self._total: Optional[int] = None
+        self._ids: set[str] = set()
+        self._emails: set[str] = set()
 
     @property
     def next_offset(self) -> int:
@@ -88,6 +110,7 @@ class SnapshotPageAccumulator:
             raise SnapshotPageError("unrecognized member/invite entry structure")
         if len(page_items) > self.limit:
             raise SnapshotPageError("member/invite page larger than the requested limit")
+        self._check_identities(page_items)
 
         has_total, total = _page_total(data)
         if self._pages == 0:
@@ -107,3 +130,18 @@ class SnapshotPageAccumulator:
                 raise SnapshotPageError("truncated member/invite response before reported total")
             return False
         return short_page
+
+    def _check_identities(self, page_items: list[dict]) -> None:
+        """每行要有 id 或邮箱；同一份名单里 id、邮箱都不能重复（跨页也算）。"""
+        for item in page_items:
+            row_id, email = row_identity(item)
+            if not row_id and not email:
+                raise SnapshotPageError("member/invite entry has neither id nor email")
+            if row_id and row_id in self._ids:
+                raise SnapshotPageError("duplicate member/invite id in the list")
+            if email and email in self._emails:
+                raise SnapshotPageError("duplicate member/invite email in the list")
+            if row_id:
+                self._ids.add(row_id)
+            if email:
+                self._emails.add(email)

@@ -517,8 +517,8 @@ class StrictRefreshPagingTest(_Fixture):
         items, error, _ = self._fetch([{"error": "Unauthorized"}])
         self.assertEqual((items, error), (None, "Unauthorized"))
 
-        full_page = {"items": [{"id": "u-a"}, {"id": "u-b"}]}
-        items, error, requested = self._fetch([full_page] * 5, limit=2, max_items=6)
+        full_pages = [{"items": [{"id": f"u-{n}a"}, {"id": f"u-{n}b"}]} for n in range(5)]
+        items, error, requested = self._fetch(full_pages, limit=2, max_items=6)
         self.assertIsNone(items)
         self.assertIn("exceeds the paging limit", error)
         self.assertEqual(requested, [(0, 2), (2, 2), (4, 2)])
