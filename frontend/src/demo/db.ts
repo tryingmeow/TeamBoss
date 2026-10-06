@@ -5,7 +5,7 @@
  * Shapes mirror the backend tables closely enough that the view functions in
  * `views.ts` can derive every API response the way the backend does.
  */
-import type { CodeSeatType, SeatType, Settings, Team } from '../types';
+import type { CodeSeatType, Settings, Team } from '../types';
 import type {
   AccessTokenListItem,
   FinanceInvoiceRow,
@@ -50,7 +50,8 @@ export interface DemoMember {
 export interface DemoInvite {
   id: string;
   email: string;
-  seat_type: SeatType;
+  /** Raw upstream seat type; may be an unknown one such as `automation`. */
+  seat_type: string;
   created_time: string;
   expires_at: string | null;
   source: MemberSource | null;
@@ -453,6 +454,8 @@ const KICKED_SPECS: Array<{ slug: string; source: KickSource; kickedHoursAgo: nu
   { slug: 'orion', source: 'patrol', kickedHoursAgo: 49, grantedDaysBefore: 0 },
   { slug: 'vega', source: 'auto_expire', kickedHoursAgo: 150, grantedDaysBefore: 30 },
   { slug: 'berlin', source: 'admin', kickedHoursAgo: 8, grantedDaysBefore: 360 },
+  // A Premium outsider removed by patrol (Zenith is not exempt); the log row carries seat_type=prolite.
+  { slug: 'zenith', source: 'patrol', kickedHoursAgo: 20, grantedDaysBefore: 0 },
 ];
 
 export function createDemoDb(now: number): DemoDb {
@@ -535,7 +538,7 @@ export function createDemoDb(now: number): DemoDb {
     patrol: {
       kick_enabled: true,
       baseline_at: isoAt(now - 19 * DAY - 3 * HOUR),
-      exempt_team_ids: [teamIdFor(4), teamIdFor(7)],
+      exempt_team_ids: [teamIdFor(4), teamIdFor(7), teamIdFor(14)],
       strict_mode_enabled: false,
     },
     tg: {

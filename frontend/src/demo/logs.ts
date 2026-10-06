@@ -240,7 +240,11 @@ export function buildLogs(db: DemoDb): DemoLogRow[] {
         log(ago - 4, { team_id, action: 'member_watch_kick', target_email: k.email, detail: 'timed_out=False', trigger_type: 'scheduler' });
       } else if (k.kick_source === 'patrol') {
         log(ago + 31, { team_id, action: 'member_detect', detail: 'detected 1 untracked member(s)', trigger_type: 'scheduler' });
-        log(ago, { team_id, action: 'patrol_kick', target_email: k.email, detail: `user_id=${k.user_id}`, trigger_type: 'patrol' });
+        const premium = record === T('zenith');
+        log(ago, {
+          team_id, action: 'patrol_kick', target_email: k.email, trigger_type: 'patrol',
+          detail: `user_id=${k.user_id}` + (premium ? ', seat_type=prolite, reason=premium_outsider' : ''),
+        });
       } else {
         log(ago, { team_id, action: 'member_detect_absent', detail: 'marked 1 absent member(s) as kicked', trigger_type: 'scheduler' });
       }
@@ -359,13 +363,20 @@ export function buildLogs(db: DemoDb): DemoLogRow[] {
     });
     log(0.9 * D, {
       team_id: id('zenith'), action: 'redeem_seat_type_mismatch', target_email: zenithPremium.email, result: 'failed',
-      detail: 'seat_type=default, from_seat_type=prolite',
-      error_message: '兑换码是 ChatGPT 码，你当前是 Premium 席位，不能用它续期。',
+      detail: 'seat_type=default, member_seat_type=prolite, reason=seat_type_mismatch, token_use_id=117',
+      error_message: '兑换码是 ChatGPT 码，该成员当前是 Premium 席位，未续期，兑换码未使用。',
     });
   }
   log(0.35 * D, {
     action: 'redeem_no_premium_seat', target_email: 'wait.premium@example.com', result: 'failed',
     detail: 'seat_type=prolite', error_message: '没有可用 Premium 席位，兑换码未使用',
+  });
+  log(5.2 * D, {
+    team_id: id('quasar'), action: 'patrol_kick_batch_capped', trigger_type: 'patrol',
+    detail: 'reason=premium_outsider, batch_guard=premium, candidates=5, team_size=8, capped_to=0',
+  });
+  log(0.5 * D, {
+    action: 'create_access_token', detail: 'token_id=15, grant_expires_in=30d, token_ttl=14d, seat_type=prolite',
   });
   const quasarPremium = T('quasar').members.find((m) => m.seat_type === 'prolite');
   if (quasarPremium) {

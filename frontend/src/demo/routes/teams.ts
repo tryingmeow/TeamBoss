@@ -5,7 +5,7 @@ import { findTeam, nextId, recount, type DemoDb, type DemoInvite, type DemoTeam 
 import { bodyObject, bodyString, fail, ok, queryFlag, type DemoContext, type DemoResponse, type DemoRoute } from '../http';
 import { appendLog } from '../logs';
 import { DAY, durationMs, isNeverDuration, isoAt } from '../time';
-import { isOverage, overageGate, parseSeat, policyOf, seatLabel } from '../overage';
+import { isOverage, isRegistrySeat, overageGate, parseSeat, policyOf, seatLabel } from '../overage';
 import { availableGptSeats, expiryState, membersData, teamView, workspaceSettings } from '../views';
 
 const AUTH_REJECTED = { code: 'team_auth_rejected', message: '登录已失效，请重新导入' };
@@ -322,7 +322,16 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   } catch (error) {
     return fail(400, (error as Error).message);
   }
-  if (record.members.some((m) => m.email === email) || record.invites.some((i) => i.email === email)) {
+  const pending = record.invites.find((i) => i.email === email);
+  if (pending && !isRegistrySeat(pending.seat_type)) {
+    // Resending an invite whose seat type TeamBoss does not know is never attempted.
+    return fail(409, {
+      code: 'seat_type_unknown',
+      message: `该邀请的席位类型是「${seatLabel(pending.seat_type)}」，TeamBoss 不会重发或改动这类席位。`,
+      seat_type: pending.seat_type,
+    });
+  }
+  if (record.members.some((m) => m.email === email) || pending) {
     return fail(409, EMAIL_ALREADY_IN_TEAM);
   }
   const refused = overageGate({
@@ -536,9 +545,16 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
   const remaining: string[] = [];
 
   // Overfill never touches `forbid` Teams; `confirm` Teams only after the operator confirmed.
-  const overfillTargets = (policies: OveragePolicy[]) => candidates.filter((t) => policies.includes(policyOf(t)));
-  const overfillNow = overfillTargets(allowOverage ? ['auto', 'confirm'] : ['auto']);
-  const confirmTeams = overfillTargets(['confirm']);
+  // The confirmation is bound to the plan the operator saw: only the listed `confirm` Teams may be overfilled.
+  const listedIds = new Set(
+    Array.isArray(body.overage_team_ids) ? body.overage_team_ids.filter((v): v is string => typeof v === 'string') : [],
+  );
+  const overfillNow = candidates.filter((t) => {
+    const policy = policyOf(t);
+    return policy === 'auto' || (allowOverage && policy === 'confirm' && listedIds.has(t.team.id));
+  });
+  // Confirm Teams that could take the leftovers but were not confirmed (all of them before the first ask).
+  const unconfirmed = candidates.filter((t) => policyOf(t) === 'confirm' && !(allowOverage && listedIds.has(t.team.id)));
 
   emails.forEach((email) => {
     if (!EMAIL_RE.test(email)) {
@@ -579,12 +595,12 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
     added.push({ email, team_id: target.team.id, team_name: target.team.name, expires_at: expiresAt, overage });
   });
 
-  if (remaining.length > 0 && !allowOverage && confirmTeams.length > 0) {
+  if (remaining.length > 0 && unconfirmed.length > 0) {
     const free = candidates.reduce((sum, t) => sum + availableGptSeats(t), 0);
-    const first = confirmTeams[0];
+    const first = unconfirmed[0];
     return fail(409, {
       code: 'require_overage_confirmation',
-      message: (added.length ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个没有空位。` : '空闲 ChatGPT 席位不足。') +
+      message: (allowOverage ? '你确认过的超员计划已经不成立，需要重新确认。' : '') + (added.length ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个没有空位。` : '空闲 ChatGPT 席位不足。') +
         `继续会在「${first.team.name}」超员 ${remaining.length} 个，ChatGPT 自动加购 ${remaining.length} 个 ChatGPT 席位并扣费。`,
       seat_type: 'default',
       policy: 'confirm',

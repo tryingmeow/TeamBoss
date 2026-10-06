@@ -83,6 +83,9 @@ function createToken(ctx: DemoContext): DemoResponse {
     last_used_at: null,
   };
   ctx.db.tokens.unshift(record);
+  appendLog(ctx.db, {
+    action: 'create_access_token', detail: `token_id=${id}, grant_expires_in=${grant}, token_ttl=${ttl}, seat_type=${seatType}`,
+  });
   const response: AccessTokenResponse & { seat_type: CodeSeatType } = {
     id,
     token,
@@ -351,7 +354,8 @@ function redeem(ctx: DemoContext): DemoResponse {
       const message = `兑换码是 ${seatLabel(codeSeat)} 码，你当前是 ${seatLabel(current)} 席位，不能用它续期。`;
       appendLog(db, {
         team_id: record.team.id, action: 'redeem_seat_type_mismatch', target_email: email,
-        detail: `seat_type=${codeSeat}, from_seat_type=${current}`, result: 'failed', error_message: message,
+        detail: `seat_type=${codeSeat}, member_seat_type=${current}, reason=seat_type_mismatch`, result: 'failed',
+        error_message: `兑换码是 ${seatLabel(codeSeat)} 码，该成员当前是 ${seatLabel(current)} 席位，未续期，兑换码未使用。`,
       });
       return fail(409, message);
     }

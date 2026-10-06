@@ -45,7 +45,7 @@ function getSettings(ctx: DemoContext): DemoResponse {
     api_concurrency: entry(String(settings.api_concurrency)),
     expiry_kick_mode: entry(settings.expiry_kick_mode),
     expiry_kick_delay_hours: entry(String(settings.expiry_kick_delay_hours)),
-    skip_overage_confirmation: entry(settings.skip_overage_confirmation ? 'true' : 'false'),
+    skip_overage_confirmation: entry('false'),
   });
 }
 
@@ -73,9 +73,10 @@ function patchSettings(ctx: DemoContext): DemoResponse {
     next.expiry_kick_mode = mode === 'delay_hours' ? 'delay_hours' : 'day_end';
     updates.expiry_kick_mode = next.expiry_kick_mode;
   }
+  // Retired: the per-Team overage policy replaced it. Accepted for old clients, never stored as true.
   if (typeof body.skip_overage_confirmation === 'boolean') {
-    next.skip_overage_confirmation = body.skip_overage_confirmation;
-    updates.skip_overage_confirmation = body.skip_overage_confirmation ? 'true' : 'false';
+    next.skip_overage_confirmation = false;
+    updates.skip_overage_confirmation = 'false';
   }
   ctx.db.settings = next;
   ctx.db.settingsUpdatedAt = isoAt(Date.now());

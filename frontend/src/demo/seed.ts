@@ -5,7 +5,7 @@
  * Each team spec exists to exercise a specific UI state; the comment on the
  * spec says which one.
  */
-import type { OveragePolicy, SeatType, WorkspaceDefaultSeatType } from '../types';
+import type { OveragePolicy, WorkspaceDefaultSeatType } from '../types';
 import { DAY, HOUR } from './time';
 
 export interface TeamSpec {
@@ -21,7 +21,7 @@ export interface TeamSpec {
   gptMembers: number;
   /** Codex (`usage_based`) seat members. */
   codexMembers: number;
-  invites: SeatType[];
+  invites: string[];
   codexEnabled: boolean;
   defaultSeat: WorkspaceDefaultSeatType | null;
   currency: string;
@@ -165,7 +165,7 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // Full ChatGPT (6/6) with policy confirm and no Premium seat: every billed add asks first.
-    n: 11, slug: 'atlas', name: 'Atlas-11', remark: '超员需确认', status: 'active', policy: 'confirm',
+    n: 11, slug: 'atlas', name: 'Atlas-11', remark: '运营组', status: 'active', policy: 'confirm',
     entitled: 6, gptMembers: 5, codexMembers: 1, invites: ['default'],
     codexEnabled: true, defaultSeat: 'default',
     currency: 'USD', symbol: '$', period: 'monthly', price: 30,
@@ -175,7 +175,7 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // Full ChatGPT (4/4) with policy auto: adds go straight through and ChatGPT charges for the extra seat.
-    n: 12, slug: 'helix', name: 'Helix-12', remark: '超员自动', status: 'active', policy: 'auto',
+    n: 12, slug: 'helix', name: 'Helix-12', remark: '研发备用', status: 'active', policy: 'auto',
     entitled: 4, gptMembers: 4, codexMembers: 0, invites: [],
     codexEnabled: false, defaultSeat: 'default',
     currency: 'USD', symbol: '$', period: 'monthly', price: 30,
@@ -196,10 +196,11 @@ export const TEAM_SPECS: TeamSpec[] = [
     invoice: 'match', forcedExpiries: [30 * HOUR],
   },
   {
-    // ChatGPT full + forbid, one Premium seat still free, one member on the unknown `automation` seat,
+    // ChatGPT full + forbid, one Premium seat still free, patrol-exempt so the Premium outsider stays visible, one member on the unknown `automation` seat,
     // and the Premium member was added outside the panel (patrol alert only).
-    n: 14, slug: 'quasar', name: 'Quasar-14', remark: '禁止超员', status: 'active', policy: 'forbid',
-    entitled: 5, gptMembers: 5, codexMembers: 1, invites: [],
+    n: 14, slug: 'quasar', name: 'Quasar-14', remark: '外包项目', status: 'active', policy: 'forbid',
+    // One pending invite on the unknown `automation` seat: resending it answers seat_type_unknown.
+    entitled: 5, gptMembers: 5, codexMembers: 1, invites: ['automation'],
     premiumPaid: 2, premiumMembers: 1, unknownMembers: 1, premiumDetected: true,
     codexEnabled: true, defaultSeat: 'default',
     currency: 'USD', symbol: '$', period: 'monthly', price: 30,
