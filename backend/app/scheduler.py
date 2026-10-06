@@ -23,6 +23,7 @@ from .services.seat_capacity import (
     seat_type_count_from_seat_counts,
     subscription_column_updates,
 )
+from .services.renewal_reminders import run_renewal_idle_seat_reminders_sync
 from .services.tg_member_bindings import (
     deactivate_member_binding_if_inactive_sync,
     run_member_expiry_reminders_sync,
@@ -2055,6 +2056,22 @@ def member_expiry_reminder_job():
         )
 
 
+def renewal_idle_seat_reminder_job():
+    """续费前 3 天内还有没人用的计费席位就提醒管理员（只读本地已同步的数据，见 renewal_reminders）。
+    每个 Team 自己的送达记录写在 renewal_idle_seat_reminder 日志里，这里只记整轮崩溃。"""
+    try:
+        run_renewal_idle_seat_reminders_sync()
+    except Exception as exc:
+        _log_operation_sync(
+            None,
+            "renewal_idle_seat_reminder",
+            None,
+            None,
+            "failed",
+            str(exc),
+        )
+
+
 def pending_redemption_reconciliation_job():
     try:
         # 延迟导入避免 scheduler -> routes -> main 的模块环；job 真正运行时
@@ -2126,6 +2143,13 @@ def start_scheduler():
         "interval",
         minutes=5,
         id="member_expiry_reminder_job",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        renewal_idle_seat_reminder_job,
+        "interval",
+        minutes=30,
+        id="renewal_idle_seat_reminder_job",
         replace_existing=True,
     )
     # 汇率：每天一次，并在启动后 1 分钟内补刷一次（仅当库里的汇率已超过 24h）。

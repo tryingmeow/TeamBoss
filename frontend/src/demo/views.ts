@@ -3,7 +3,7 @@
  * endpoint (see backend/app/routes/*.py) so derived numbers stay consistent
  * across pages after a mutation.
  */
-import type { Member, MembersData, PendingInvite, Team, TeamWorkspaceSettings } from '../types';
+import type { Member, MembersData, PendingInvite, RenewalIdleSeatLine, RenewalIdleSeats, Team, TeamWorkspaceSettings } from '../types';
 import type {
   FinanceAlert,
   FinanceDailyTotal,
@@ -36,6 +36,44 @@ function pendingInviteCounts(record: DemoTeam): Record<string, number> {
   return counts;
 }
 
+const RENEWAL_REMINDER_WINDOW_MS = 3 * DAY;
+const BILLED_SEAT_TYPES = ['default', 'prolite'] as const;
+
+/**
+ * Mirrors backend services/renewal_reminders.renewal_idle_seats: inside the 3-day renewal window,
+ * idle = renewal seats (renewal_requested, else paid) − members − pending invites of that type
+ * (an invite without a type holds one of every billed type), floored at 0.
+ */
+export function renewalIdleSeats(record: DemoTeam, now = Date.now()): RenewalIdleSeats | null {
+  const { team } = record;
+  if (!team.will_renew || team.sync_suspended_at || !team.active_until) return null;
+  const until = Date.parse(team.active_until);
+  if (Number.isNaN(until) || until <= now || until > now + RENEWAL_REMINDER_WINDOW_MS) return null;
+  const capacity = team.seat_capacity;
+  const counts = team.seat_type_counts;
+  if (!capacity || Object.keys(counts).length === 0) return null;
+  const lines: RenewalIdleSeatLine[] = [];
+  BILLED_SEAT_TYPES.forEach((seatType) => {
+    const entry = capacity[seatType];
+    const inUse = counts[seatType];
+    if (!entry || inUse === undefined) return;
+    const renewing = entry.renewal_requested === undefined ? entry.paid : entry.renewal_requested;
+    if (renewing === null || (renewing === 0 && entry.paid === 0)) return;
+    const pending = record.invites.filter((invite) => !invite.seat_type || invite.seat_type === seatType).length;
+    lines.push({
+      seat_type: seatType,
+      paid: entry.paid,
+      renewing,
+      in_use: inUse,
+      pending,
+      idle: Math.max(0, renewing - inUse - pending),
+    });
+  });
+  const totalIdle = lines.reduce((sum, line) => sum + line.idle, 0);
+  if (totalIdle <= 0) return null;
+  return { renews_at: isoAt(until).replace(/\.\d{3}Z$/, 'Z'), total_idle: totalIdle, lines };
+}
+
 export function teamView(record: DemoTeam, sortedEmails = false): Team {
   const team = {
     ...record.team,
@@ -45,6 +83,7 @@ export function teamView(record: DemoTeam, sortedEmails = false): Team {
       : null,
     seat_type_counts: { ...record.team.seat_type_counts },
     pending_invite_counts: pendingInviteCounts(record),
+    renewal_idle_seats: renewalIdleSeats(record),
   };
   team.cached_member_emails = sortedEmails ? [...record.team.cached_member_emails].sort() : [...record.team.cached_member_emails];
   return team;

@@ -89,6 +89,7 @@ const ACTION_LABELS: Record<string, string> = {
   member_watch_error: '确认操作出错',
   member_watch_job_error: '确认任务出错',
   tg_member_expiry_reminder: 'TG 到期提醒',
+  renewal_idle_seat_reminder: '续费前空闲席位提醒',
   pending_redemption_reconciliation: '核对待确认兑换',
 
   // Patrol
@@ -286,6 +287,9 @@ const ALERT_KEYS: Record<string, string> = {
 /** key → (value → display). Returning null hides the pair. */
 const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   delivered_to: (v) => `送达 ${v} 人`,
+  renews_at: (v) => `续费 ${timeLabel(v)}`,
+  idle_default: (v) => `ChatGPT 空闲 ${v}`,
+  idle_prolite: (v) => `Premium 空闲 ${v}`,
   timed_out: (v) => (v.toLowerCase() === 'true' ? '等待超时' : '已在 ChatGPT 生效'),
   seat_type: (v) => `席位 ${seatLabel(v)}`,
   from_seat_type: (v) => `原席位 ${seatLabel(v)}`,

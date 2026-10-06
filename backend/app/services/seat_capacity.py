@@ -94,8 +94,16 @@ def _non_negative_int(value: Any) -> int | None:
     return value if value >= 0 else None
 
 
-def parse_seat_capacity(subscription: Any) -> dict[str, dict[str, int]] | None:
-    """``subscription.seat_capacity`` → ``{type: {"paid": int, "available": int}}``。
+def _renewal_requested_field(source: dict[str, Any], entry: dict[str, Any]) -> None:
+    """``renewal_requested``（下个计费周期要续费的席位数）原样带上：缺字段不写；
+    在但不是非负整数写 None（= 这个类型的续费席位数未知，读的一方不能拿 paid 顶替）。"""
+    if "renewal_requested" in source:
+        entry["renewal_requested"] = _non_negative_int(source.get("renewal_requested"))
+
+
+def parse_seat_capacity(subscription: Any) -> dict[str, dict[str, Any]] | None:
+    """``subscription.seat_capacity`` → ``{type: {"paid": int, "available": int}}``，
+    上游给了 ``renewal_requested`` 时一并带上（见 ``_renewal_requested_field``）。
 
     字段缺失或不是列表 → None（整体未知）。单个条目结构不对（type 不是非空字符串、
     paid / available 不是非负整数）就丢掉那一条，那个类型按未知处理。
@@ -120,12 +128,17 @@ def parse_seat_capacity(subscription: Any) -> dict[str, dict[str, int]] | None:
         key = seat_type.strip()
         previous = entries.get(key)
         if previous is None or available < previous["available"]:
-            entries[key] = {"paid": paid, "available": available}
+            entry: dict[str, Any] = {"paid": paid, "available": available}
+            _renewal_requested_field(item, entry)
+            entries[key] = entry
     return entries
 
 
-def cached_seat_capacity(raw: Any) -> dict[str, dict[str, int]] | None:
-    """读 ``teams.seat_capacity_json``：结构不对一律 None（未知）。"""
+def cached_seat_capacity(raw: Any) -> dict[str, dict[str, Any]] | None:
+    """读 ``teams.seat_capacity_json``：结构不对一律 None（未知）。
+
+    条目里的 ``renewal_requested`` 规则同 ``parse_seat_capacity``：缺 = 没存过，None = 存过但不可信。
+    """
     if not raw:
         return None
     try:
@@ -142,7 +155,9 @@ def cached_seat_capacity(raw: Any) -> dict[str, dict[str, int]] | None:
         available = _non_negative_int(value.get("available"))
         if paid is None or available is None:
             continue
-        entries[key] = {"paid": paid, "available": available}
+        entry: dict[str, Any] = {"paid": paid, "available": available}
+        _renewal_requested_field(value, entry)
+        entries[key] = entry
     return entries
 
 

@@ -152,6 +152,7 @@ def report_team_failure_sync(
     notify_interval: Optional[timedelta] = None,
     render: Optional[Callable[[bool], str]] = None,
     notify: Optional[Callable[[str], int]] = None,
+    log_delivery: bool = True,
 ) -> dict:
     """Open/update an incident and notify only when it has not been delivered.
 
@@ -164,6 +165,10 @@ def report_team_failure_sync(
     families that are not failures (e.g. patrol's Premium seat alerts); ``notify``
     replaces notify_admins_sync and must return the number of admins reached.
     The incident / throttle bookkeeping is the same either way.
+
+    ``log_delivery=False`` skips the generic ``team_health_alert`` operation-log
+    row (written on every send attempt, including every undelivered retry); the
+    caller writes its own row from the returned outcome instead.
     """
     if not team_id:
         return {"notified": 0, "reason": "missing_team_id"}
@@ -295,24 +300,26 @@ def report_team_failure_sync(
                         (now, now, team_id, alert_key),
                     )
                     conn.commit()
+                    if log_delivery:
+                        _log_delivery(
+                            conn,
+                            team_id,
+                            "team_health_alert",
+                            f"key={alert_key}, source={source}, delivered_to={sent}"
+                            + (", reminder=1" if is_reminder else ""),
+                            "success",
+                        )
+                    return {"notified": sent, "reason": "sent", "failure_count": failure_count}
+
+                if log_delivery:
                     _log_delivery(
                         conn,
                         team_id,
                         "team_health_alert",
-                        f"key={alert_key}, source={source}, delivered_to={sent}"
-                        + (", reminder=1" if is_reminder else ""),
-                        "success",
+                        f"key={alert_key}, source={source}, delivered_to=0",
+                        "failed",
+                        "Telegram alert was not delivered",
                     )
-                    return {"notified": sent, "reason": "sent", "failure_count": failure_count}
-
-                _log_delivery(
-                    conn,
-                    team_id,
-                    "team_health_alert",
-                    f"key={alert_key}, source={source}, delivered_to=0",
-                    "failed",
-                    "Telegram alert was not delivered",
-                )
                 return {"notified": 0, "reason": "not_delivered", "failure_count": failure_count}
             except Exception as exc:
                 return {"notified": 0, "reason": "internal_error", "error": str(exc)}

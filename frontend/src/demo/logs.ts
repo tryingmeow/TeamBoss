@@ -7,6 +7,7 @@
 import type { OperationLog } from '../api/client';
 import { findTeamBySlug, type DemoDb, type DemoTeam } from './db';
 import { DAY, HOUR, MINUTE, isoAt, shanghaiIso } from './time';
+import { renewalIdleSeats } from './views';
 
 /** One `operation_logs` row. Team name/remark/owner/status are joined when read. */
 export type DemoLogRow = Pick<
@@ -176,6 +177,21 @@ export function buildLogs(db: DemoDb): DemoLogRow[] {
       detail:
         `trigger=scheduled_expiry_refresh; access_changed=1; session_changed=1; access_iat=${isoAt(at)}; ` +
         `access_exp=${isoAt(at + 10 * DAY)}; ${refreshDiag(200, 'present', at)}`,
+    });
+  });
+
+  // ── Renewal reminder: every team inside the 3-day window with idle billed seats (Tokyo Studio in the
+  // seed). The window opened while the bot was already off, so the one row says it was not delivered. ──
+  db.teams.forEach((record) => {
+    const idle = renewalIdleSeats(record, now);
+    if (!idle) return;
+    const windowOpenedAgo = Math.floor((now - (Date.parse(idle.renews_at) - 3 * DAY)) / MINUTE) - 12;
+    if (windowOpenedAgo <= 0) return;
+    const idlePairs = idle.lines.map((line) => `idle_${line.seat_type}=${line.idle}`).join(', ');
+    log(windowOpenedAgo, {
+      team_id: record.team.id, action: 'renewal_idle_seat_reminder',
+      detail: `renews_at=${idle.renews_at}, ${idlePairs}, delivered_to=0`,
+      result: 'skipped', error_message: 'Telegram 未送达，下一轮重试', trigger_type: 'scheduler',
     });
   });
 

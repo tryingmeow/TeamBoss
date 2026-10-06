@@ -11,15 +11,11 @@ from ..database import get_db, log_operation
 from ..services.fx import DEFAULT_FX_RATES, FxRefreshError, convert, get_fx_config, refresh_fx_rates, save_fx_rates
 from ..services.invoices import classify_latest_invoice, refresh_invoices_for_team_blocking
 from ..seat_types import DEFAULT_SEAT_TYPE, PREMIUM_SEAT_TYPE
-from ..services.pricing import discounted_monthly_total
+from ..services.pricing import PREMIUM_SEAT_PRICE_ESTIMATE_USD, discounted_monthly_total
 from ..services.seat_capacity import cached_seat_capacity
 from ..services.subscription_status import subscription_status_display
 
 router = APIRouter(prefix="/api/finance", tags=["finance"])
-
-# 上游没有 Premium 的价格接口：月付 125 美元是按官方定价写死的估算，界面必须标「估算」。
-PREMIUM_SEAT_PRICE_ESTIMATE_USD = 125
-
 
 class FinanceSettingsUpdate(BaseModel):
     base_currency: Optional[str] = None

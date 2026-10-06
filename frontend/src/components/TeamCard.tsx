@@ -89,6 +89,19 @@ function BilledSeatBlock({
   );
 }
 
+/** Tooltip for the 「续费前可减 K 席」 chip: per billed type, then the renewal time and what to do. */
+function renewalIdleTitle(idle: NonNullable<Team['renewal_idle_seats']>): string {
+  const lines = idle.lines.map((line) => {
+    const paid = line.renewing === line.paid ? `已付 ${line.paid}` : `已付 ${line.paid} · 续费 ${line.renewing}`;
+    return `${formatSeatTypeLabel(line.seat_type)}：${paid} · 在用 ${line.in_use} · 待接受 ${line.pending} · 空闲 ${line.idle}`;
+  });
+  return [
+    ...lines,
+    `续费时间：${formatBeijingDateTime(idle.renews_at)}`,
+    '续费时空闲席位照样扣费。不需要的话，在 ChatGPT 后台「管理席位」里减少，下个计费周期生效。',
+  ].join('\n');
+}
+
 function formatShortDate(value: string | Date | null): string {
   if (!value) return '—';
   const d = new Date(value);
@@ -517,6 +530,8 @@ export default function TeamCard({
   const seatBlocks = 1 + (showCodex ? 1 : 0) + (premium ? 1 : 0);
   // 默认的「超员需确认」不挂标签；另外两种会改变花钱方式，挂在卡片上一眼能看到。
   const overagePolicy = parseOveragePolicy(team.overage_policy);
+  // 续费前 3 天内还有没人用的计费席位（后端判定，窗口外 / 数据不全时为 null）。
+  const renewalIdle = team.renewal_idle_seats ?? null;
   const overagePolicyOption = OVERAGE_POLICY_OPTIONS.find((option) => option.value === overagePolicy)!;
 
   const renewalLabel = isSubscriptionExpired || isNonRenewing ? '到期' : '续费';
@@ -674,6 +689,11 @@ export default function TeamCard({
                 title={`连续同步失败${syncFailingFor ? ` · ${syncFailingFor}` : ''}，已暂停自动同步`}
               >
                 同步已暂停
+              </span>
+            )}
+            {renewalIdle && renewalIdle.total_idle > 0 && (
+              <span className={`${PILL} ${TONE.warning}`} title={renewalIdleTitle(renewalIdle)}>
+                续费前可减 {renewalIdle.total_idle} 席
               </span>
             )}
             <span className={`${PILL} ${team.is_codex_enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral}`}>

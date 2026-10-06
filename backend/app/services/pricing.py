@@ -2,6 +2,9 @@ from typing import Any
 
 from ..chatgpt_limiter import run_chatgpt_call
 
+# 上游没有 Premium 的价格接口：月付 125 美元是按官方定价写死的估算，界面和通知里都必须标「估算」。
+PREMIUM_SEAT_PRICE_ESTIMATE_USD = 125
+
 CURRENCY_TO_COUNTRY: dict[str, str] = {
     "THB": "TH",
     "NZD": "NZ",

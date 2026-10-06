@@ -17,6 +17,7 @@ from ..services.open_redemptions import (
 )
 from ..seat_types import normalize_overage_policy, normalize_seat_type
 from ..services.pricing import discounted_monthly_total
+from ..services.renewal_reminders import renewal_idle_seats
 from ..services.seat_capacity import cached_seat_capacity, cached_seat_type_counts
 from ..services.subscription_status import subscription_status_display
 from ..services.tg_member_bindings import deactivate_member_binding_if_inactive
@@ -75,8 +76,9 @@ def pending_invite_counts_from_json(raw) -> dict[str, int]:
     return counts
 
 
-def _read_pending_invite_counts(team_id) -> dict[str, int]:
-    """单个 Team 的缓存读取（只读本地库，无上游调用）。列表接口走批量查询，不经过这里。"""
+def _read_pending_json(team_id):
+    """单个 Team 的 member_cache.pending_json 原值（只读本地库，无上游调用）；没有缓存行或读失败
+    返回 None（= 未知）。列表接口走批量查询，不经过这里。"""
     try:
         conn = sqlite3.connect(get_db_path())
         try:
@@ -86,17 +88,22 @@ def _read_pending_invite_counts(team_id) -> dict[str, int]:
         finally:
             conn.close()
     except sqlite3.Error:
-        return {}
-    return pending_invite_counts_from_json(row[0]) if row else {}
+        return None
+    return row[0] if row else None
 
 
-def _team_row_to_response(row, pending_invite_counts: dict[str, int] | None = None) -> dict:
+_READ_PENDING_FROM_DB = object()
+
+
+def _team_row_to_response(row, pending_json=_READ_PENDING_FROM_DB) -> dict:
+    """``pending_json`` = 这个 Team 的 member_cache.pending_json 原值，没有缓存行传 None；
+    不传就现读一次。"""
     d = dict(row)
-    d["pending_invite_counts"] = (
-        pending_invite_counts
-        if pending_invite_counts is not None
-        else _read_pending_invite_counts(d.get("id"))
-    )
+    if pending_json is _READ_PENDING_FROM_DB:
+        pending_json = _read_pending_json(d.get("id"))
+    d["pending_invite_counts"] = pending_invite_counts_from_json(pending_json)
+    idle_seats = renewal_idle_seats(d, pending_json)
+    d["renewal_idle_seats"] = idle_seats.as_dict() if idle_seats is not None else None
     # Subscription data is deliberately nullable when its upstream request
     # failed. Keep the public dashboard contract string-safe while showing an
     # empty currency until the next successful sync fills it in.
@@ -176,9 +183,9 @@ async def list_teams():
         cache_rows = await cache_cursor.fetchall()
 
     email_cache: dict[str, list[str]] = {}
-    pending_counts: dict[str, dict[str, int]] = {}
+    pending_raw: dict[str, object] = {}
     for c in cache_rows:
-        pending_counts[c["team_id"]] = pending_invite_counts_from_json(c["pending_json"])
+        pending_raw[c["team_id"]] = c["pending_json"]
         emails: set[str] = set()
         try:
             for m in json.loads(c["members_json"] or "[]"):
@@ -196,7 +203,7 @@ async def list_teams():
 
     result = []
     for r in rows:
-        team = _team_row_to_response(r, pending_counts.get(r["id"], {}))
+        team = _team_row_to_response(r, pending_raw.get(r["id"]))
         team["cached_member_emails"] = email_cache.get(r["id"], [])
         result.append(team)
     return result

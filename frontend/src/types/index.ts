@@ -54,6 +54,8 @@ export interface Team {
    * 拉到成员名单后才把待接受算进空位。
    */
   pending_invite_counts?: Record<string, number>;
+  /** 只在续费前 3 天内、计费席位还有空闲时才有；其余情况（含数据不全）为 null。 */
+  renewal_idle_seats?: RenewalIdleSeats | null;
 }
 
 /** 注册表里的席位类型（正本：lib/seatType.ts 与后端 app/seat_types.py）。 */
@@ -78,6 +80,26 @@ export interface OverageConfirmation {
 export interface SeatCapacityEntry {
   paid: number;
   available: number;
+  /** 下个计费周期要续费的席位数。缺 = 上游没给（按 paid）；null = 给了但不可信。 */
+  renewal_requested?: number | null;
+}
+
+/** 一个计费席位类型在续费前的占用：空闲 = 续费席位 − 在用 − 待接受（不低于 0）。 */
+export interface RenewalIdleSeatLine {
+  seat_type: string;
+  paid: number;
+  /** 下个计费周期要续费的席位数（上游 renewal_requested，没给时等于 paid）。 */
+  renewing: number;
+  in_use: number;
+  pending: number;
+  idle: number;
+}
+
+/** 续费前 3 天内还有没人用的计费席位（后端正本：services/renewal_reminders.py）。 */
+export interface RenewalIdleSeats {
+  renews_at: string;
+  total_idle: number;
+  lines: RenewalIdleSeatLine[];
 }
 
 export interface TeamWorkspaceSettings {

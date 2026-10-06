@@ -62,12 +62,35 @@ class TeamResponse(BaseModel):
     cached_member_emails: List[str] = []
     # 超员策略：forbid（禁止超员）/ confirm（超员需确认）/ auto（超员自动）。
     overage_policy: OveragePolicyLiteral = "confirm"
-    # 缓存的分类型容量 {type: {paid, available}}；None = 未知（上游没给或结构不对）。
-    seat_capacity: Optional[Dict[str, Dict[str, int]]] = None
+    # 缓存的分类型容量 {type: {paid, available, renewal_requested?}}；None = 未知（上游没给或结构不对）。
+    # renewal_requested 缺 = 上游没给；null = 给了但不可信。
+    seat_capacity: Optional[Dict[str, Dict[str, Optional[int]]]] = None
     # 缓存的 seat_type_counts 原样计数（含未知类型）；{} = 未知。
     seat_type_counts: Dict[str, int] = {}
     # 成员缓存里待接受邀请按席位类型（上游原值，缺失按 default）的计数；{} = 无缓存或读不出。
     pending_invite_counts: Dict[str, int] = {}
+    # 续费前 3 天内、计费席位还有没人用的：每个计费类型的明细（services/renewal_reminders.py）。
+    # 其余情况（不在窗口、没有空闲、数据不全）都是 None。
+    renewal_idle_seats: Optional["RenewalIdleSeatsResponse"] = None
+
+
+class RenewalIdleSeatLine(BaseModel):
+    seat_type: str
+    paid: int
+    # 下个计费周期要续费的席位数（上游 renewal_requested，没给时等于 paid）。
+    renewing: int
+    in_use: int
+    pending: int
+    idle: int
+
+
+class RenewalIdleSeatsResponse(BaseModel):
+    renews_at: str
+    total_idle: int
+    lines: List[RenewalIdleSeatLine]
+
+
+TeamResponse.model_rebuild()
 
 
 class ProxyCreate(BaseModel):

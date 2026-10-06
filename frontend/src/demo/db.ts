@@ -156,8 +156,8 @@ export function recount(record: DemoTeam): void {
   // Like the upstream subscription, `available` is paid minus active members of the type; pending
   // invites are subtracted separately by whoever computes free seats.
   team.seat_capacity = {
-    default: { paid: paid.default, available: Math.max(0, paid.default - counts.default) },
-    prolite: { paid: paid.prolite, available: Math.max(0, paid.prolite - counts.prolite) },
+    default: { paid: paid.default, available: Math.max(0, paid.default - counts.default), renewal_requested: paid.default },
+    prolite: { paid: paid.prolite, available: Math.max(0, paid.prolite - counts.prolite), renewal_requested: paid.prolite },
   };
   team.seats_entitled = paid.default + paid.prolite;
   team.cached_member_emails = Array.from(
