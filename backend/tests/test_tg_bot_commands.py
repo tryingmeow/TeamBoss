@@ -137,7 +137,7 @@ class TelegramBotMessageStyleTest(unittest.TestCase):
         self.assertIn("│ 🔴 超员：1", text)
         self.assertIn("│ 🟡 观察：1", text)
         self.assertIn("🔴 workspace", text)
-        self.assertIn("└ 👤 待处理：new@example.com · default", text)
+        self.assertIn("└ 👤 待处理：new@example.com · ChatGPT", text)
         self.assertIn("🟡 stillthinkingmeow", text)
         self.assertNotIn("risk:watch", text)
         self.assertLess(text.index("🔴 workspace"), text.index("🟡 stillthinkingmeow"))
