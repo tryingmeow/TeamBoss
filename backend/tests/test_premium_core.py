@@ -227,6 +227,13 @@ class ReservationsTest(unittest.TestCase):
     def setUp(self):
         team_locks._reservations.clear()
         self.addCleanup(team_locks._reservations.clear)
+        # Premium 预留另在库里占一份（seat_holds），需要一个空库。
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        patcher = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        asyncio.run(app_database.init_database())
 
     def test_reservations_are_counted_per_type(self):
         async def scenario():

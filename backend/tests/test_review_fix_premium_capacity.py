@@ -29,12 +29,13 @@ from fastapi import HTTPException
 from app import database as app_database
 from app.routes import access_tokens
 from app.services import seat_capacity as seat_capacity_module
-from app.services import team_locks
+from app.services import seat_holds, team_locks
 from app.services.seat_capacity import (
     SeatCapacityFetchError,
     fetch_live_chatgpt_seat_capacity,
     fetch_live_seat_type_capacity,
 )
+from app.services.team_locks import reserve_default_seat, reserve_seat, reserved_seats
 
 EMAIL = "premium.buyer@example.com"
 OTHER = "second.buyer@example.com"
@@ -248,6 +249,66 @@ class PremiumFreeFormulaTest(_AsyncRun):
         self.assertEqual(capacity.available, 1)
 
 
+# ---- S2：持久预留 -------------------------------------------------------------------
+
+
+class PersistentReservationTest(unittest.TestCase):
+    def setUp(self):
+        team_locks._reservations.clear()
+        self.addCleanup(team_locks._reservations.clear)
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        patcher = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        asyncio.run(app_database.init_database())
+
+    def _hold_rows(self):
+        conn = sqlite3.connect(app_database.get_db_path())
+        try:
+            return conn.execute(
+                "SELECT team_id, email, seat_type FROM seat_holds ORDER BY email"
+            ).fetchall()
+        finally:
+            conn.close()
+
+    def test_premium_hold_survives_cleared_in_memory_reservations(self):
+        asyncio.run(reserve_seat("t1", "A@example.com", "prolite"))
+        team_locks._reservations.clear()  # 进程重启
+        self.assertEqual(asyncio.run(reserved_seats("t1", "prolite")), 1)
+        self.assertEqual(asyncio.run(reserved_seats("t1", "default")), 0)
+        self.assertEqual(self._hold_rows(), [("t1", "a@example.com", "prolite")])
+
+    def test_memory_and_db_count_once_per_email_and_respect_exclude(self):
+        async def scenario():
+            await reserve_seat("t1", "a@example.com", "prolite")
+            await seat_holds.hold_seat("t1", "b@example.com", "prolite")
+            return (
+                await reserved_seats("t1", "prolite"),
+                await reserved_seats("t1", "prolite", exclude_email="B@example.com"),
+                await reserved_seats("t1", "prolite", exclude_email="a@example.com"),
+                await reserved_seats("t2", "prolite"),
+            )
+
+        self.assertEqual(asyncio.run(scenario()), (2, 1, 1, 0))
+
+    def test_default_reservation_stays_in_memory_only(self):
+        asyncio.run(reserve_default_seat("t1", "a@example.com"))
+        asyncio.run(reserve_seat("t1", "b@example.com", "default"))
+        self.assertEqual(self._hold_rows(), [])
+        self.assertEqual(asyncio.run(reserved_seats("t1", "default")), 2)
+
+    def test_release_seat_reservation_drops_memory_and_db(self):
+        async def scenario():
+            await reserve_seat("t1", "a@example.com", "prolite")
+            await team_locks.release_seat_reservation("t1", "A@example.com")
+            return await reserved_seats("t1", "prolite")
+
+        self.assertEqual(asyncio.run(scenario()), 0)
+        self.assertEqual(self._hold_rows(), [])
+        self.assertEqual(team_locks._reservations, {})
+
+
 # ---- 真实兑换流程 -------------------------------------------------------------------
 
 
@@ -458,6 +519,82 @@ class RedeemRefusesUnknownOccupancyTest(_RedeemFlow):
             "atm_s2_untyped", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
         )
         self.assertEqual(self.invites, [])
+
+
+class RedeemPremiumHoldTest(_RedeemFlow):
+    async def test_uncertain_premium_hold_survives_restart(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1)
+        self.invite_result = {"error": "timeout", "_mutation_status": "uncertain"}
+        await self._token("atm_s2_uncertain", "prolite")
+        result = await self._redeem("atm_s2_uncertain")
+        self.assertEqual(result["status"], "pending_confirmation")
+        self.assertEqual(await self._hold_rows(), [{"team_id": "team-a", "email": EMAIL, "seat_type": "prolite"}])
+
+        team_locks._reservations.clear()  # 进程重启：内存预留没了，库里的占用还在
+        self.invite_result = {"_mutation_status": "confirmed"}
+        await self._assert_refused_unconsumed(
+            "atm_s2_second", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL, email=OTHER
+        )
+        self.assertEqual(self.invites, [("team-a", EMAIL, "prolite")])
+
+    async def test_premium_seat_is_held_before_the_invite_is_sent(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1)
+        # 发邀请时进程被打断：结果不明，库里必须已经占着这个空位。
+        self.invite_raises = RuntimeError("worker died mid-request")
+        await self._token("atm_s2_inflight", "prolite")
+        with self.assertRaises(RuntimeError):
+            await self._redeem("atm_s2_inflight")
+        self.assertEqual(self.holds_at_invite, [[("team-a", EMAIL, "prolite")]])
+
+        team_locks._reservations.clear()
+        self.invite_raises = None
+        await self._assert_refused_unconsumed(
+            "atm_s2_after_crash", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL, email=OTHER
+        )
+        self.assertEqual(len(self.invites), 1)
+
+    async def test_explicit_rejection_releases_the_hold(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1)
+        self.invite_result = {"error": "seat type not allowed", "_mutation_status": "rejected"}
+        await self._assert_refused_unconsumed(
+            "atm_s2_rejected", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(self.holds_at_invite, [[("team-a", EMAIL, "prolite")]])
+        self.assertEqual(await self._hold_rows(), [])
+        self.assertEqual(await reserved_seats("team-a", "prolite"), 0)
+
+    async def test_rejection_keeps_a_hold_that_existed_before(self):
+        await self._team()
+        self._premium_upstream(paid=2, available=2)
+        await seat_holds.hold_seat("team-a", EMAIL, "prolite", source="admin")
+        self.invite_result = {"error": "seat type not allowed", "_mutation_status": "rejected"}
+        await self._assert_refused_unconsumed(
+            "atm_s2_rejected_kept", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(len(await self._hold_rows()), 1)
+
+    async def test_confirmed_premium_invite_keeps_a_persistent_hold(self):
+        await self._team()
+        self._premium_upstream(paid=2, available=2)
+        await self._token("atm_s2_ok", "prolite")
+        result = await self._redeem("atm_s2_ok")
+        self.assertEqual(result["status"], "ok")
+        team_locks._reservations.clear()
+        self.assertEqual(await reserved_seats("team-a", "prolite"), 1)
+
+    async def test_uncertain_chatgpt_invite_holds_a_default_seat(self):
+        await self._team()
+        self._chatgpt_upstream(entitled=2, active=0)
+        self.invite_result = {"error": "timeout", "_mutation_status": "uncertain"}
+        await self._token("atm_s2_cg_uncertain", "default")
+        result = await self._redeem("atm_s2_cg_uncertain")
+        self.assertEqual(result["status"], "pending_confirmation")
+        self.assertEqual(self.holds_at_invite, [[]])  # ChatGPT 发之前不占（行为照旧）
+        team_locks._reservations.clear()
+        self.assertEqual(await reserved_seats("team-a", "default"), 1)
 
 
 if __name__ == "__main__":

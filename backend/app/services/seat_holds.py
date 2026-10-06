@@ -115,6 +115,18 @@ async def release_seat_hold(team_id: str, email: str) -> None:
         await db.commit()
 
 
+async def seat_hold_exists(team_id: str, email: str) -> bool:
+    """``team_id`` 上这个邮箱是不是已经占着一份（不论类型）。"""
+    team_key, email_key = _norm_team(team_id), _norm_email(email)
+    if not team_key or not email_key:
+        return False
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM seat_holds WHERE team_id = ? AND email = ?", (team_key, email_key)
+        )
+        return await cursor.fetchone() is not None
+
+
 async def held_seat_emails(team_id: str, seat_type: str, *, exclude_email: str = "") -> set[str]:
     """``team_id`` 上占着 ``seat_type`` 的邮箱（小写），不含 ``exclude_email``。"""
     team_key = _norm_team(team_id)

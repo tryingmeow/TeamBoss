@@ -49,6 +49,7 @@ from ..services.seat_capacity import (
     fetch_live_seat_type_capacity,
     update_capacity_cache,
 )
+from ..services.seat_holds import hold_seat, release_seat_hold, seat_hold_exists
 from ..services.team_clients import (
     load_active_teams,
     subscription_lapsed,
@@ -1290,7 +1291,7 @@ async def _premium_available(
     client: ChatGPTClient, team_id: str, *, email: str = ""
 ) -> tuple[bool, str, str]:
     """锁内实时复查 Premium 空位：min(seat_capacity.prolite.available，已付 − 在用 Premium)
-    − 待接受的 Premium 及没带类型的邀请 − Premium 预留。
+    − 待接受的 Premium 及没带类型的邀请 − Premium 预留（进程内 + 库里的占用）。
     读不到、或待接受邀请没拉全 = 没有空位（失败关闭）。
 
     返回 (有没有空位, 给日志的原因, 给管理员通知的原因)。超员策略在这里**不看**：
@@ -1381,6 +1382,14 @@ async def _invite_to_available_team(
                 team_id=team["id"],
             )
 
+            # Premium：发邀请之前先在库里占住这个空位，结果不明、进程中途退出都占着，
+            # 直到对账看见（或确认没有）这个人；只有上游明确拒绝才放掉。占不上就不发。
+            # 这个邮箱原本就占着一份（别的操作留下的）时，被拒也不动它。
+            premium_hold_preexisting = False
+            if premium:
+                premium_hold_preexisting = await seat_hold_exists(team["id"], email)
+                await hold_seat(team["id"], email, PREMIUM_SEAT_TYPE, source="redeem")
+
             # 跨过这一行就算已消耗：下面这个请求一旦发出，就再也无法证明 OpenAI
             # 侧没有副作用。明确被拒时下面会撤回。
             if on_invite_confirmed is not None:
@@ -1457,16 +1466,22 @@ async def _invite_to_available_team(
                         team["id"],
                         email,
                     )
-                if premium:
-                    # 这个 Premium 邀请可能已经生效、只是名单里还看不见：先占住这个
-                    # 空位，免得下一次兑换按「还有空位」再发一个、触发自动加购。
-                    try:
+                # 这个邀请可能已经生效、只是名单里还看不见：占住这个空位（Premium 进程内
+                # + 库里，ChatGPT 在库里），重启不丢，到对账才放，免得下一次兑换按
+                # 「还有空位」再发一个、触发自动加购。
+                try:
+                    if premium:
                         await reserve_seat(team["id"], email, PREMIUM_SEAT_TYPE)
-                    except Exception:
-                        logger.exception(
-                            "failed to reserve uncertain Premium invite seat team=%s",
-                            team["id"],
+                    else:
+                        await hold_seat(
+                            team["id"], email, DEFAULT_SEAT_TYPE, source="redeem_uncertain"
                         )
+                except Exception:
+                    logger.exception(
+                        "failed to hold uncertain invite seat team=%s seat_type=%s",
+                        team["id"],
+                        seat_type,
+                    )
                 return {
                     "status": "pending_confirmation",
                     "team": team,
@@ -1489,6 +1504,15 @@ async def _invite_to_available_team(
                 # 成 rejected，这里不需要第二层。
                 if on_invite_rejected is not None:
                     on_invite_rejected()
+                if premium and not premium_hold_preexisting:
+                    try:
+                        await release_seat_hold(team["id"], email)
+                    except Exception:
+                        # 放不掉只会多占一个空位（对账时放掉），不影响退码和换 Team。
+                        logger.exception(
+                            "failed to release rejected Premium invite hold team=%s",
+                            team["id"],
+                        )
                 last_error = str(result.get("error") or "OpenAI rejected the invite")
                 if premium:
                     premium_checked.append((team.get("name") or team["id"], "上游拒绝了邀请"))
@@ -1566,9 +1590,9 @@ async def _invite_to_available_team(
                         email,
                     )
             # Premium：不管刷新后的名单里看不看得见这个邀请，都占住一个 Premium 空位
-            # （15 分钟）。待接受邀请要是没带 seat_type、或上游的 available 还没扣掉它，
-            # 只靠名单就会把这个空位再卖一次、触发自动加购；多占一会儿最多少卖一单。
-            # ChatGPT 照旧：名单里还看不见时才占。
+            # （进程内 15 分钟 + 库里到下一次完整快照对账）。上游的 available 要是还没扣掉
+            # 它，只靠名单就会把这个空位再卖一次、触发自动加购；多占一会儿最多少卖一单。
+            # ChatGPT 照旧：名单里还看不见时才占（进程内 15 分钟）。
             if premium or not _snapshot_contains_email(snapshot, email):
                 try:
                     if premium:

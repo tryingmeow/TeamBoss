@@ -6,11 +6,15 @@ from time import monotonic
 from typing import AsyncIterator
 
 from ..database import get_db
+from ..seat_types import DEFAULT_SEAT_TYPE, is_billed_seat_type
+from .seat_holds import held_seat_emails, hold_seat, release_seat_hold
 
 
 _locks: dict[str, asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
 # (team_id, email) -> (到期 monotonic 时间, 席位类型)。一个邮箱在一个 Team 里同时只占一个预留。
+# default 只占这里（15 分钟）；其他计费类型（Premium）另在库里占一份（seat_holds），
+# 重启不丢、到对账才放。数预留时两边按邮箱取并集。
 _reservations: dict[tuple[str, str], tuple[float, str]] = {}
 _reservations_guard = asyncio.Lock()
 DEFAULT_RESERVATION_TTL_SECONDS = 900
@@ -47,15 +51,22 @@ async def reserve_seat(
     seat_type: str = "default",
     ttl_seconds: int = DEFAULT_RESERVATION_TTL_SECONDS,
 ) -> None:
-    """Temporarily reserve one seat of ``seat_type`` while ChatGPT member caches catch up."""
+    """Reserve one seat of ``seat_type`` while ChatGPT member caches catch up.
+
+    ``default`` is held in memory for ``ttl_seconds``. Any other billed type (Premium)
+    is also held in the database (``seat_holds``) until reconciliation or an explicit
+    upstream rejection, so a restart or the TTL cannot free it early.
+    """
     key = _reservation_key(team_id, email)
     if not key[0] or not key[1]:
         return
-    seat = str(seat_type or "default").strip() or "default"
+    seat = str(seat_type or DEFAULT_SEAT_TYPE).strip() or DEFAULT_SEAT_TYPE
     async with _reservations_guard:
         now = monotonic()
         _drop_expired_reservations(now)
         _reservations[key] = (now + max(1, ttl_seconds), seat)
+    if seat != DEFAULT_SEAT_TYPE and is_billed_seat_type(seat):
+        await hold_seat(key[0], key[1], seat, source="reservation")
 
 
 async def reserve_default_seat(
@@ -74,23 +85,40 @@ async def release_default_seat_reservation(team_id: str, email: str) -> None:
         _reservations.pop(key, None)
 
 
+async def release_seat_reservation(team_id: str, email: str) -> None:
+    """Drop both the in-memory reservation and the persistent hold of ``email``.
+
+    Only for an explicit upstream rejection: an uncertain outcome keeps the seat.
+    """
+    key = _reservation_key(team_id, email)
+    if not key[0] or not key[1]:
+        return
+    async with _reservations_guard:
+        _drop_expired_reservations(monotonic())
+        _reservations.pop(key, None)
+    await release_seat_hold(key[0], key[1])
+
+
 async def reserved_seats(
     team_id: str,
     seat_type: str = "default",
     *,
     exclude_email: str = "",
 ) -> int:
-    """Live in-memory reservations of ``seat_type`` on ``team_id`` (excluding one email)."""
+    """Reserved seats of ``seat_type`` on ``team_id``: live in-memory reservations plus
+    persistent holds, one per email, excluding ``exclude_email``."""
     key_team = str(team_id or "").strip()
     excluded = str(exclude_email or "").strip().lower()
-    wanted = str(seat_type or "default").strip() or "default"
+    wanted = str(seat_type or DEFAULT_SEAT_TYPE).strip() or DEFAULT_SEAT_TYPE
     async with _reservations_guard:
         _drop_expired_reservations(monotonic())
-        return sum(
-            1
+        emails = {
+            reserved_email
             for (reserved_team, reserved_email), (_expires, seat) in _reservations.items()
             if reserved_team == key_team and reserved_email != excluded and seat == wanted
-        )
+        }
+    emails |= await held_seat_emails(key_team, wanted, exclude_email=excluded)
+    return len(emails)
 
 
 async def reserved_default_seats(team_id: str, *, exclude_email: str = "") -> int:
