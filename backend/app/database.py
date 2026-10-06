@@ -636,6 +636,11 @@ async def init_database():
             skip_row = await cursor.fetchone()
             if skip_row is not None and str(skip_row[0]).strip().lower() == "true":
                 await db.execute("UPDATE teams SET overage_policy = 'auto'")
+                # 折进 Team 之后全局开关退役：写回 false，升级前打开的旧页面读到它也不会
+                # 再自动带上 allow_overage 跳过确认。
+                await db.execute(
+                    "UPDATE settings SET value = 'false' WHERE key = 'skip_overage_confirmation'"
+                )
 
         # 历史库先用旧等式回填，保证升级后 API 合同立即可用；下一轮官方
         # seat_type_counts 同步会用 default 字段覆盖为权威值。

@@ -319,6 +319,12 @@ class OveragePolicyMigrationTest(unittest.TestCase):
         self._legacy_db("true")
         asyncio.run(app_database.init_database())
         self.assertEqual(self._policies(), {"t1": "auto", "t2": "auto"})
+        # The retired global toggle is reset so a stale pre-upgrade tab stops
+        # auto-confirming overage from it.
+        self.assertEqual(
+            self._sql("SELECT value FROM settings WHERE key = 'skip_overage_confirmation'"),
+            [("false",)],
+        )
 
         self._sql("UPDATE teams SET overage_policy = 'forbid' WHERE id = 't1'")
         asyncio.run(app_database.init_database())
