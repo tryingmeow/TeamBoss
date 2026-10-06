@@ -556,6 +556,11 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
   // Confirm Teams that could take the leftovers but were not confirmed (all of them before the first ask).
   const unconfirmed = candidates.filter((t) => policyOf(t) === 'confirm' && !(allowOverage && listedIds.has(t.team.id)));
 
+  // The confirmation also binds the count: at most `overage_seat_limit` overfills on confirm Teams per request.
+  const seatLimit = typeof body.overage_seat_limit === 'number' && body.overage_seat_limit > 0 ? Math.floor(body.overage_seat_limit) : 0;
+  let confirmOverfills = 0;
+  let limitHit = false;
+
   emails.forEach((email) => {
     if (!EMAIL_RE.test(email)) {
       failed.push({ email, error: '邮箱格式无效' });
@@ -570,7 +575,19 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
     let target = ranked.find((t) => availableGptSeats(t) > 0);
     let overage = false;
     if (!target) {
-      target = overfillNow[0];
+      // Candidate order; auto Teams are free, confirm Teams only while the confirmed count lasts.
+      for (const t of overfillNow) {
+        if (policyOf(t) === 'auto') {
+          target = t;
+          break;
+        }
+        if (confirmOverfills < seatLimit) {
+          target = t;
+          confirmOverfills += 1;
+          break;
+        }
+        limitHit = true;
+      }
       overage = Boolean(target);
     }
     if (!target) {
@@ -595,9 +612,11 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
     added.push({ email, team_id: target.team.id, team_name: target.team.name, expires_at: expiresAt, overage });
   });
 
-  if (remaining.length > 0 && unconfirmed.length > 0) {
+  // Teams a fresh plan can name: the never-confirmed ones, plus the confirmed ones once their count is used up.
+  const askTeams = limitHit ? candidates.filter((t) => policyOf(t) === 'confirm') : unconfirmed;
+  if (remaining.length > 0 && askTeams.length > 0) {
     const free = candidates.reduce((sum, t) => sum + availableGptSeats(t), 0);
-    const first = unconfirmed[0];
+    const first = askTeams[0];
     return fail(409, {
       code: 'require_overage_confirmation',
       message: (allowOverage ? '你确认过的超员计划已经不成立，需要重新确认。' : '') + (added.length ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个没有空位。` : '空闲 ChatGPT 席位不足。') +
