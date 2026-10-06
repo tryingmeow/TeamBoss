@@ -73,7 +73,7 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // Full (20/20), Codex off, positive credit, last invoice paid more than computed.
-    // Policy forbid: the full-Team "禁止超员" grey state for ChatGPT and Premium.
+    // Policy forbid: the full-Team grey state for ChatGPT and Premium.
     n: 2, slug: 'nebula', name: 'Nebula-02', remark: null, status: 'active', policy: 'forbid',
     entitled: 20, gptMembers: 20, codexMembers: 0, invites: [],
     codexEnabled: false, defaultSeat: 'default',

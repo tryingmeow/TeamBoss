@@ -26,6 +26,16 @@ import { DAY, HOUR, dateOnly, isoAt, shanghaiLocal } from './time';
 
 // ── Teams & members ──
 
+/** Pending invites per seat type; a missing seat type counts as ChatGPT (`default`). */
+function pendingInviteCounts(record: DemoTeam): Record<string, number> {
+  const counts: Record<string, number> = {};
+  record.invites.forEach((invite) => {
+    const type = invite.seat_type || 'default';
+    counts[type] = (counts[type] ?? 0) + 1;
+  });
+  return counts;
+}
+
 export function teamView(record: DemoTeam, sortedEmails = false): Team {
   const team = {
     ...record.team,
@@ -34,6 +44,7 @@ export function teamView(record: DemoTeam, sortedEmails = false): Team {
       ? Object.fromEntries(Object.entries(record.team.seat_capacity).map(([k, v]) => [k, { ...v }]))
       : null,
     seat_type_counts: { ...record.team.seat_type_counts },
+    pending_invite_counts: pendingInviteCounts(record),
   };
   team.cached_member_emails = sortedEmails ? [...record.team.cached_member_emails].sort() : [...record.team.cached_member_emails];
   return team;
