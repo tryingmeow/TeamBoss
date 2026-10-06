@@ -9,7 +9,8 @@
     3. member_cache 有数据且非空（冷启动/缓存缺失一律跳过整队，绝不动手）
     4. active_chatgpt > seats_entitled（over_by > 0，否则最多是 watch，不踢；
        seats_entitled 不是正整数 = 席位数未知，该 Team 本轮不做超员踢人）
-    5. member.seat_type == 'default' 且 member.is_owner is False
+    5. member.seat_type == 'default' 且不是 Owner（is_owner is False，且邮箱不等于 teams.owner_email，
+       不分大小写——和 scheduler 同步时认 Owner 的规则相同；两条踢人路径、候选筛选和 _patrol_kick 都认这两样）
     6. member.source == 'detected'（唯一硬规则；'system'/'self_service'/None 永不踢，
        管理员开启自动踢人时会先把当时的现有成员全部保护起来；巡逻自动给 Team 建立
        基线时只有该 Team 第一次才保护，token_expired 恢复/重新导入后的自动重建不保护
@@ -25,7 +26,7 @@
   数量由 over_by 和单轮封顶 NON_STRICT_KICK_ABS_CAP 管着。
 - dry-run 判定：effective_dry_run = dry_run 参数 OR settings.patrol_kick_enabled != '1'。
 - 真正执行踢人只能通过 `_patrol_kick()` 这一个函数：进函数先重新校验候选资格
-  （source/is_owner/seat_type），任一不满足直接拒绝、不踢 —— 纵深防御，防止上游逻辑
+  （source/is_owner/owner_email/seat_type），任一不满足直接拒绝、不踢 —— 纵深防御，防止上游逻辑
   有 bug 时仍然误踢。
 - 实时踢除完全复用 scheduler.auto_kick_job 的机制：ChatGPTClient.remove_member ->
   mark_member_kicked（此处用与 services/member_expiry.mark_member_kicked 完全等价的
@@ -49,7 +50,7 @@
 - 超员踢人只看 ChatGPT（default）席位，判定公式不变。
 - **Premium 外部成员自动踢**（所有者裁决，唯一一条按席位类型新增的踢人路径）：巡逻对该
   Team 生效（总开关开、已建基线、未豁免、没开 Codex——Codex 队和以前一样不踢人）时，
-  source == 'detected' 的非 Owner Premium（prolite）成员不看超员、不看严格模式直接踢——每人
+  source == 'detected' 的非 Owner（认法同第 5 条）Premium（prolite）成员不看超员、不看严格模式直接踢——每人
   都是 ChatGPT 自动加购、按月扣费的席位。真踢仍只走 `_patrol_kick`（rule="premium_outsider"），
   除席位类型 / 超员这一关外闸门与超员踢人相同。一个 Team 一轮在这条路和超员踢人上一共最多
   踢 NON_STRICT_KICK_ABS_CAP 个；并套用严格模式的"别一次踢一片"阈值（只有这条路套），但数的是
@@ -452,7 +453,23 @@ def activate_patrol_sync(expected_team_ids: list[str]) -> dict:
 
 # ── 纯函数：候选筛选 + 风险分类（无 IO，routes/patrol.py 和 run_patrol 共用） ──
 
-def select_kick_candidates(members: Any) -> list[dict]:
+def _normalize_owner_email(owner_email: Any) -> str:
+    return str(owner_email or "").strip().lower()
+
+
+def _is_team_owner_email(member: dict, owner_email: Any) -> bool:
+    """成员邮箱等于 teams.owner_email（不分大小写）。上游角色不是 account-owner 的 Owner 条目
+    （缓存里 is_owner 为 False）靠这一条认出来，和 scheduler 同步时跳过 Owner 的规则相同。"""
+    owner = _normalize_owner_email(owner_email)
+    return bool(owner) and str(member.get("email") or "").strip().lower() == owner
+
+
+def _team_owner_email_sync(conn: sqlite3.Connection, team_id: str) -> str:
+    row = conn.execute("SELECT owner_email FROM teams WHERE id = ?", (team_id,)).fetchone()
+    return _normalize_owner_email(row["owner_email"]) if row else ""
+
+
+def select_kick_candidates(members: Any, owner_email: Any = None) -> list[dict]:
     """从成员列表里筛出"可踢候选"，按 first_seen_at（退回 created_time）新→旧排序。
 
     唯一硬规则：source == 'detected'。另外叠加 seat_type == 'default' 且
@@ -460,6 +477,7 @@ def select_kick_candidates(members: Any) -> list[dict]:
     现有成员会在管理员开启自动踢人时（以及巡逻自动纳入一个从未建过基线的 Team 时）
     一次性转成 source='system' 保护住，所以"只踢 detected"就等价于"只踢那之后从系统外
     混进来的人"（包括 Team token_expired 期间混进来、恢复后自动重建基线的人）。
+    owner_email（teams.owner_email）：邮箱等于它的人同样当 Owner，不进候选。
     """
     if not isinstance(members, list):
         return []
@@ -470,7 +488,7 @@ def select_kick_candidates(members: Any) -> list[dict]:
             continue
         if m.get("seat_type") != DEFAULT_SEAT_TYPE:
             continue
-        if m.get("is_owner") is not False:
+        if m.get("is_owner") is not False or _is_team_owner_email(m, owner_email):
             continue
         if m.get("source") != "detected":
             continue
@@ -480,11 +498,11 @@ def select_kick_candidates(members: Any) -> list[dict]:
     return candidates
 
 
-def select_premium_kick_candidates(members: Any) -> list[dict]:
+def select_premium_kick_candidates(members: Any, owner_email: Any = None) -> list[dict]:
     """Premium 外部成员候选（所有者裁决的踢人路径）：seat_type == 'prolite'、is_owner is False、
-    source == 'detected'。不看超员 / 严格模式：每人都是 ChatGPT 自动加购、按月扣费的 Premium
-    席位（豁免 / Codex 队由调用方和 _patrol_kick 挡住）。排序与 select_kick_candidates 相同
-    （first_seen_at 新→旧）。
+    邮箱不等于 owner_email（teams.owner_email，不分大小写）、source == 'detected'。不看超员 /
+    严格模式：每人都是 ChatGPT 自动加购、按月扣费的 Premium 席位（豁免 / Codex 队由调用方和
+    _patrol_kick 挡住）。排序与 select_kick_candidates 相同（first_seen_at 新→旧）。
     """
     if not isinstance(members, list):
         return []
@@ -495,7 +513,7 @@ def select_premium_kick_candidates(members: Any) -> list[dict]:
             continue
         if normalize_seat_type(m.get("seat_type")) != PREMIUM_SEAT_TYPE:
             continue
-        if m.get("is_owner") is not False:
+        if m.get("is_owner") is not False or _is_team_owner_email(m, owner_email):
             continue
         if m.get("source") != "detected":
             continue
@@ -784,7 +802,8 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
       （outsider_batch_guard）。claim 拿到后再查一次：这次判定用的快照开始拉取之后 TeamBoss 动过他的
       席位、或刚有了这样的记录，返回 PREMIUM_KICK_DEFERRED，不踢。
     其余闸门两条规则完全相同：武装 + 基线 + 未豁免、Team active 且没开 Codex、成员缓存里重新定位、
-    缓存与持久化来源都是 detected、非 Owner、对账屏障、member claim 后再查一次来源和到期。
+    缓存与持久化来源都是 detected、非 Owner（is_owner is False，且邮箱不是 teams.owner_email）、
+    对账屏障、member claim 后再查一次来源和到期。
     校验通过后，复用 auto_kick_job 的原语：client.remove_member -> 标记 kicked -> 记日志。
     返回 (是否踢成功, 失败原因或 None)。
     """
@@ -804,7 +823,7 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
         return False, reject_reason
 
     team = conn.execute(
-        "SELECT status, is_codex_enabled, seats_entitled FROM teams WHERE id = ?",
+        "SELECT status, is_codex_enabled, seats_entitled, owner_email FROM teams WHERE id = ?",
         (team_id,),
     ).fetchone()
     if not team or team["status"] != "active":
@@ -903,12 +922,17 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
         reason = f"rejected: is_owner={cached_member.get('is_owner')!r} is not False"
         _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
         return False, reason
+    owner_email = _normalize_owner_email(team["owner_email"])
+    if _is_team_owner_email(cached_member, owner_email):
+        reason = "rejected: target email is the Team owner_email"
+        _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
+        return False, reason
     if premium_rule:
         if normalize_seat_type(cached_member.get("seat_type")) != PREMIUM_SEAT_TYPE:
             reason = f"rejected: seat_type={cached_member.get('seat_type')!r} != 'prolite'"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
-        if cached_member not in select_premium_kick_candidates(cached_members):
+        if cached_member not in select_premium_kick_candidates(cached_members, owner_email):
             reason = "rejected: target is not a Premium outsider candidate"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
@@ -1552,7 +1576,8 @@ def select_over_quota_kick_candidates_sync(
 ) -> tuple[list[dict], list[dict]]:
     """超员踢人这一轮要踢的人，返回 (要踢的人, 因 TeamBoss 记录剔除的人)。
 
-    先按 select_kick_candidates 的顺序（first_seen_at 新→旧）取最新的 over_by 个，再去掉 TeamBoss
+    先按 select_kick_candidates 的顺序（first_seen_at 新→旧，邮箱是 teams.owner_email 的人当 Owner、
+    不算候选）取最新的 over_by 个，再去掉 TeamBoss
     正在管、或因名单里不见了才没在管的人（_teamboss_managed_history_sync）。被剔除的人空出来的名额
     不往后补：更老的外部成员本来就在额度之内，不能因为别人受保护就轮到他。所以踢的人数只会比
     over_by 少，不会多。
@@ -1562,7 +1587,8 @@ def select_over_quota_kick_candidates_sync(
     vetoed: list[dict] = []
     if not isinstance(over_by, int) or over_by <= 0:
         return selected, vetoed
-    for member in select_kick_candidates(members)[:over_by]:
+    owner_email = _team_owner_email_sync(conn, team_id)
+    for member in select_kick_candidates(members, owner_email)[:over_by]:
         email = member.get("email") or ""
         user_id = member.get("id") or member.get("user_id") or ""
         if _teamboss_managed_history_sync(conn, team_id, email, user_id):
@@ -1657,15 +1683,18 @@ def premium_seat_findings_sync(
     - chatgpt_detected_was_managed：超员 Team 上落在最新 over_by 个里、本来这一轮要踢，但因为
       _teamboss_managed_history_sync 没踢的人（调用方传入 over_quota_vetoed，见
       select_over_quota_kick_candidates_sync）。不踢，交给管理员。
-    Owner、没有来源记录（source 为空）的人不算。
+    Owner（上游角色是 account-owner，或邮箱等于 teams.owner_email）、没有来源记录（source 为空）的人不算。
     """
     handled = {str(x) for x in handled_ids}
+    owner_email = _team_owner_email_sync(conn, team_id)
     findings: list[dict] = []
     for status, items in (("member", members), ("pending", pending)):
         if not isinstance(items, list):
             continue
         for item in items:
             if not isinstance(item, dict) or item.get("is_owner"):
+                continue
+            if _is_team_owner_email(item, owner_email):
                 continue
             source = item.get("source")
             seat = normalize_seat_type(item.get("seat_type"))
@@ -1918,8 +1947,8 @@ def run_patrol(
         effective_dry_run = bool(dry_run) or not kick_enabled or not baseline_ready
 
         teams = conn.execute(
-            "SELECT id, name, is_codex_enabled, seats_entitled, access_token, device_id, proxy_id "
-            "FROM teams WHERE status = 'active'"
+            "SELECT id, name, is_codex_enabled, seats_entitled, access_token, device_id, proxy_id, "
+            "owner_email FROM teams WHERE status = 'active'"
         ).fetchall()
 
         _ensure_team_baseline_table(conn)
@@ -2012,7 +2041,7 @@ def run_patrol(
             # 这一段出错（例如读不了记录）只跳过本 Team 的 Premium 处理，不拖垮整轮巡逻。
             try:
                 if team_baseline_ready and not is_exempt and not codex_enabled:
-                    premium_outsiders = select_premium_kick_candidates(members)
+                    premium_outsiders = select_premium_kick_candidates(members, team["owner_email"])
                     # "别一次踢一片"：这份名单里的外部成员（不分席位类型，不看严格模式开没开）多到
                     # 超过严格模式同一个阈值，就当数据出了问题，这一轮这个 Team 一个 Premium 成员都
                     # 不踢、只提醒。超员踢人照它自己的规则走。
@@ -2427,7 +2456,7 @@ def run_patrol(
                 continue
 
             over_by = status["over_by"]
-            candidates = select_kick_candidates(members)
+            candidates = select_kick_candidates(members, team["owner_email"])
             # 先取最新的 over_by 个，再去掉 TeamBoss 还在管 / 因不在名单才没在管 / 兑换过的人（上面的
             # 限频提醒里列给管理员）。空出的名额不往后补，所以只会比 over_by 少踢。
             # 超员踢人不套 Premium 的"外部成员过多"护栏（见 outsider_batch_guard）：小 Team 上它会
