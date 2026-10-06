@@ -13,8 +13,16 @@ from ..services.open_redemptions import (
     open_redemption_detail,
     settled_redemption_row_detail,
 )
+from ..seat_types import normalize_overage_policy
+from ..services.overage_policy import (
+    load_team_policy,
+    proceeds_without_capacity_check,
+    refusal_message,
+    refusal_reason,
+)
 from ..services.seat_capacity import (
     SeatCapacityFetchError,
+    cached_seat_capacity,
     chatgpt_seat_capacity,
     fetch_live_chatgpt_seat_capacity,
     member_seat_usage_from_members,
@@ -118,7 +126,8 @@ async def _load_active_team_rows() -> list[dict[str, Any]]:
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT id, name, owner_email, seats_in_use, seats_entitled,
-                      codex_count, chatgpt_count, created_at, active_until, will_renew
+                      codex_count, chatgpt_count, created_at, active_until, will_renew,
+                      seat_capacity_json, overage_policy
                FROM teams
                WHERE status = 'active'"""
         )
@@ -159,6 +168,8 @@ async def _build_gpt_invite_candidates(
             codex_count=codex_count,
             active_chatgpt=chatgpt_count,
             pending_default=_pending_default_count(cache),
+            # 缓存的分类型容量也参与取小：两种算法不一致时按空位少的那个算，宁可少卖。
+            seat_capacity=cached_seat_capacity(team.get("seat_capacity_json")),
         )
         reserved = await reserved_default_seats(team["id"])
         cached_available = max(0, capacity.available - reserved)
@@ -170,6 +181,7 @@ async def _build_gpt_invite_candidates(
             "cached_active_chatgpt": capacity.active_chatgpt,
             "cached_pending_default": capacity.pending_default,
             "reserved_default": reserved,
+            "overage_policy": normalize_overage_policy(team.get("overage_policy")),
         })
 
     candidates.sort(key=lambda item: (-safe_int(item.get("cached_available")), item.get("created_at") or ""))
@@ -182,13 +194,51 @@ async def load_gpt_invite_candidates(*, include_full: bool = False) -> list[dict
     return await _build_gpt_invite_candidates(teams, caches, include_full=include_full)
 
 
-async def cached_gpt_capacity_summary() -> dict[str, Any]:
-    candidates = await load_gpt_invite_candidates(include_full=True)
+def summarize_gpt_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """候选（含已满的）的缓存空位汇总，批量拉人的 409 里原样给前端。"""
     return {
         "available": sum(safe_int(item.get("cached_available")) for item in candidates),
         "free_team_count": sum(1 for item in candidates if safe_int(item.get("cached_available")) > 0),
         "active_team_count": len(candidates),
     }
+
+
+async def cached_gpt_capacity_summary() -> dict[str, Any]:
+    return summarize_gpt_candidates(await load_gpt_invite_candidates(include_full=True))
+
+
+def _overfill_order(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """超员时试 Team 的顺序：按建 Team 的先后。
+
+    要超员时候选都已满（空位并列 0），候选顺序本来就是建 Team 的先后；这里显式排一次，
+    让问管理员时报的计划（batch_overage_plan）和确认后真正加购的 Team 一致。
+    """
+    return sorted(candidates, key=lambda item: item.get("created_at") or "")
+
+
+def has_auto_overage_team(candidates: list[dict[str, Any]]) -> bool:
+    """有没有设为「超员自动」的候选 Team：有的话没空位的邮箱直接超员塞进去，不用问。"""
+    return any(item.get("overage_policy") == "auto" for item in candidates)
+
+
+def batch_overage_plan(candidates: list[dict[str, Any]], extra_seats: int) -> list[dict[str, Any]]:
+    """管理员确认超员后，这 ``extra_seats`` 个席位会加在哪些「超员需确认」的 Team 上。
+
+    确认后的请求里，没有空位的邮箱按 ``_overfill_order`` 逐个找第一个允许超员的 Team，
+    所以全部加在排第一的那个 confirm Team 上（会问的时候没有可用的 auto Team）。
+    没有 confirm Team 时返回空列表：不用问，剩下的邮箱没位置。
+    """
+    if extra_seats <= 0:
+        return []
+    confirm_teams = [item for item in _overfill_order(candidates) if item.get("overage_policy") == "confirm"]
+    if not confirm_teams:
+        return []
+    first = confirm_teams[0]
+    return [{
+        "team_id": first["id"],
+        "team_name": first.get("name") or first["id"],
+        "extra_seats": int(extra_seats),
+    }]
 
 
 async def _live_gpt_available(client, team_id: str, *, email: str) -> tuple[bool, str]:
@@ -218,8 +268,15 @@ async def _invite_to_team(
     check_capacity: bool,
     action: str,
     cached_snapshot: dict[str, Any] | None = None,
+    allow_overage: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
+    """``check_capacity=True``：只往现拉确认有空位的 Team 里拉。
+    ``check_capacity=False``：超员（可能让 ChatGPT 加购扣费），只在锁内现读的超员策略
+    允许时才拉——``auto``，或 ``confirm`` 且管理员已确认（``allow_overage``）；``forbid``
+    永远不超员。
+    """
     team_id = team["id"]
+    policy = normalize_overage_policy(team.get("overage_policy"))
     async with team_invite_lock(team_id):
         # 有对账日后还会给这个邮箱记账的未结兑换就跳过，什么都不写：对账确认那笔兑换
         # 时会在这次写下的到期之上再累加一次兑换码时长（30 天码 + 批量 30 天 = 60 天）。
@@ -270,6 +327,21 @@ async def _invite_to_team(
             ok, reason = await _live_gpt_available(client, team_id, email=email)
             if not ok:
                 return None, reason
+        else:
+            # 候选列表是锁外读的；超员前在锁里现读一次策略，管理员刚改成禁止超员就不加。
+            current = await load_team_policy(team_id)
+            policy = current.policy
+            if not proceeds_without_capacity_check(policy, allow_overage):
+                reason = refusal_reason(policy)
+                await log_operation(
+                    team_id,
+                    action,
+                    email,
+                    f"seat_type=default, policy={policy}, reason={reason}",
+                    "skipped",
+                    refusal_message(policy=policy, team_name=current.team_name, seat_type="default"),
+                )
+                return None, f"no_gpt_seat: overage not allowed (policy={policy})"
 
         result = await run_chatgpt_call(client.invite_member, email, "default")
         # 成败只看 ChatGPTClient 给的定性 _mutation_status，不看有没有 error 键：
@@ -311,7 +383,13 @@ async def _invite_to_team(
         # upsert_member_expiry，带重试+兜底，见该函数注释。
         expires_iso = await record_confirmed_invite(team_id, "", email, expires_at)
 
-        await log_operation(team_id, action, email, f"expires_at={expires_iso}", "success")
+        await log_operation(
+            team_id,
+            action,
+            email,
+            f"seat_type=default, expires_at={expires_iso}, policy={policy}, overage={not check_capacity}",
+            "success",
+        )
 
         try:
             snapshot = await fetch_and_cache_members(team_id, client)
@@ -480,10 +558,16 @@ async def invite_gpt_member_any_team(
         )
         raise GptInviteFailed(reason, team_id=unresolved["id"])
 
-    candidates = await _build_gpt_invite_candidates(teams, caches, include_full=allow_overage)
+    candidates = await _build_gpt_invite_candidates(teams, caches, include_full=True)
+    # 超员只往策略允许的 Team 去：auto 总是可以，confirm 要管理员确认过，forbid 永远不行。
+    overfill_teams = [
+        team for team in _overfill_order(candidates)
+        if proceeds_without_capacity_check(team.get("overage_policy"), allow_overage)
+    ]
 
+    # 先找真空位。要超员时，缓存显示已满的 Team 也先现拉确认一遍，能不加购就不加购。
     for team in candidates:
-        if safe_int(team.get("cached_available")) <= 0 and not allow_overage:
+        if safe_int(team.get("cached_available")) <= 0 and not overfill_teams:
             continue
         added, error = await _invite_to_team(
             team,
@@ -503,26 +587,25 @@ async def invite_gpt_member_any_team(
         elif error:
             hard_errors.append((error, team.get("id")))
 
-    if allow_overage:
-        overage_candidates = candidates or await _build_gpt_invite_candidates(teams, caches, include_full=True)
-        for team in overage_candidates:
-            added, error = await _invite_to_team(
-                team,
-                email,
-                expires_at,
-                check_capacity=False,
-                action=action,
-                cached_snapshot=caches.get(team["id"]),
-            )
-            if added:
-                return added
-            bound = _bound_to_team_failure(error, team)
-            if bound is not None:
-                raise bound
-            if _is_capacity_error(error):
-                capacity_errors.append(error or "no_gpt_seat")
-            elif error:
-                hard_errors.append((error, team.get("id")))
+    for team in overfill_teams:
+        added, error = await _invite_to_team(
+            team,
+            email,
+            expires_at,
+            check_capacity=False,
+            action=action,
+            cached_snapshot=caches.get(team["id"]),
+            allow_overage=allow_overage,
+        )
+        if added:
+            return added
+        bound = _bound_to_team_failure(error, team)
+        if bound is not None:
+            raise bound
+        if _is_capacity_error(error):
+            capacity_errors.append(error or "no_gpt_seat")
+        elif error:
+            hard_errors.append((error, team.get("id")))
 
     if hard_errors:
         reason, team_id = hard_errors[-1]
