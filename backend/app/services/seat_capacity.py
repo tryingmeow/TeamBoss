@@ -188,12 +188,13 @@ def billed_free_seats(
     pending: Any = 0,
     legacy_available: Any = None,
 ) -> int:
-    """计费类型 T 的空位数（尚未扣进程内预留）。
+    """只看 ``seat_capacity`` 时计费类型 T 的空位数（尚未扣预留）。
 
     * 分类型值 = ``seat_capacity[T].available − 待接受的 T 类邀请``。
     * ``default``：分类型值和旧公式（``legacy_available`` = seats_entitled − 在用 default
       − 待接受 default）都有时取**更小**的；只有一个时用那一个；都没有时 0。
-    * 其他计费类型（Premium）：没有可信的分类型值时 0。
+    * 其他计费类型（Premium）：没有可信的分类型值时 0。这里只用于缓存预筛；现拉时
+      再用已付 − 在用 − 待接受压一道（见 ``occupancy_bounded_free_seats``）。
     * 非计费 / 未知类型：0（调用方本来就不该为它们问空位）。
     """
     seat_type = normalize_seat_type(seat_type)
@@ -208,6 +209,28 @@ def billed_free_seats(
         legacy = max(0, safe_int(legacy_available))
     candidates = [value for value in (per_type, legacy) if value is not None]
     return min(candidates) if candidates else 0
+
+
+def occupancy_bounded_free_seats(
+    entry: dict[str, int] | None,
+    *,
+    in_use: int | None,
+    pending: int,
+) -> int:
+    """非 default 计费类型（Premium）的现拉空位（尚未扣预留）。
+
+    ``pending`` = 待接受的 T 类邀请加上没带类型的邀请。取两个值里更小的：
+    ``seat_capacity[T].available − pending``，和按占用自己算的
+    ``paid − 在用 T（seat_type_counts） − pending``。只信 available 一个上游字段的话，
+    它没扣到的占用就会被再卖一次。任何一块缺失（没有 T 条目、seat_type_counts 里
+    没有 T）= 0。
+    """
+    if entry is None or in_use is None:
+        return 0
+    occupied_by_invites = max(0, safe_int(pending))
+    by_upstream = safe_int(entry.get("available")) - occupied_by_invites
+    by_occupancy = safe_int(entry.get("paid")) - in_use - occupied_by_invites
+    return max(0, min(by_upstream, by_occupancy))
 
 
 @dataclass(frozen=True)
@@ -343,48 +366,134 @@ async def update_member_seat_usage_cache(team_id: str, members: Any) -> MemberSe
     return usage
 
 
+class SeatCapacityFetchError(Exception):
+    pass
+
+
+# 待接受邀请每页条数和翻页上限：与成员快照的拉取一致（100 页 × 100 条）。
+PENDING_PAGE_LIMIT = 100
+MAX_PENDING_PAGES = 100
+
+
+def _pending_items(pending_data: Any) -> list[dict[str, Any]]:
+    """取出待接受邀请列表。没有可用的列表、条目不是对象 = 占用未知，抛 SeatCapacityFetchError。
+
+    ``{"items": []}`` 是空名单；``{}``、``{"items": null}``、非对象响应是「没拿到名单」，
+    绝不能当成 0 个待接受邀请——那会把已经被邀请占着的空位再卖一次。
+    """
+    if not isinstance(pending_data, dict):
+        raise SeatCapacityFetchError("pending invites response is not an object")
+    for key in ("items", "invites"):
+        items = pending_data.get(key)
+        if isinstance(items, list):
+            if not all(isinstance(item, dict) for item in items):
+                raise SeatCapacityFetchError("pending invites response has a non-object entry")
+            return items
+    raise SeatCapacityFetchError("pending invites response has no usable list")
+
+
+def pending_invite_seat_type(item: dict[str, Any]) -> str | None:
+    """待接受邀请的席位类型；没带（缺失 / null / 空串 / 不是字符串）返回 None。"""
+    raw = item.get("seat_type")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw.strip()
+
+
 def pending_count_from_api(pending_data: dict[str, Any], seat_type: str) -> int:
-    """待接受邀请里席位类型为 ``seat_type`` 的个数（缺失的 seat_type 按 default）。"""
-    items = pending_data.get("items") if isinstance(pending_data, dict) else None
-    if not isinstance(items, list):
-        items = pending_data.get("invites") if isinstance(pending_data, dict) else None
-    if not isinstance(items, list):
-        return 0
+    """占着 ``seat_type`` 的待接受邀请个数：类型就是它的，加上没带类型的。
+
+    没带类型的邀请不知道占的是哪一种，对**每个**计费类型都算一份（宁可少卖）。
+    名单缺失或结构不对抛 SeatCapacityFetchError。
+    """
+    items = _pending_items(pending_data)
     wanted = normalize_seat_type(seat_type)
-    return sum(
-        1 for item in items
-        if isinstance(item, dict) and normalize_seat_type(item.get("seat_type")) == wanted
-    )
+    count_untyped = is_billed_seat_type(wanted)
+    count = 0
+    for item in items:
+        item_type = pending_invite_seat_type(item)
+        if item_type == wanted or (item_type is None and count_untyped):
+            count += 1
+    return count
+
+
+def untyped_pending_count_from_api(pending_data: dict[str, Any]) -> int:
+    return sum(1 for item in _pending_items(pending_data) if pending_invite_seat_type(item) is None)
 
 
 def pending_default_count_from_api(pending_data: dict[str, Any]) -> int:
     return pending_count_from_api(pending_data, DEFAULT_SEAT_TYPE)
 
 
+async def fetch_all_pending_invites(
+    client: Any, limit: int = PENDING_PAGE_LIMIT
+) -> dict[str, Any]:
+    """分页拉完整份待接受邀请，返回 ``{"items": [...], "total": n}``。
+
+    拿不到完整名单一律抛 SeatCapacityFetchError（占用未知 = 没有空位）：
+    任何一页报错、没有可用列表、条目不是对象；给了 ``total`` 却在凑够之前收到短页；
+    翻到 ``MAX_PENDING_PAGES`` 还没结束。没有 ``total`` 时，短页（不足 ``limit`` 条）就是最后一页。
+    """
+    page_size = max(1, int(limit))
+    items: list[dict[str, Any]] = []
+    offset = 0
+    for _ in range(MAX_PENDING_PAGES):
+        data = await run_chatgpt_call(client.get_pending_invites, offset, page_size)
+        error = chatgpt_api_error(data)
+        if error:
+            raise SeatCapacityFetchError(error)
+        page_items = _pending_items(data)
+        items.extend(page_items)
+        total = data.get("total")
+        if isinstance(total, bool) or not isinstance(total, int):
+            total = None
+        short_page = len(page_items) < page_size
+        if total is not None:
+            if len(items) >= total:
+                break
+            if short_page:
+                raise SeatCapacityFetchError(
+                    "pending invites truncated before the reported total"
+                )
+        elif short_page:
+            break
+        offset += page_size
+    else:
+        raise SeatCapacityFetchError("pending invites exceed the paging limit")
+    return {"items": items, "total": len(items)}
+
+
 def chatgpt_api_error(result: dict[str, Any]) -> str | None:
     return result.get("error") if isinstance(result, dict) else None
 
 
-class SeatCapacityFetchError(Exception):
-    pass
+async def _live_capacity_reads(
+    client: Any, pending_limit: int
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """并发拉订阅、分类型人数和完整的待接受邀请；任何一份报错都抛 SeatCapacityFetchError。"""
+    subscription, seat_counts, pending = await asyncio.gather(
+        run_chatgpt_call(client.get_subscription),
+        run_chatgpt_call(client.get_seat_type_counts),
+        fetch_all_pending_invites(client, pending_limit),
+    )
+    for result in (subscription, seat_counts):
+        error = chatgpt_api_error(result)
+        if error:
+            raise SeatCapacityFetchError(error)
+    return subscription, seat_counts, pending
 
 
-async def fetch_live_chatgpt_seat_capacity(client: Any, pending_limit: int = 100) -> tuple[
+async def fetch_live_chatgpt_seat_capacity(
+    client: Any, pending_limit: int = PENDING_PAGE_LIMIT
+) -> tuple[
     ChatGPTSeatCapacity,
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
 ]:
-    subscription, seat_counts, pending = await asyncio.gather(
-        run_chatgpt_call(client.get_subscription),
-        run_chatgpt_call(client.get_seat_type_counts),
-        run_chatgpt_call(client.get_pending_invites, 0, pending_limit),
-    )
-
-    for result in (subscription, seat_counts, pending):
-        error = chatgpt_api_error(result)
-        if error:
-            raise SeatCapacityFetchError(error)
+    """现拉 ChatGPT（default）空位。``pending`` 是完整的待接受邀请
+    （``{"items": [...], "total": n}``）；没带类型的邀请算作 default。"""
+    subscription, seat_counts, pending = await _live_capacity_reads(client, pending_limit)
 
     # 拿不到合法的 seats_entitled 就没有可信的容量：按拉取失败处理（邀请不往这个
     # team 发、手动巡逻不把它算作刷新成功），而不是 safe_int 成 0 或者把
@@ -415,27 +524,30 @@ class SeatTypeCapacity:
     available: int
     paid: int | None
     in_use: int | None
+    # 占着这个类型的待接受邀请，含没带类型的那些（pending_untyped 是其中的个数）。
     pending: int
+    pending_untyped: int = 0
 
     def describe(self) -> str:
         """给日志 / 409 文案用的一行摘要，不含邮箱。"""
         return (
             f"seat_type={self.seat_type}, paid={self.paid}, in_use={self.in_use}, "
-            f"pending={self.pending}, available={self.available}"
+            f"pending={self.pending}, pending_untyped={self.pending_untyped}, "
+            f"available={self.available}"
         )
 
 
 async def fetch_live_seat_type_capacity(
     client: Any,
     seat_type: str,
-    pending_limit: int = 100,
+    pending_limit: int = PENDING_PAGE_LIMIT,
 ) -> tuple[SeatTypeCapacity, dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """现拉计费类型 ``seat_type`` 的空位。任何一个读接口失败都抛 SeatCapacityFetchError，
-    调用方按「没有空位」处理（失败关闭）。
+    """现拉计费类型 ``seat_type`` 的空位。任何一个读接口失败、待接受邀请没拉全，都抛
+    SeatCapacityFetchError，调用方按「没有空位」处理（失败关闭）。
 
     ``default`` 走 ``fetch_live_chatgpt_seat_capacity``（含 seats_entitled 校验和取小规则）；
-    其他计费类型只认 ``seat_capacity[T]``，缺失 = 0 空位。非计费 / 未知类型是调用方的
-    编程错误，抛 ValueError。
+    其他计费类型按 ``occupancy_bounded_free_seats``，缺任何一块 = 0 空位。没带类型的
+    待接受邀请对每个计费类型都扣一份。非计费 / 未知类型是调用方的编程错误，抛 ValueError。
     """
     seat_type = normalize_seat_type(seat_type)
     if not is_billed_seat_type(seat_type):
@@ -452,34 +564,28 @@ async def fetch_live_seat_type_capacity(
                 paid=entry["paid"] if entry else capacity.seats_entitled,
                 in_use=capacity.active_chatgpt,
                 pending=capacity.pending_default,
+                pending_untyped=untyped_pending_count_from_api(pending),
             ),
             subscription,
             seat_counts,
             pending,
         )
 
-    subscription, seat_counts, pending = await asyncio.gather(
-        run_chatgpt_call(client.get_subscription),
-        run_chatgpt_call(client.get_seat_type_counts),
-        run_chatgpt_call(client.get_pending_invites, 0, pending_limit),
-    )
-    for result in (subscription, seat_counts, pending):
-        error = chatgpt_api_error(result)
-        if error:
-            raise SeatCapacityFetchError(error)
+    subscription, seat_counts, pending = await _live_capacity_reads(client, pending_limit)
     if not isinstance(subscription, dict):
         raise SeatCapacityFetchError("subscription response is not an object")
 
-    entries = parse_seat_capacity(subscription)
-    entry = (entries or {}).get(seat_type)
+    entry = (parse_seat_capacity(subscription) or {}).get(seat_type)
+    in_use = seat_type_count_from_seat_counts(seat_counts, seat_type)
     pending_count = pending_count_from_api(pending, seat_type)
     return (
         SeatTypeCapacity(
             seat_type=seat_type,
-            available=billed_free_seats(seat_type, entries=entries, pending=pending_count),
+            available=occupancy_bounded_free_seats(entry, in_use=in_use, pending=pending_count),
             paid=entry["paid"] if entry else None,
-            in_use=seat_type_count_from_seat_counts(seat_counts, seat_type),
+            in_use=in_use,
             pending=pending_count,
+            pending_untyped=untyped_pending_count_from_api(pending),
         ),
         subscription,
         seat_counts,

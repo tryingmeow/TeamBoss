@@ -1240,10 +1240,11 @@ def _snapshot_contains_email(snapshot: dict[str, Any] | None, email: str) -> boo
 
 
 async def _chatgpt_available(client: ChatGPTClient, team_id: str, *, email: str = "") -> tuple[bool, str]:
+    """锁内实时复查 ChatGPT 空位。读不到、或待接受邀请没拉全 = 没有空位（失败关闭）。"""
     try:
         capacity, subscription, seat_counts, _pending = await fetch_live_chatgpt_seat_capacity(client)
     except SeatCapacityFetchError as exc:
-        return False, str(exc)
+        return False, f"no_chatgpt_seat: capacity_unknown: {exc}"
 
     await update_capacity_cache(team_id, subscription, seat_counts)
     reserved = await reserved_default_seats(team_id, exclude_email=email)
@@ -1288,8 +1289,9 @@ async def _cached_premium_free(team_ids: list[str]) -> dict[str, int]:
 async def _premium_available(
     client: ChatGPTClient, team_id: str, *, email: str = ""
 ) -> tuple[bool, str, str]:
-    """锁内实时复查 Premium 空位：seat_capacity.prolite.available − 待接受的 Premium 邀请
-    − 进程内 Premium 预留。读不到 = 没有空位（失败关闭）。
+    """锁内实时复查 Premium 空位：min(seat_capacity.prolite.available，已付 − 在用 Premium)
+    − 待接受的 Premium 及没带类型的邀请 − Premium 预留。
+    读不到、或待接受邀请没拉全 = 没有空位（失败关闭）。
 
     返回 (有没有空位, 给日志的原因, 给管理员通知的原因)。超员策略在这里**不看**：
     兑换永远不超员，哪怕 Team 设成「超员自动」。
@@ -1306,10 +1308,11 @@ async def _premium_available(
     free = capacity.available - reserved
     if free <= 0:
         paid = "?" if capacity.paid is None else capacity.paid
+        in_use = "?" if capacity.in_use is None else capacity.in_use
         return (
             False,
             f"no_premium_seat: {capacity.describe()}, reserved={reserved}",
-            f"已付 {paid}，待接受 {capacity.pending}，预留 {reserved}，没有空位",
+            f"已付 {paid}，在用 {in_use}，待接受 {capacity.pending}，预留 {reserved}，没有空位",
         )
     return True, f"premium_available={free}, {capacity.describe()}", ""
 

@@ -68,7 +68,10 @@ class FakeTeamClient:
 
     def get_seat_type_counts(self):
         self.reads.append("get_seat_type_counts")
-        return {"seat_type_counts": dict(self.counts)}
+        # 上游总是给出全部四种类型（没人的是 0）；Premium 空位要用到 prolite 的在用人数。
+        counts = {"default": 0, "usage_based": 0, "automation": 0, "prolite": 0}
+        counts.update(self.counts)
+        return {"seat_type_counts": counts}
 
     def get_pending_invites(self, offset=0, limit=100):
         self.reads.append("get_pending_invites")
