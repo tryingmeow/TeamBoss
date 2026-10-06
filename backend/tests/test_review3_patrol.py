@@ -9,6 +9,8 @@
   Premium 兑换码的兑换（_teamboss_seat_record_sync）也是。改席位 / 邀请记录仍然永久挡 Premium 踢人。
 - N1：GET /api/patrol/status（Telegram /watch、/team）列的"待处理"和真正的超员踢人同一份选人；
   受保护的人单列为"不自动移除"，不算待处理。
+- N2：Premium 外部成员移除失败（上游 403 这类每轮都会重复）的卡片走 team-health 的限频
+  （REPEAT_ALERT_INTERVAL）；失败日志每轮照写，移除成功的卡片照常每次发。
 
 所有上游调用都是记录调用的假客户端，绝不触网。
 """
@@ -17,6 +19,7 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,7 +33,7 @@ from test_review2_patrol import PROD_OWNER, _Fixture, _outsider
 
 from app import tg_bot
 from app.routes import patrol as patrol_routes
-from app.services import patrol
+from app.services import patrol, team_health_alerts
 from app.services.gpt_invites import EMAIL_ALREADY_IN_TEAM
 
 
@@ -413,6 +416,90 @@ class RiskViewSelectionTest(_R3Fixture):
         _status, team = self._status_for(team_id)
 
         self.assertEqual([c["email"] for c in team["detected_over"]], ["out1@example.com"])
+
+
+# ═══ N2：Premium 移除失败的卡片限频 ═══════════════════════════════════════════════
+
+class ForbiddenClient(RecordingClient):
+    """remove_member 每次都被上游 403 拒绝。"""
+
+    def remove_member(self, user_id):
+        RecordingClient.calls.append(("remove_member", user_id))
+        return {"error": "403 Forbidden: insufficient permissions"}
+
+
+class PremiumKickFailureThrottleTest(_R3Fixture):
+    def _premium_team(self, team_id):
+        member = _member("p@example.com", "u-p", seat_type="prolite")
+        self._armed_team(team_id, [PROD_OWNER, member], seats_entitled=2)
+
+    def _kick_cards(self):
+        return [t for t in self.notify_calls if "巡逻移除 Premium 外部成员" in t]
+
+    def _failed_kick_logs(self):
+        return [l for l in self._logs("patrol_kick") if l["result"] == "failed"]
+
+    def test_repeated_403_sends_one_card_and_logs_every_round(self):
+        self._premium_team("team-n2")
+
+        with patch.object(patrol, "ChatGPTClient", ForbiddenClient):
+            first = self._patrol(dry_run=False)
+            second = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-p")] * 2)
+        cards = self._kick_cards()
+        self.assertEqual(len(cards), 1)
+        self.assertIn("p@example.com（403 Forbidden", cards[0])
+        failed = self._failed_kick_logs()
+        self.assertEqual(len(failed), 2)
+        self.assertTrue(all("403 Forbidden" in (l["error_message"] or "") for l in failed))
+        for result in (first, second):
+            self.assertEqual(
+                [e["result"] for e in result["events"] if e.get("action") == "kick"], ["failed"]
+            )
+
+    def test_reminder_after_the_team_health_interval(self):
+        self._premium_team("team-n2-remind")
+        with patch.object(patrol, "ChatGPTClient", ForbiddenClient):
+            self._patrol(dry_run=False)
+            # 上一次提醒已经过了 REPEAT_ALERT_INTERVAL：再提醒一次。
+            stale = (datetime.now(timezone.utc) - team_health_alerts.REPEAT_ALERT_INTERVAL
+                     - timedelta(minutes=1)).isoformat()
+            conn = self._conn()
+            conn.execute(
+                "UPDATE team_health_incidents SET last_notified_at = ? WHERE team_id = ? "
+                "AND alert_key LIKE 'premium_kick_failed:%'",
+                (stale, "team-n2-remind"),
+            )
+            conn.commit()
+            conn.close()
+            self._patrol(dry_run=False)
+
+        cards = self._kick_cards()
+        self.assertEqual(len(cards), 2)
+        self.assertIn("仍未成功", cards[1])
+        self.assertEqual(len(self._failed_kick_logs()), 2)
+
+    def test_success_card_is_not_throttled_and_closes_the_failure(self):
+        self._premium_team("team-n2-ok")
+        with patch.object(patrol, "ChatGPTClient", ForbiddenClient):
+            self._patrol(dry_run=False)
+
+        self._patrol(dry_run=False)
+
+        cards = self._kick_cards()
+        self.assertEqual(len(cards), 2)
+        self.assertIn("✅ 已移除：p@example.com", cards[1])
+        conn = self._conn()
+        try:
+            open_rows = conn.execute(
+                "SELECT COUNT(*) FROM team_health_incidents WHERE team_id = ? AND status = 'open' "
+                "AND alert_key LIKE 'premium_kick_failed:%'",
+                ("team-n2-ok",),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(open_rows, 0)
 
 
 if __name__ == "__main__":

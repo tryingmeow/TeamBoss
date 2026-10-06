@@ -64,6 +64,8 @@
   永久有效），或还在保护期的 Premium 兑换（同第 7 条：兑换之后没被到期 / 管理员 / 巡逻移出），
   或者超员踢人第 7 条保护他，都不踢、只提醒；快照开始拉取之后 TeamBoss 动过他的席位，这一轮不踢。日志沿用 patrol_kick /
   patrol_would_kick / patrol_kick_batch_capped，detail 带 seat_type=prolite、reason=premium_outsider。
+  移除成功的卡片每次都发；移除失败的卡片（上游 403 这类每轮都会重复）按 team_health_incidents 限频，
+  同一批人 REPEAT_ALERT_INTERVAL 内只提醒一次（_report_premium_kick_failures_sync），失败日志每次照写。
 - 注册表外的类型（如 automation）任何模式下都不踢、不撤。严格模式不碰 Premium（交给上一条），
   它的"别一次踢一片"护栏仍按全部疑似陌生成员计数。
 - 没被处理的 Premium 外部成员（巡逻没开、豁免 / Codex 队、被拦下）、TeamBoss 成员被切到 Premium 但不是
@@ -95,7 +97,11 @@ from .snapshot_pages import SnapshotPageAccumulator, SnapshotPageError
 from .tg_member_bindings import deactivate_member_binding_if_inactive_sync
 from .tg_commands import sync_email_chat_commands_sync
 from .tg_notify import notify_admins_sync
-from .team_health_alerts import close_incident_family_sync, report_team_failure_sync
+from .team_health_alerts import (
+    REPEAT_ALERT_INTERVAL,
+    close_incident_family_sync,
+    report_team_failure_sync,
+)
 from .team_locks import member_operation_claim_sync
 
 # 向后兼容：模块级占位符，测试可能会 patch 它
@@ -2000,6 +2006,59 @@ def _report_premium_seat_findings_sync(
     return outcome
 
 
+_PREMIUM_KICK_BASIS = "💎 判定依据：系统外加入、占用 Premium 席位（ChatGPT 按月单独扣费）、非 Owner"
+PREMIUM_KICK_FAILURE_KEY_PREFIX = "premium_kick_failed:"
+
+
+def _report_premium_kick_failures_sync(
+    team_id: str, name: str, failures: list[tuple[str, str]]
+) -> Optional[dict]:
+    """本轮 Premium 外部成员移除失败（上游报错如 403，或被安全闸门拦下）的 Telegram 卡片。
+
+    走 team_health_incidents，和 Team 故障告警同一套限频：同一批失败的人（只看是谁，不看错误文字，
+    上游的错误文字每次可能不同）是同一个告警，第一次立即发，之后每 REPEAT_ALERT_INTERVAL 最多再提醒
+    一次，中间恢复过又失败也算在内（notify_interval）。换了一批人是新的告警，立即发。本轮没有失败
+    就把这一族静默关掉，不发"恢复"。每次失败的 patrol_kick 日志在 _patrol_kick 里照写，不受影响。
+    """
+    if not failures:
+        close_incident_family_sync(
+            team_id, PREMIUM_KICK_FAILURE_KEY_PREFIX, forget_after=REPEAT_ALERT_INTERVAL
+        )
+        return None
+
+    targets = sorted({who for who, _ in failures})
+    alert_key = PREMIUM_KICK_FAILURE_KEY_PREFIX + hashlib.sha256(
+        "\n".join(targets).encode("utf-8")
+    ).hexdigest()[:16]
+    close_incident_family_sync(
+        team_id,
+        PREMIUM_KICK_FAILURE_KEY_PREFIX,
+        keep_alert_key=alert_key,
+        forget_after=REPEAT_ALERT_INTERVAL,
+    )
+    failed_text = "、".join(f"{who}（{err}）" for who, err in failures)
+    repeat_hours = int(REPEAT_ALERT_INTERVAL.total_seconds() // 3600)
+
+    def render(is_reminder: bool) -> str:
+        title = "🔁 巡逻移除 Premium 外部成员仍未成功" if is_reminder else "🚨 巡逻移除 Premium 外部成员失败"
+        return detail_card(f"{title} · {name}", [
+            _PREMIUM_KICK_BASIS,
+            "⚠️ 处理失败：" + failed_text,
+            f"🔕 同样的人一直失败时 {repeat_hours} 小时内不再重复提醒，每次失败都记在操作日志里",
+        ])
+
+    return report_team_failure_sync(
+        team_id,
+        alert_key,
+        failed_text,
+        source="patrol",
+        notify_interval=REPEAT_ALERT_INTERVAL,
+        render=render,
+        # 运行时再取模块里的 notify_admins_sync：巡逻的所有 Telegram 通知走同一个出口。
+        notify=lambda text: _sent_count(notify_admins_sync(text)),
+    )
+
+
 # ── 主入口 ───────────────────────────────────────────────────────────────
 
 def run_patrol(
@@ -2140,6 +2199,8 @@ def run_patrol(
             # 本轮已移除、或推迟到下一轮的人：都不进下面的席位提醒。
             premium_handled_ids: set[str] = set()
             premium_guard_reason = ""
+            # 本轮移除失败的 Premium 外部成员 [(邮箱或 user_id, 原因)]，卡片在下面按 team-health 规则限频。
+            premium_failures: list[tuple[str, str]] = []
             # 本轮这个 Team 已经动过（或空跑里会动）的人数，Premium 和超员两条路合计不超过
             # NON_STRICT_KICK_ABS_CAP。真踢时请求发出去之前就算上，结果不明也算；被闸门拦下、
             # 推迟的没发请求，不算。
@@ -2190,7 +2251,6 @@ def run_patrol(
                         )
                     premium_client = None
                     premium_kicked_emails: list[str] = []
-                    premium_failed_emails: list[str] = []
                     for position, cand in enumerate(premium_selected, start=1):
                         email = cand.get("email") or ""
                         user_id = cand.get("id") or cand.get("user_id") or ""
@@ -2227,7 +2287,7 @@ def run_patrol(
                             kicked += 1
                             premium_kicked_emails.append(email)
                         elif not deferred:
-                            premium_failed_emails.append(f"{email}（{err}）")
+                            premium_failures.append((email or str(user_id), str(err)))
                         if ok or deferred:
                             premium_handled_ids.add((email or "").strip().lower() or str(user_id))
                         events.append({
@@ -2237,16 +2297,23 @@ def run_patrol(
                             "rule": "premium_outsider", "position": position,
                             "reason": reason, "error": err,
                         })
-                    if premium_kicked_emails or premium_failed_emails:
-                        rows = ["💎 判定依据：系统外加入、占用 Premium 席位（ChatGPT 按月单独扣费）、非 Owner"]
-                        if premium_kicked_emails:
-                            rows.append("✅ 已移除：" + "、".join(premium_kicked_emails))
-                        if premium_failed_emails:
-                            rows.append("⚠️ 处理失败：" + "、".join(premium_failed_emails))
-                        notify_admins_sync(detail_card(f"🚨 巡逻移除 Premium 外部成员 · {name}", rows))
+                    if premium_kicked_emails:
+                        notify_admins_sync(detail_card(f"🚨 巡逻移除 Premium 外部成员 · {name}", [
+                            _PREMIUM_KICK_BASIS,
+                            "✅ 已移除：" + "、".join(premium_kicked_emails),
+                        ]))
             except Exception as exc:
                 _log_operation_sync(
                     team_id, "patrol_kick", None, "reason=premium_outsider", "failed", str(exc),
+                )
+            # 移除失败（上游 403 这类每轮都会重复）的卡片按 team-health 规则限频；每次失败的 patrol_kick
+            # 日志在 _patrol_kick 里照写。本轮没有失败就静默关掉上一份。
+            try:
+                _report_premium_kick_failures_sync(team_id, name, premium_failures)
+            except Exception as exc:
+                _log_operation_sync(
+                    team_id, "patrol_kick", None, "reason=premium_outsider, alert=kick_failed",
+                    "failed", str(exc),
                 )
 
             # ── 席位提醒：没被处理的 Premium / 未知席位，只提醒 ──────────────────
