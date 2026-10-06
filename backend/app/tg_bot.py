@@ -522,6 +522,15 @@ def _start_status(user: dict, chat_id: str, args: str) -> None:
     ).start()
 
 
+def _kept_over_quota_rows(team: dict) -> list[str]:
+    """超员 Team 里本该轮到、但 TeamBoss 以前拉过或他兑换过、巡逻不会移除的外部成员
+    （/api/patrol/status 的 detected_over_kept）。他们不是"待处理"，单列出来。"""
+    return [
+        f"🛡️ 不自动移除：{cand.get('email') or '未知成员'}（TeamBoss 以前拉过或他兑换过）"
+        for cand in team.get("detected_over_kept") or []
+    ]
+
+
 def cmd_watch(user: dict, args: str) -> str:
     try:
         data = _api_get("/api/patrol/status")
@@ -560,6 +569,7 @@ def cmd_watch(user: dict, args: str) -> str:
                 email = cand.get("email") or "未知成员"
                 seat_type = seat_type_label(cand.get("seat_type"))
                 rows.append(f"👤 待处理：{email} · {seat_type}")
+            rows.extend(_kept_over_quota_rows(t))
         cards.append(detail_card(f"{icon} {name}", rows))
     return "\n\n".join(("⚠️ 风险 Team", summary, *cards))
 
@@ -716,6 +726,7 @@ def cmd_team(user: dict, args: str) -> str:
         if t.get("risk") == "over":
             for cand in t.get("detected_over") or []:
                 rows.append(f"👤 待处理：{cand.get('email') or '未知成员'}")
+            rows.extend(_kept_over_quota_rows(t))
         fin = finance_by_id.get(t.get("team_id")) if finance_by_id else None
         if fin:
             currency = fin.get("billing_currency") or ""

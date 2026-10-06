@@ -11,9 +11,9 @@ from ..member_cache_service import fetch_and_cache_members
 from ..services.patrol import (
     PatrolActivationError,
     activate_patrol_sync,
-    classify_team,
     parse_exempt_team_ids,
     run_patrol,
+    team_risk_statuses_sync,
 )
 from ..services.seat_capacity import (
     fetch_live_chatgpt_seat_capacity,
@@ -100,21 +100,21 @@ async def get_patrol_status(refresh: bool = Query(False)):
         team_rows = [dict(team) for team in teams]
 
     errors: list[dict] = []
-    team_statuses = []
+    status_inputs = []
     for team in team_rows:
         team_id = team["id"]
         members = await _load_status_members(team_id, refresh, errors)
-        team_statuses.append(
-            classify_team(
-                team_id=team_id,
-                name=team["name"] or team_id,
-                codex_enabled=bool(team["is_codex_enabled"]),
-                # 原样交给 classify_team：席位数未知时它不出任何踢人预览
-                # （entitlement_valid=False），不能在这里先 `or 0` 把未知变成 0。
-                seats_entitled=team["seats_entitled"],
-                members=members,
-            )
-        )
+        status_inputs.append({
+            "team_id": team_id,
+            "name": team["name"] or team_id,
+            "codex_enabled": bool(team["is_codex_enabled"]),
+            # 原样交给 classify_team：席位数未知时它不出任何踢人预览
+            # （entitlement_valid=False），不能在这里先 `or 0` 把未知变成 0。
+            "seats_entitled": team["seats_entitled"],
+            "members": members,
+        })
+    # "待处理"必须和真踢同一份选人（TeamBoss 记录保护的人不算），要读库，放到线程里跑。
+    team_statuses = await asyncio.to_thread(team_risk_statuses_sync, status_inputs)
 
     result = {
         "kick_enabled": settings.get("patrol_kick_enabled") == "1",

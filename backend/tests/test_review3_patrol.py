@@ -7,14 +7,18 @@
 - F6：成功 / 待定 / 处理中的兑换只在之后没有被到期（auto_expire）、管理员（admin）、巡逻（patrol*）
   关掉过这个 Team + 邮箱的行时才保护；按解析后的时间比，读不出的时间按"还保护"。两条踢人路径都是，
   Premium 兑换码的兑换（_teamboss_seat_record_sync）也是。改席位 / 邀请记录仍然永久挡 Premium 踢人。
+- N1：GET /api/patrol/status（Telegram /watch、/team）列的"待处理"和真正的超员踢人同一份选人；
+  受保护的人单列为"不自动移除"，不算待处理。
 
 所有上游调用都是记录调用的假客户端，绝不触网。
 """
 
 import _isolation  # noqa: F401  must precede any app import
+import asyncio
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -24,6 +28,8 @@ from test_premium_patrol import (  # noqa: I001  (_isolation first)
 )
 from test_review2_patrol import PROD_OWNER, _Fixture, _outsider
 
+from app import tg_bot
+from app.routes import patrol as patrol_routes
 from app.services import patrol
 from app.services.gpt_invites import EMAIL_ALREADY_IN_TEAM
 
@@ -333,6 +339,80 @@ class RedemptionProtectionEndsTest(_R3Fixture):
                 self._patrol(dry_run=False, allow=[team_id])
 
                 self.assertEqual(self._calls("remove_member"), [])
+
+
+# ═══ N1：Telegram 风险视图的"待处理"和真踢同一份选人 ═══════════════════════════════
+
+class RiskViewSelectionTest(_R3Fixture):
+    def _over_team(self, team_id):
+        # 2 个席位：Owner + 老外部成员 + 最新进来的付费用户（兑换还在保护期），超 1 个。
+        payer = _member("payer@example.com", "u-pay", first_seen_at="2026-08-02T00:00:00+00:00")
+        older = _outsider(1, day=10)
+        self._armed_team(team_id, [PROD_OWNER, older, payer], seats_entitled=2)
+        return payer
+
+    def _status_for(self, team_id):
+        status = asyncio.run(patrol_routes.get_patrol_status(refresh=False))
+        return status, {t["team_id"]: t for t in status["teams"]}[team_id]
+
+    @staticmethod
+    def _tg_views(status, team_id):
+        def fake_get(path, params=None, timeout=None):
+            if path == "/api/patrol/status":
+                return status
+            raise RuntimeError("finance overview is not part of this test")
+
+        with patch.object(tg_bot, "_api_get", side_effect=fake_get):
+            return tg_bot.cmd_watch({}, ""), tg_bot.cmd_team({}, team_id)
+
+    def test_protected_member_is_not_listed_as_pending(self):
+        team_id = "team-n1-kept"
+        self._redeem(team_id, "payer@example.com", REDEEMED)
+        self._over_team(team_id)
+
+        status, team = self._status_for(team_id)
+
+        self.assertEqual(team["risk"], "over")
+        self.assertEqual(team["over_by"], 1)
+        # 最新的那个受保护，名额不往后补：真踢一个都不踢，视图也没有待处理。
+        self.assertEqual(team["detected_over"], [])
+        self.assertEqual([c["email"] for c in team["detected_over_kept"]], ["payer@example.com"])
+        self._patrol(dry_run=True, allow=[team_id])
+        self.assertEqual(self._logs("patrol_would_kick"), [])
+
+        for text in self._tg_views(status, team_id):
+            self.assertNotIn("待处理", text)
+            self.assertIn("🛡️ 不自动移除：payer@example.com", text)
+
+    def test_kickable_member_is_listed_as_pending(self):
+        # 同一个人，兑换之后已经到期踢掉过：真踢会踢他，视图把他列为待处理。
+        team_id = "team-n1-pending"
+        self._redeem(team_id, "payer@example.com", REDEEMED)
+        self._closed(team_id, "payer@example.com", "u-pay", kick_source="auto_expire", kicked_at=AFTER)
+        self._over_team(team_id)
+
+        status, team = self._status_for(team_id)
+
+        self.assertEqual([c["email"] for c in team["detected_over"]], ["payer@example.com"])
+        self.assertEqual(team["detected_over_kept"], [])
+        self._patrol(dry_run=True, allow=[team_id])
+        self.assertEqual([l["target_email"] for l in self._logs("patrol_would_kick")],
+                         ["payer@example.com"])
+
+        watch, card = self._tg_views(status, team_id)
+        self.assertIn("👤 待处理：payer@example.com · ChatGPT", watch)
+        self.assertIn("👤 待处理：payer@example.com", card)
+        self.assertNotIn("不自动移除", watch + card)
+
+    def test_owner_email_is_never_pending(self):
+        team_id = "team-n1-owner"
+        boss = _member("boss@example.com", "u-boss", first_seen_at="2026-08-02T00:00:00+00:00")
+        self._armed_team(team_id, [boss, _outsider(1, day=10)], seats_entitled=1)
+        self._owner_email(team_id, "BOSS@example.com")
+
+        _status, team = self._status_for(team_id)
+
+        self.assertEqual([c["email"] for c in team["detected_over"]], ["out1@example.com"])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@
   空出的名额不往后补（select_over_quota_kick_candidates_sync），所以最多踢 over_by 个。over_by 的
   算法不变。超员踢人不套 Premium 的"外部成员过多"护栏（小 Team 上它会拦下每一次正当的超员踢人），
   数量由 over_by 和单轮封顶 NON_STRICT_KICK_ABS_CAP 管着。
+  GET /api/patrol/status（Telegram /watch、/team）列的"待处理"就是这份选人，第 7 条保护的人单列在
+  detected_over_kept（team_risk_statuses_sync）。
 - dry-run 判定：effective_dry_run = dry_run 参数 OR settings.patrol_kick_enabled != '1'。
 - 真正执行踢人只能通过 `_patrol_kick()` 这一个函数：进函数先重新校验候选资格
   （source/is_owner/owner_email/seat_type），任一不满足直接拒绝、不踢 —— 纵深防御，防止上游逻辑
@@ -675,12 +677,23 @@ def valid_seats_entitled(value: Any) -> Optional[int]:
     return positive_seat_count(value)
 
 
+def _risk_preview_entry(member: dict) -> dict:
+    return {
+        "email": member.get("email"),
+        "user_id": member.get("id") or member.get("user_id"),
+        "seat_type": member.get("seat_type"),
+        "first_seen_at": member.get("first_seen_at"),
+    }
+
+
 def classify_team(*, team_id: str, name: str, codex_enabled: bool,
                    seats_entitled: Any, members: Any) -> dict:
-    """纯函数：给定 Team + 成员快照，算出风险等级和"会被踢的候选"，不做任何写操作。
+    """纯函数：给定 Team + 成员快照，算出风险等级和超员预览，不做任何写操作。
 
     risk：codex 开 = 'ok'（不管超没超）；codex 关且未超 = 'watch'；codex 关且超 = 'over'。
-    detected_over 只在 risk == 'over' 时给出（即真正会被 run_patrol 选中踢除的候选）。
+    detected_over 只在 risk == 'over' 时给出：只按来源 / 席位 / Owner 角色挑的最新 over_by 个，
+    不看 TeamBoss 记录（第 7 条）和 teams.owner_email，所以不是"真会被踢的人"。给人看的风险视图用
+    team_risk_statuses_sync，真踢用 select_over_quota_kick_candidates_sync。
     seats_entitled 不是正整数时无法判断是否超员：over_by 记 0、不给任何候选，
     codex 关时 risk 记 'watch'，并以 entitlement_valid=False 标出。
     """
@@ -698,16 +711,7 @@ def classify_team(*, team_id: str, name: str, codex_enabled: bool,
 
     detected_over: list[dict] = []
     if risk == "over":
-        selected = select_kick_candidates(members)[:over_by]
-        detected_over = [
-            {
-                "email": c.get("email"),
-                "user_id": c.get("id") or c.get("user_id"),
-                "seat_type": c.get("seat_type"),
-                "first_seen_at": c.get("first_seen_at"),
-            }
-            for c in selected
-        ]
+        detected_over = [_risk_preview_entry(c) for c in select_kick_candidates(members)[:over_by]]
 
     return {
         "team_id": team_id,
@@ -1664,6 +1668,39 @@ def select_over_quota_kick_candidates_sync(
         else:
             selected.append(member)
     return selected, vetoed
+
+
+def team_risk_statuses_sync(teams: Iterable[dict]) -> list[dict]:
+    """GET /api/patrol/status 的每个 Team 风险分类（Telegram /watch、/team 显示的"待处理"就是它）。
+
+    在 classify_team 之上，超员 Team 的 detected_over 换成超员踢人真正会选的人
+    （select_over_quota_kick_candidates_sync：最新的 over_by 个里去掉 Owner 邮箱和第 7 条保护的人，
+    空出的名额不往后补），被第 7 条保护的人放进 detected_over_kept——他们不会被自动移除，不是"待处理"。
+    不是超员的 Team 两个列表都是空的。teams 每项：{team_id, name, codex_enabled, seats_entitled, members}。
+    """
+    statuses: list[dict] = []
+    conn = _get_sync_db()
+    try:
+        for team in teams:
+            members = team.get("members")
+            status = classify_team(
+                team_id=team["team_id"],
+                name=team["name"],
+                codex_enabled=bool(team["codex_enabled"]),
+                seats_entitled=team["seats_entitled"],
+                members=members,
+            )
+            kept: list[dict] = []
+            if status["risk"] == "over":
+                selected, kept = select_over_quota_kick_candidates_sync(
+                    conn, team["team_id"], members, status["over_by"]
+                )
+                status["detected_over"] = [_risk_preview_entry(c) for c in selected]
+            status["detected_over_kept"] = [_risk_preview_entry(c) for c in kept]
+            statuses.append(status)
+    finally:
+        conn.close()
+    return statuses
 
 
 def outsider_batch_guard(members: Any) -> tuple[bool, int]:
