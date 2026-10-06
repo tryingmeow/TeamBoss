@@ -5,7 +5,7 @@
  * Shapes mirror the backend tables closely enough that the view functions in
  * `views.ts` can derive every API response the way the backend does.
  */
-import type { SeatType, Settings, Team } from '../types';
+import type { CodeSeatType, SeatType, Settings, Team } from '../types';
 import type {
   AccessTokenListItem,
   FinanceInvoiceRow,
@@ -37,7 +37,8 @@ export interface DemoMember {
   email: string;
   name: string | null;
   role: 'account-owner' | 'standard-user';
-  seat_type: SeatType;
+  /** Raw upstream seat type: a registry value or an unknown one such as `automation`. */
+  seat_type: string;
   is_owner: boolean;
   created_time: string;
   /** Local expiry record. `source === null` means no record exists ("unmanaged"). */
@@ -70,6 +71,8 @@ export interface DemoKicked {
 
 export interface DemoTeam {
   team: Team;
+  /** Paid seats per billed type; `seat_capacity` and `seats_entitled` are derived from these. */
+  paid: { default: number; prolite: number };
   members: DemoMember[];
   invites: DemoInvite[];
   kicked: DemoKicked[];
@@ -78,6 +81,7 @@ export interface DemoTeam {
 }
 
 export interface DemoAccessToken extends AccessTokenListItem {
+  seat_type: CodeSeatType;
   /** Full token string. The real backend only keeps a hash; the demo keeps it so lookups work. */
   token: string;
 }
@@ -137,12 +141,24 @@ export function findTeamBySlug(db: DemoDb, slug: string): DemoTeam {
   return record;
 }
 
-/** Recomputes the cached seat counts and member emails after a membership change. */
+/** Recomputes the cached seat counts, capacity and member emails after a membership change. */
 export function recount(record: DemoTeam): void {
-  const { team, members, invites } = record;
+  const { team, members, invites, paid } = record;
   team.seats_in_use = members.length;
   team.codex_count = members.filter((m) => m.seat_type === 'usage_based').length;
   team.chatgpt_count = members.filter((m) => m.seat_type === 'default').length;
+  const counts: Record<string, number> = { default: 0, usage_based: 0, automation: 0, prolite: 0 };
+  members.forEach((m) => {
+    counts[m.seat_type] = (counts[m.seat_type] ?? 0) + 1;
+  });
+  team.seat_type_counts = counts;
+  // Like the upstream subscription, `available` is paid minus active members of the type; pending
+  // invites are subtracted separately by whoever computes free seats.
+  team.seat_capacity = {
+    default: { paid: paid.default, available: Math.max(0, paid.default - counts.default) },
+    prolite: { paid: paid.prolite, available: Math.max(0, paid.prolite - counts.prolite) },
+  };
+  team.seats_entitled = paid.default + paid.prolite;
   team.cached_member_emails = Array.from(
     new Set([...members, ...invites].map((m) => m.email.trim().toLowerCase())),
   );
@@ -186,9 +202,11 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
   ];
 
   const shared = SHARED_MEMBERS.filter((p) => p.teams.some((t) => t.slug === spec.slug && !t.pending));
-  const seats: SeatType[] = [
-    ...Array<SeatType>(spec.gptMembers - 1).fill('default'),
-    ...Array<SeatType>(spec.codexMembers).fill('usage_based'),
+  const seats: string[] = [
+    ...Array<string>(spec.gptMembers - 1).fill('default'),
+    ...Array<string>(spec.codexMembers).fill('usage_based'),
+    ...Array<string>(spec.premiumMembers ?? 0).fill('prolite'),
+    ...Array<string>(spec.unknownMembers ?? 0).fill('automation'),
   ];
   // Spread Codex seats through the list instead of bunching them at the end.
   for (let i = seats.length - 1; i > 0; i -= 1) {
@@ -203,7 +221,7 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
 
   seats.forEach((seat, index) => {
     const person = index < shared.length ? { email: shared[index].email, name: shared[index].name } : nextPerson();
-    const isDetected = detectedSeats.has(index);
+    const isDetected = detectedSeats.has(index) || (Boolean(spec.premiumDetected) && seat === 'prolite');
     let joinedAt = isDetected
       ? now - 40 * MINUTE
       : createdAt + Math.floor(rand() * Math.max(1, now - createdAt - DAY));
@@ -306,7 +324,7 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     owner_email: ownerEmail,
     status: spec.status,
     seats_in_use: 0,
-    seats_entitled: spec.entitled,
+    seats_entitled: spec.entitled + (spec.premiumPaid ?? 0),
     codex_count: 0,
     chatgpt_count: 0,
     is_codex_enabled: spec.codexEnabled,
@@ -338,10 +356,14 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     sync_failing_since: spec.sync ? isoAt(now - spec.sync.failingSinceHoursAgo * HOUR) : null,
     sync_suspended_at: spec.sync ? isoAt(now - spec.sync.suspendedHoursAgo * HOUR) : null,
     cached_member_emails: [],
+    overage_policy: spec.policy ?? 'confirm',
+    seat_capacity: null,
+    seat_type_counts: {},
   };
 
   const record: DemoTeam = {
     team,
+    paid: { default: spec.entitled, prolite: spec.premiumPaid ?? 0 },
     members,
     invites,
     kicked: [],
@@ -435,7 +457,7 @@ const KICKED_SPECS: Array<{ slug: string; source: KickSource; kickedHoursAgo: nu
 
 export function createDemoDb(now: number): DemoDb {
   const reserved = new Set(SHARED_MEMBERS.map((p) => p.email));
-  const nextPerson = personCursor(peoplePool(160), reserved);
+  const nextPerson = personCursor(peoplePool(200), reserved);
 
   const teams = TEAM_SPECS.map((spec) => buildTeam(spec, now, nextPerson));
 
@@ -574,11 +596,14 @@ function seedAccessTokens(db: DemoDb): void {
   const tokyo = findTeamBySlug(db, 'tokyo');
   const nebula = findTeamBySlug(db, 'nebula');
   const orion = findTeamBySlug(db, 'orion');
+  const zenith = findTeamBySlug(db, 'zenith');
+  const premiumMember = zenith.members.find((m) => m.seat_type === 'prolite' && !m.is_owner) ?? zenith.members[1];
 
   type TokenSeed = {
     grant: string;
     ttlDays: number | null;
     note: string | null;
+    seatType?: CodeSeatType;
     createdDaysAgo: number;
     used?: { email: string; team: DemoTeam; daysAgo: number; action: string; result?: DemoTokenUse['result'] };
     disabled?: boolean;
@@ -603,6 +628,11 @@ function seedAccessTokens(db: DemoDb): void {
     { grant: '7d', ttlDays: 1, note: '体验 7 天', createdDaysAgo: 9 },
     { grant: '30d', ttlDays: 7, note: '误发，已作废', createdDaysAgo: 6, disabled: true },
     { grant: '360d', ttlDays: 7, note: '年卡', createdDaysAgo: 15 },
+    // Premium codes: one already redeemed into Zenith, two unused (one has nowhere to go while Zenith is full).
+    { grant: '30d', ttlDays: 30, note: 'Premium 月卡', seatType: 'prolite', createdDaysAgo: 10,
+      used: { email: premiumMember.email, team: zenith, daysAgo: 8, action: 'invited' } },
+    { grant: '30d', ttlDays: 14, note: 'Premium 月卡', seatType: 'prolite', createdDaysAgo: 0.5 },
+    { grant: '90d', ttlDays: 30, note: 'Premium 季卡 · 内部', seatType: 'prolite', createdDaysAgo: 0.3 },
   ];
 
   seeds.forEach((seed, index) => {
@@ -615,6 +645,7 @@ function seedAccessTokens(db: DemoDb): void {
       id,
       token,
       token_prefix: token.slice(0, 12),
+      seat_type: seed.seatType ?? 'default',
       grant_expires_in: seed.grant,
       token_expires_at: seed.ttlDays === null ? null : isoAt(createdAt + seed.ttlDays * DAY),
       max_uses: 1,

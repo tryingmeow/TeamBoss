@@ -328,6 +328,53 @@ export function buildLogs(db: DemoDb): DemoLogRow[] {
     detail: '邮箱已在该 Team 中，未重复邀请', result: 'skipped',
   });
 
+  // ── Overage policy and Premium (every detail key follows contract §3.8) ──
+  log(2.2 * D, { team_id: id('nebula'), action: 'set_overage_policy', detail: 'overage_policy=forbid, previous=confirm' });
+  log(3.5 * D, { team_id: id('helix'), action: 'set_overage_policy', detail: 'overage_policy=auto, previous=confirm' });
+  log(1.5 * D, { team_id: id('quasar'), action: 'set_overage_policy', detail: 'overage_policy=forbid, previous=auto' });
+  log(2.1 * D, {
+    team_id: id('nebula'), action: 'invite_member', target_email: 'new.hire@example.com', result: 'skipped',
+    detail: 'seat_type=default, policy=forbid, reason=overage_forbidden',
+  });
+  log(1.3 * D, {
+    team_id: id('atlas'), action: 'invite_member', target_email: 'intern.2026@example.com', result: 'skipped',
+    detail: 'seat_type=default, policy=confirm, reason=overage_needs_confirmation',
+  });
+  const quasarCodex = T('quasar').members.find((m) => m.seat_type === 'usage_based');
+  if (quasarCodex) {
+    log(0.6 * D, {
+      team_id: id('quasar'), action: 'change_seat', target_email: quasarCodex.email, result: 'skipped',
+      detail: `user_id=${quasarCodex.id}, seat_type=default, from_seat_type=usage_based, allow_overage=False, policy=forbid, reason=overage_forbidden`,
+    });
+  }
+  log(3.0 * D, {
+    team_id: id('helix'), action: 'invite_member', target_email: 'extra.seat@example.com',
+    detail: 'seat_type=default, expires_in=30d, allow_overage=False, policy=auto, overage=True',
+  });
+  const zenithPremium = T('zenith').members.find((m) => m.seat_type === 'prolite' && !m.is_owner);
+  if (zenithPremium) {
+    log(4.4 * D, {
+      team_id: id('zenith'), action: 'change_seat', target_email: zenithPremium.email,
+      detail: `user_id=${zenithPremium.id}, seat_type=prolite, from_seat_type=default, allow_overage=False, policy=confirm`,
+    });
+    log(0.9 * D, {
+      team_id: id('zenith'), action: 'redeem_seat_type_mismatch', target_email: zenithPremium.email, result: 'failed',
+      detail: 'seat_type=default, from_seat_type=prolite',
+      error_message: '兑换码是 ChatGPT 码，你当前是 Premium 席位，不能用它续期。',
+    });
+  }
+  log(0.35 * D, {
+    action: 'redeem_no_premium_seat', target_email: 'wait.premium@example.com', result: 'failed',
+    detail: 'seat_type=prolite', error_message: '没有可用 Premium 席位，兑换码未使用',
+  });
+  const quasarPremium = T('quasar').members.find((m) => m.seat_type === 'prolite');
+  if (quasarPremium) {
+    log(35 * H, {
+      team_id: id('quasar'), action: 'patrol_premium_alert', target_email: quasarPremium.email,
+      detail: `seat_type=prolite, source=detected, user_id=${quasarPremium.id}, delivered_to=2`, trigger_type: 'patrol',
+    });
+  }
+
   // ── Self-service redemptions ──
   db.tokenUses.forEach((use) => {
     const ago = Math.round((now - Date.parse(use.created_at)) / MINUTE);

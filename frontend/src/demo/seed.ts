@@ -5,7 +5,7 @@
  * Each team spec exists to exercise a specific UI state; the comment on the
  * spec says which one.
  */
-import type { SeatType } from '../types';
+import type { OveragePolicy, SeatType, WorkspaceDefaultSeatType } from '../types';
 import { DAY, HOUR } from './time';
 
 export interface TeamSpec {
@@ -23,7 +23,7 @@ export interface TeamSpec {
   codexMembers: number;
   invites: SeatType[];
   codexEnabled: boolean;
-  defaultSeat: SeatType | null;
+  defaultSeat: WorkspaceDefaultSeatType | null;
   currency: string;
   symbol: string;
   period: 'monthly' | 'yearly';
@@ -47,6 +47,16 @@ export interface TeamSpec {
   forcedExpiries?: number[];
   /** Number of newest ChatGPT members that were added outside the panel (`source: detected`). */
   detected?: number;
+  /** Overage policy; the backend default is `confirm`. */
+  policy?: OveragePolicy;
+  /** Paid Premium (`prolite`) seats. `entitled` stays the paid ChatGPT count; seats_entitled adds this on top. */
+  premiumPaid?: number;
+  /** Premium seat members (not counted in `gptMembers`). */
+  premiumMembers?: number;
+  /** Members on a seat type TeamBoss does not know (`automation`). */
+  unknownMembers?: number;
+  /** Mark the Premium members as added outside the panel (`source: detected`). */
+  premiumDetected?: boolean;
 }
 
 export const TEAM_SPECS: TeamSpec[] = [
@@ -63,7 +73,8 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // Full (20/20), Codex off, positive credit, last invoice paid more than computed.
-    n: 2, slug: 'nebula', name: 'Nebula-02', remark: null, status: 'active',
+    // Policy forbid: the full-Team "禁止超员" grey state for ChatGPT and Premium.
+    n: 2, slug: 'nebula', name: 'Nebula-02', remark: null, status: 'active', policy: 'forbid',
     entitled: 20, gptMembers: 20, codexMembers: 0, invites: [],
     codexEnabled: false, defaultSeat: 'default',
     currency: 'USD', symbol: '$', period: 'monthly', price: 30,
@@ -93,7 +104,7 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // EUR, yearly billing → monthly totals are null ("年付，月费暂不计算").
-    n: 5, slug: 'berlin', name: 'Berlin Ops', remark: '年付', status: 'active',
+    n: 5, slug: 'berlin', name: 'Berlin Ops', remark: '年付', status: 'active', policy: 'auto',
     entitled: 15, gptMembers: 13, codexMembers: 2, invites: [],
     codexEnabled: true, defaultSeat: 'default',
     currency: 'EUR', symbol: '€', period: 'yearly', price: null, yearlyTotal: 4500,
@@ -151,6 +162,50 @@ export const TEAM_SPECS: TeamSpec[] = [
     balance: '0', card: { brand: 'amex', last4: '4242' },
     renewsInDays: 11, periodDays: 30, willRenew: true, proxyId: 2, createdDaysAgo: 60,
     invoice: 'match', forcedExpiries: [-(7 * HOUR)],
+  },
+  {
+    // Full ChatGPT (6/6) with policy confirm and no Premium seat: every billed add asks first.
+    n: 11, slug: 'atlas', name: 'Atlas-11', remark: '超员需确认', status: 'active', policy: 'confirm',
+    entitled: 6, gptMembers: 5, codexMembers: 1, invites: ['default'],
+    codexEnabled: true, defaultSeat: 'default',
+    currency: 'USD', symbol: '$', period: 'monthly', price: 30,
+    balance: '0', card: { brand: 'visa', last4: '4242' },
+    renewsInDays: 13, periodDays: 30, willRenew: true, proxyId: null, createdDaysAgo: 100,
+    invoice: 'match',
+  },
+  {
+    // Full ChatGPT (4/4) with policy auto: adds go straight through and ChatGPT charges for the extra seat.
+    n: 12, slug: 'helix', name: 'Helix-12', remark: '超员自动', status: 'active', policy: 'auto',
+    entitled: 4, gptMembers: 4, codexMembers: 0, invites: [],
+    codexEnabled: false, defaultSeat: 'default',
+    currency: 'USD', symbol: '$', period: 'monthly', price: 30,
+    balance: '0', card: { brand: 'mastercard', last4: '4242' },
+    renewsInDays: 20, periodDays: 31, willRenew: true, proxyId: null, createdDaysAgo: 70,
+    invoice: 'match',
+  },
+  {
+    // Paid Premium seats (3) with 2 members + 1 pending Premium invite → Premium full; ChatGPT has 2 free.
+    // seats_entitled includes the Premium seats, so the legacy free-seat formula would invent free seats.
+    n: 13, slug: 'zenith', name: 'Zenith-13', remark: 'Premium 试点', status: 'active', policy: 'confirm',
+    entitled: 8, gptMembers: 6, codexMembers: 1, invites: ['prolite'],
+    premiumPaid: 3, premiumMembers: 2,
+    codexEnabled: true, defaultSeat: 'default',
+    currency: 'USD', symbol: '$', period: 'monthly', price: 30,
+    balance: '0', card: { brand: 'visa', last4: '4242' },
+    renewsInDays: 16, periodDays: 30, willRenew: true, proxyId: 1, createdDaysAgo: 55,
+    invoice: 'match', forcedExpiries: [30 * HOUR],
+  },
+  {
+    // ChatGPT full + forbid, one Premium seat still free, one member on the unknown `automation` seat,
+    // and the Premium member was added outside the panel (patrol alert only).
+    n: 14, slug: 'quasar', name: 'Quasar-14', remark: '禁止超员', status: 'active', policy: 'forbid',
+    entitled: 5, gptMembers: 5, codexMembers: 1, invites: [],
+    premiumPaid: 2, premiumMembers: 1, unknownMembers: 1, premiumDetected: true,
+    codexEnabled: true, defaultSeat: 'default',
+    currency: 'USD', symbol: '$', period: 'monthly', price: 30,
+    balance: '0', card: { brand: 'amex', last4: '4242' },
+    renewsInDays: 8, periodDays: 30, willRenew: true, proxyId: null, createdDaysAgo: 35,
+    invoice: 'match',
   },
 ];
 

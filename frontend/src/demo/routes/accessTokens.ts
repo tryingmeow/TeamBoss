@@ -19,11 +19,13 @@ import type {
   TokenQueryInfo,
   TokenUsageInfo,
 } from '../../api/client';
+import type { CodeSeatType } from '../../types';
 import { findTeam, findTeamBySlug, nextId, recount, type DemoAccessToken, type DemoDb, type DemoTeam, type DemoTokenUse } from '../db';
 import { bodyObject, bodyString, fail, ok, type DemoContext, type DemoResponse, type DemoRoute } from '../http';
 import { appendLog } from '../logs';
 import { DAY, HOUR, durationMs, isNeverDuration, isoAt } from '../time';
-import { availableGptSeats, expiryState } from '../views';
+import { seatLabel } from '../overage';
+import { expiryState, freeSeats } from '../views';
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
@@ -58,6 +60,8 @@ function createToken(ctx: DemoContext): DemoResponse {
   if (!grant) return fail(400, `Invalid duration: ${String(body.grant_expires_in ?? '')}. Use 3m, 12h, 7d, 30d or never`);
   const ttl = normalizeDuration(body.token_ttl, '7d');
   if (!ttl) return fail(400, `Invalid duration: ${String(body.token_ttl ?? '')}. Use 3m, 12h, 7d, 30d or never`);
+  const seatType = bodyObject(ctx).seat_type ?? 'default';
+  if (seatType !== 'default' && seatType !== 'prolite') return fail(422, [{ msg: "seat_type 必须是 'default' / 'prolite'" }]);
   const id = Math.max(0, ...ctx.db.tokens.map((t) => t.id)) + 1;
   const nnnn = String(id).padStart(4, '0');
   const token = `atm_demo${nnnn}-not-a-real-token-${nnnn}`;
@@ -68,6 +72,7 @@ function createToken(ctx: DemoContext): DemoResponse {
     id,
     token,
     token_prefix: token.slice(0, 12),
+    seat_type: seatType,
     grant_expires_in: grant,
     token_expires_at: ttlMs === null ? null : isoAt(now + ttlMs),
     max_uses: 1,
@@ -78,10 +83,11 @@ function createToken(ctx: DemoContext): DemoResponse {
     last_used_at: null,
   };
   ctx.db.tokens.unshift(record);
-  const response: AccessTokenResponse = {
+  const response: AccessTokenResponse & { seat_type: CodeSeatType } = {
     id,
     token,
     token_prefix: record.token_prefix,
+    seat_type: seatType,
     grant_expires_in: grant,
     token_expires_at: record.token_expires_at,
     max_uses: 1,
@@ -152,7 +158,7 @@ function resolvePending(ctx: DemoContext): DemoResponse {
       team.invites.push({
         id: `invite-demo-${nextId(db)}`,
         email: use.email,
-        seat_type: 'default',
+        seat_type: token?.seat_type ?? 'default',
         created_time: use.created_at,
         expires_at: expiresAt,
         source: 'self_service',
@@ -291,6 +297,7 @@ function redeem(ctx: DemoContext): DemoResponse {
     if (state === 'disabled') return fail(403, '兑换码已禁用');
     if (state === 'expired') return fail(410, '兑换码已过期');
   }
+  const codeSeat: CodeSeatType = stored?.seat_type ?? 'default';
   const grant = stored?.grant_expires_in ?? '30d';
   const grantMs = grant === 'never' ? null : durationMs(grant);
 
@@ -337,6 +344,17 @@ function redeem(ctx: DemoContext): DemoResponse {
     const row = chosenReal.status === 'joined'
       ? record.members.find((m) => m.email === email)
       : record.invites.find((i) => i.email === email);
+    // A Premium code renews only Premium members; a ChatGPT code renews ChatGPT or Codex members, never Premium.
+    const current = row?.seat_type || 'default';
+    const matches = codeSeat === 'prolite' ? current === 'prolite' : current === 'default' || current === 'usage_based';
+    if (!matches) {
+      const message = `兑换码是 ${seatLabel(codeSeat)} 码，你当前是 ${seatLabel(current)} 席位，不能用它续期。`;
+      appendLog(db, {
+        team_id: record.team.id, action: 'redeem_seat_type_mismatch', target_email: email,
+        detail: `seat_type=${codeSeat}, from_seat_type=${current}`, result: 'failed', error_message: message,
+      });
+      return fail(409, message);
+    }
     const base = chosenReal.expires_at ? Math.max(Date.parse(chosenReal.expires_at), Date.now()) : Date.now();
     const expiresAt = grantMs === null ? null : isoAt(base + grantMs);
     if (row) {
@@ -355,21 +373,30 @@ function redeem(ctx: DemoContext): DemoResponse {
     } satisfies RedeemAccessTokenResult);
   }
 
-  // New member: invite into the usable team with the most free ChatGPT seats.
+  // New member: invite into the usable team with the most free seats of the code's type. Redemption
+  // never overfills, whatever the Team's overage policy says.
+  const label = seatLabel(codeSeat);
   const target = db.teams
     .filter(({ team }) => team.status === 'active' && team.auth_state === 'ok' && !team.sync_suspended_at && team.will_renew)
-    .sort((a, b) => availableGptSeats(b) - availableGptSeats(a))
-    .find((record) => availableGptSeats(record) > 0);
+    .sort((a, b) => freeSeats(b, codeSeat) - freeSeats(a, codeSeat))
+    .find((record) => freeSeats(record, codeSeat) > 0);
   if (!target) {
+    if (codeSeat === 'prolite') {
+      appendLog(db, {
+        action: 'redeem_no_premium_seat', target_email: email, detail: 'seat_type=prolite', result: 'failed',
+        error_message: '没有可用 Premium 席位，兑换码未使用',
+      });
+      return fail(409, '没有可用 Premium 席位，兑换码未使用，请联系管理员');
+    }
     appendLog(db, { action: 'self_service_redeem', detail: 'reason=no_available_seat', result: 'failed', error_message: '没有可用 ChatGPT 席位，请联系管理员' });
-    return fail(409, '没有可用 ChatGPT 席位，请联系管理员');
+    return fail(409, `没有可用 ${label} 席位，请联系管理员`);
   }
   const now = Date.now();
   const expiresAt = grantMs === null ? null : isoAt(now + grantMs);
   target.invites.push({
     id: `invite-demo-${nextId(db)}`,
     email,
-    seat_type: 'default',
+    seat_type: codeSeat,
     created_time: isoAt(now),
     expires_at: expiresAt,
     source: 'self_service',
@@ -380,7 +407,10 @@ function redeem(ctx: DemoContext): DemoResponse {
     email, team_id: target.team.id, team_name: target.team.name, user_id: null, action: 'invited', result: 'success',
     error_message: null, expires_at: expiresAt,
   });
-  appendLog(db, { team_id: target.team.id, action: 'self_service_invite', target_email: email, detail: `expires_at=${expiresAt}` });
+  appendLog(db, {
+    team_id: target.team.id, action: 'self_service_invite', target_email: email,
+    detail: codeSeat === 'prolite' ? `seat_type=prolite, expires_at=${expiresAt}` : `expires_at=${expiresAt}`,
+  });
   return ok({
     status: 'ok', action: 'invited', team_id: target.team.id, team_name: target.team.name, email, expires_at: expiresAt, message: '已发送邀请',
   } satisfies RedeemAccessTokenResult);
@@ -474,9 +504,11 @@ function tokenQuery(db: DemoDb, query: string): MembershipStatusResult {
   if (stored) {
     const state = tokenStatus(db, stored);
     const latest = latestUse(db, stored.id);
-    const token: TokenQueryInfo = {
+    const token: TokenQueryInfo & { seat_type: CodeSeatType; seat_type_label: string } = {
       id: stored.id,
       token_prefix: stored.token_prefix,
+      seat_type: stored.seat_type,
+      seat_type_label: seatLabel(stored.seat_type),
       token_status: state.status,
       token_status_label: state.label,
       grant_expires_in: stored.grant_expires_in,

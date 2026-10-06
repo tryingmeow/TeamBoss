@@ -1,10 +1,11 @@
 /** Teams, members, batch GPT invites and session import/export. */
-import type { SeatType, Team } from '../../types';
+import type { OveragePolicy, Team, WorkspaceDefaultSeatType } from '../../types';
 import type { InviteGptMembersResult, TeamBatchResult } from '../../api/client';
 import { findTeam, nextId, recount, type DemoDb, type DemoInvite, type DemoTeam } from '../db';
 import { bodyObject, bodyString, fail, ok, queryFlag, type DemoContext, type DemoResponse, type DemoRoute } from '../http';
 import { appendLog } from '../logs';
 import { DAY, durationMs, isNeverDuration, isoAt } from '../time';
+import { isOverage, overageGate, parseSeat, policyOf, seatLabel } from '../overage';
 import { availableGptSeats, expiryState, membersData, teamView, workspaceSettings } from '../views';
 
 const AUTH_REJECTED = { code: 'team_auth_rejected', message: '登录已失效，请重新导入' };
@@ -26,9 +27,13 @@ function upstreamBlocked(record: DemoTeam): DemoResponse | null {
   return null;
 }
 
-function normalizeSeat(value: unknown): SeatType {
-  const raw = String(value ?? '').trim().toLowerCase();
-  return raw === 'usage_based' || raw === 'codex' ? 'usage_based' : 'default';
+const SEAT_INVALID = [{ msg: "seat_type 必须是 'default' / 'usage_based' / 'prolite'" }];
+const NO_PLACE = '没位置，未邀请';
+
+/** Workspace default invite seat: Premium can never be the default (the backend answers 422). */
+function parseWorkspaceDefault(value: unknown): WorkspaceDefaultSeatType | null {
+  const seat = parseSeat(value);
+  return seat === 'default' || seat === 'usage_based' ? seat : null;
 }
 
 /** `expires_in` → absolute ISO (null for never). Throws a 400-style message on bad input. */
@@ -104,9 +109,13 @@ function newTeamFromSession(db: DemoDb, session: Record<string, unknown>): DemoT
     sync_failing_since: null,
     sync_suspended_at: null,
     cached_member_emails: [],
+    overage_policy: 'confirm',
+    seat_capacity: null,
+    seat_type_counts: {},
   };
   const record: DemoTeam = {
     team,
+    paid: { default: 5, prolite: 0 },
     members: [
       {
         id: `user-new${nn}-00`,
@@ -267,12 +276,28 @@ function updateTeamProxy(ctx: DemoContext): DemoResponse {
   return ok({ status: 'ok', proxy_id: proxyId });
 }
 
+function setOveragePolicy(ctx: DemoContext): DemoResponse {
+  const record = teamOr404(ctx);
+  if (isResponse(record)) return record;
+  const value = bodyObject(ctx).overage_policy;
+  if (value !== 'forbid' && value !== 'confirm' && value !== 'auto') {
+    return fail(422, [{ msg: "overage_policy 必须是 'forbid' / 'confirm' / 'auto'" }]);
+  }
+  const previous = record.team.overage_policy;
+  record.team.overage_policy = value as OveragePolicy;
+  appendLog(ctx.db, {
+    team_id: record.team.id, action: 'set_overage_policy', detail: `overage_policy=${value}, previous=${previous}`,
+  });
+  return ok(teamView(record));
+}
+
 function setDefaultSeat(ctx: DemoContext): DemoResponse {
   const record = teamOr404(ctx);
   if (isResponse(record)) return record;
   const blocked = upstreamBlocked(record);
   if (blocked) return blocked;
-  const seat = normalizeSeat(bodyObject(ctx).seat_type);
+  const seat = parseWorkspaceDefault(bodyObject(ctx).seat_type);
+  if (!seat) return fail(422, SEAT_INVALID);
   record.team.default_seat_type = seat;
   record.cacheUpdatedAt = isoAt(Date.now());
   appendLog(ctx.db, { team_id: record.team.id, action: 'change_default_seat_type', detail: `seat_type=${seat}` });
@@ -289,7 +314,8 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   const body = bodyObject(ctx);
   const email = bodyString(ctx, 'email').trim().toLowerCase();
   if (!EMAIL_RE.test(email)) return fail(422, [{ msg: '邮箱格式无效' }]);
-  const seat = normalizeSeat(body.seat_type);
+  const seat = parseSeat(body.seat_type);
+  if (!seat) return fail(422, SEAT_INVALID);
   let expiresAt: string | null;
   try {
     expiresAt = expiryFromDuration(body.expires_in);
@@ -299,26 +325,12 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   if (record.members.some((m) => m.email === email) || record.invites.some((i) => i.email === email)) {
     return fail(409, EMAIL_ALREADY_IN_TEAM);
   }
-  if (seat === 'default' && body.allow_overage !== true && availableGptSeats(record) <= 0) {
-    const activeChatgpt = record.members.filter((m) => m.seat_type === 'default').length;
-    const pendingDefault = record.invites.filter((i) => i.seat_type === 'default').length;
-    const codex = record.members.length - activeChatgpt;
-    return fail(409, {
-      code: 'require_overage_confirmation',
-      message:
-        `ChatGPT 席位不足，需要确认超额添加: active_chatgpt=${activeChatgpt}/${record.team.seats_entitled}, ` +
-        `total_in_use=${record.members.length}, codex=${codex}, pending_default=${pendingDefault}, reserved_default=0`,
-      capacity: {
-        seats_entitled: record.team.seats_entitled,
-        seats_in_use_total: record.members.length,
-        codex_count: codex,
-        active_chatgpt: activeChatgpt,
-        pending_default: pendingDefault,
-        reserved_default: 0,
-        available: 0,
-      },
-    });
-  }
+  const refused = overageGate({
+    db: ctx.db, record, seatType: seat, allowOverage: body.allow_overage === true, operation: 'invite',
+    logAction: 'invite_member', targetEmail: email,
+  });
+  if (refused) return refused;
+  const overage = isOverage(record, seat);
   const now = Date.now();
   record.invites.push({
     id: `invite-demo-${nextId(ctx.db)}`,
@@ -332,7 +344,9 @@ function inviteMember(ctx: DemoContext): DemoResponse {
   touch(record);
   appendLog(ctx.db, {
     team_id: record.team.id, action: 'invite_member', target_email: email,
-    detail: `seat_type=${seat}, expires_in=${String(body.expires_in ?? 'never')}, allow_overage=${body.allow_overage === true ? 'True' : 'False'}`,
+    detail:
+      `seat_type=${seat}, expires_in=${String(body.expires_in ?? 'never')}, allow_overage=${body.allow_overage === true ? 'True' : 'False'}` +
+      (seat === 'usage_based' ? '' : `, policy=${policyOf(record)}, overage=${overage ? 'True' : 'False'}`),
   });
   return ok({ status: 'ok', result: { _mutation_status: 'confirmed' } });
 }
@@ -374,7 +388,18 @@ function changeSeat(ctx: DemoContext): DemoResponse {
   if (blocked) return blocked;
   const member = memberOr404(ctx, record);
   if (!member) return fail(404, '该成员已不在此 Team，请刷新后重试');
-  const seat = normalizeSeat(bodyObject(ctx).seat_type);
+  const body = bodyObject(ctx);
+  const seat = parseSeat(body.seat_type);
+  if (!seat) return fail(422, SEAT_INVALID);
+  const allowOverage = body.allow_overage === true;
+  const from = member.seat_type;
+  if (from !== 'default' && from !== 'usage_based' && from !== 'prolite') {
+    return fail(409, {
+      code: 'seat_type_unknown',
+      message: `该成员的席位类型是「${seatLabel(from)}」，TeamBoss 不会切换或移除这类席位。`,
+    });
+  }
+  if (seat === from) return ok({ status: 'ok', result: { seat_type: seat } });
   if (seat === 'usage_based' && !record.team.is_codex_enabled) {
     appendLog(ctx.db, {
       team_id: record.team.id, action: 'change_seat', target_email: member.email,
@@ -382,10 +407,19 @@ function changeSeat(ctx: DemoContext): DemoResponse {
     });
     return fail(502, 'HTTP 403: Forbidden (usage_based seats are not enabled for this workspace)');
   }
+  const refused = overageGate({
+    db: ctx.db, record, seatType: seat, allowOverage, operation: 'seat_switch',
+    logAction: 'change_seat', targetEmail: member.email, logPrefix: `user_id=${member.id}, `,
+  });
+  if (refused) return refused;
+  const overage = isOverage(record, seat);
   member.seat_type = seat;
   touch(record);
   appendLog(ctx.db, {
-    team_id: record.team.id, action: 'change_seat', target_email: member.email, detail: `user_id=${member.id}, seat_type=${seat}`,
+    team_id: record.team.id, action: 'change_seat', target_email: member.email,
+    detail:
+      `user_id=${member.id}, seat_type=${seat}, from_seat_type=${from}, allow_overage=${allowOverage ? 'True' : 'False'}, ` +
+      `policy=${policyOf(record)}` + (seat === 'usage_based' ? '' : `, overage=${overage ? 'True' : 'False'}`),
   });
   return ok({ status: 'ok', result: { seat_type: seat } });
 }
@@ -496,9 +530,15 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
   }
 
   const candidates = ctx.db.teams.filter(({ team }) => team.status === 'active' && team.auth_state === 'ok' && !team.sync_suspended_at);
+  const allowOverage = body.allow_overage === true;
   const added: InviteGptMembersResult['added'] = [];
   const failed: InviteGptMembersResult['failed'] = [];
   const remaining: string[] = [];
+
+  // Overfill never touches `forbid` Teams; `confirm` Teams only after the operator confirmed.
+  const overfillTargets = (policies: OveragePolicy[]) => candidates.filter((t) => policies.includes(policyOf(t)));
+  const overfillNow = overfillTargets(allowOverage ? ['auto', 'confirm'] : ['auto']);
+  const confirmTeams = overfillTargets(['confirm']);
 
   emails.forEach((email) => {
     if (!EMAIL_RE.test(email)) {
@@ -513,9 +553,9 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
     const ranked = [...candidates].sort((a, b) => availableGptSeats(b) - availableGptSeats(a));
     let target = ranked.find((t) => availableGptSeats(t) > 0);
     let overage = false;
-    if (!target && body.allow_overage === true) {
-      target = ranked[0];
-      overage = true;
+    if (!target) {
+      target = overfillNow[0];
+      overage = Boolean(target);
     }
     if (!target) {
       remaining.push(email);
@@ -533,29 +573,41 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
     target.invites.push(invite);
     touch(target);
     appendLog(ctx.db, {
-      team_id: target.team.id, action: 'invite_gpt_member', target_email: email, detail: `expires_at=${expiresAt ?? 'None'}`,
+      team_id: target.team.id, action: 'invite_gpt_member', target_email: email,
+      detail: `expires_at=${expiresAt ?? 'None'}, policy=${policyOf(target)}, overage=${overage ? 'True' : 'False'}`,
     });
     added.push({ email, team_id: target.team.id, team_name: target.team.name, expires_at: expiresAt, overage });
   });
 
-  if (remaining.length > 0) {
+  if (remaining.length > 0 && !allowOverage && confirmTeams.length > 0) {
     const free = candidates.reduce((sum, t) => sum + availableGptSeats(t), 0);
+    const first = confirmTeams[0];
     return fail(409, {
       code: 'require_overage_confirmation',
-      message: added.length
-        ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个未添加。继续可能产生额外计费。`
-        : '空闲 GPT 席位不足，继续可能产生额外计费。',
+      message: (added.length ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个没有空位。` : '空闲 ChatGPT 席位不足。') +
+        `继续会在「${first.team.name}」超员 ${remaining.length} 个，ChatGPT 自动加购 ${remaining.length} 个 ChatGPT 席位并扣费。`,
+      seat_type: 'default',
+      policy: 'confirm',
+      operation: 'batch',
       capacity: {
+        seat_type: 'default',
         available: free,
+        capacity_unknown: false,
         free_team_count: candidates.filter((t) => availableGptSeats(t) > 0).length,
         active_team_count: candidates.length,
       },
+      overage_plan: [{ team_id: first.team.id, team_name: first.team.name, extra_seats: remaining.length }],
+      extra_seats_total: remaining.length,
       added,
       remaining_emails: remaining,
       failed,
     });
   }
-  return ok({ status: 'ok', added, failed, total: emails.length } satisfies InviteGptMembersResult);
+  // Whatever is left has no eligible Team (forbid Teams are never overfilled).
+  remaining.forEach((email) => failed.push({ email, error: NO_PLACE }));
+  return ok({ status: 'ok', added, failed, total: emails.length, no_place_emails: remaining } satisfies InviteGptMembersResult & {
+    no_place_emails: string[];
+  });
 }
 
 // ── Sessions ──
@@ -621,6 +673,7 @@ export const teamRoutes: DemoRoute[] = [
   { method: 'POST', pattern: '/api/teams/:teamId/refresh', handler: refreshTeamToken },
   { method: 'PATCH', pattern: '/api/teams/:teamId/remark', handler: updateRemark },
   { method: 'PATCH', pattern: '/api/teams/:teamId/proxy', handler: updateTeamProxy },
+  { method: 'PATCH', pattern: '/api/teams/:teamId/overage-policy', handler: setOveragePolicy },
   {
     method: 'GET',
     pattern: '/api/teams/:teamId/members',

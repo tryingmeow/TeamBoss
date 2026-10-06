@@ -27,7 +27,14 @@ import { DAY, HOUR, dateOnly, isoAt, shanghaiLocal } from './time';
 // ── Teams & members ──
 
 export function teamView(record: DemoTeam, sortedEmails = false): Team {
-  const team = { ...record.team, last_sync_partial_failures: [...record.team.last_sync_partial_failures] };
+  const team = {
+    ...record.team,
+    last_sync_partial_failures: [...record.team.last_sync_partial_failures],
+    seat_capacity: record.team.seat_capacity
+      ? Object.fromEntries(Object.entries(record.team.seat_capacity).map(([k, v]) => [k, { ...v }]))
+      : null,
+    seat_type_counts: { ...record.team.seat_type_counts },
+  };
   team.cached_member_emails = sortedEmails ? [...record.team.cached_member_emails].sort() : [...record.team.cached_member_emails];
   return team;
 }
@@ -345,11 +352,13 @@ export function allMembers(
 
 // ── Seat usage ──
 
-function teamSeatUsage(record: DemoTeam) {
+export function teamSeatUsage(record: DemoTeam) {
   const activeChatgpt = record.members.filter((m) => m.seat_type === 'default').length;
   const codex = record.members.filter((m) => m.seat_type === 'usage_based').length;
+  const premium = record.members.filter((m) => m.seat_type === 'prolite').length;
   const pendingDefault = record.invites.filter((i) => i.seat_type === 'default').length;
-  return { activeChatgpt, codex, pendingDefault, inUse: record.members.length };
+  const pendingPremium = record.invites.filter((i) => i.seat_type === 'prolite').length;
+  return { activeChatgpt, codex, premium, pendingDefault, pendingPremium, inUse: record.members.length };
 }
 
 export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
@@ -365,11 +374,11 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
     const { team } = record;
     const usage = teamSeatUsage(record);
     const isActive = team.status === 'active';
-    const available = Math.max(0, team.seats_entitled - usage.activeChatgpt - usage.pendingDefault);
+    const available = availableGptSeats(record);
     const teamFree = isActive ? available : 0;
     if (isActive) {
       activeTeam += 1;
-      totalGptSeats += team.seats_entitled;
+      totalGptSeats += record.paid.default;
       inuseGpt += usage.activeChatgpt;
       inuseCodex += usage.codex;
       pendingGpt += usage.pendingDefault;
@@ -410,10 +419,26 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
   };
 }
 
+/**
+ * Free seats of a billed type: the contract's `billed_free_seats`. Per-type = capacity.available minus
+ * pending invites of that type. ChatGPT also has the legacy formula (seats_entitled − active − pending)
+ * and takes the smaller of the two, because seats_entitled may include paid Premium seats. Premium
+ * without a capacity entry is 0, and non-billed or unknown types are always 0.
+ */
+export function freeSeats(record: DemoTeam, seatType: string): number {
+  if (seatType !== 'default' && seatType !== 'prolite') return 0;
+  const usage = teamSeatUsage(record);
+  const entry = record.team.seat_capacity?.[seatType];
+  const pending = seatType === 'default' ? usage.pendingDefault : usage.pendingPremium;
+  const perType = entry ? entry.available - pending : null;
+  if (seatType === 'prolite') return perType === null ? 0 : Math.max(0, perType);
+  const legacy = record.team.seats_entitled - usage.activeChatgpt - usage.pendingDefault;
+  return Math.max(0, perType === null ? legacy : Math.min(perType, legacy));
+}
+
 /** Free ChatGPT seats in one team, the number the overage check compares against. */
 export function availableGptSeats(record: DemoTeam): number {
-  const usage = teamSeatUsage(record);
-  return Math.max(0, record.team.seats_entitled - usage.activeChatgpt - usage.pendingDefault);
+  return freeSeats(record, 'default');
 }
 
 // ── Patrol ──
@@ -517,7 +542,20 @@ function latestInvoice(record: DemoTeam, base: string): FinanceLatestInvoice | n
   };
 }
 
-export function financeOverview(db: DemoDb): FinanceOverview {
+/** Contract §3.7 fields that the shared FinanceTeamItem type may not carry yet. */
+export type PremiumFinanceFields = {
+  chatgpt_seats_billed: number | null;
+  premium_seats_paid: number;
+  premium_monthly_estimate_usd: number;
+  premium_monthly_estimate_base: number | null;
+};
+export const PREMIUM_SEAT_PRICE_ESTIMATE_USD = 125;
+
+export function financeOverview(db: DemoDb): FinanceOverview & {
+  teams: Array<FinanceTeamItem & PremiumFinanceFields>;
+  premium_monthly_estimate_base_total: number;
+  premium_seat_price_estimate_usd: number;
+} {
   const base = db.finance.base_currency;
   const threshold = db.finance.low_balance_threshold;
   const today = utcDay(Date.now());
@@ -531,12 +569,13 @@ export function financeOverview(db: DemoDb): FinanceOverview {
   let monthlyTotalBase = 0;
   let discountTotalBase = 0;
   let excluded = 0;
+  let premiumTotalBase = 0;
   let lastPaidTotal = 0;
   let lastPaidCount = 0;
   const alerts: FinanceAlert[] = [];
   const timeline: FinanceTimelineItem[] = [];
 
-  const teams: FinanceTeamItem[] = db.teams.map((record) => {
+  const teams: Array<FinanceTeamItem & PremiumFinanceFields> = db.teams.map((record) => {
     const { team } = record;
     const usage = teamSeatUsage(record);
     const key = cardKey(team);
@@ -550,6 +589,12 @@ export function financeOverview(db: DemoDb): FinanceOverview {
       if (nativeBase === null) excluded += 1;
       else monthlyTotalBase += nativeBase;
       discountTotalBase += convert(team.discount_amount, team.billing_currency, base) ?? 0;
+    }
+    const premiumPaid = record.team.seat_capacity?.prolite?.paid ?? 0;
+    const premiumUsd = premiumPaid * PREMIUM_SEAT_PRICE_ESTIMATE_USD;
+    const premiumBase = convert(premiumUsd, 'USD', base);
+    if (team.status === 'active' && team.subscription_status === 'renewing' && premiumBase !== null) {
+      premiumTotalBase += premiumBase;
     }
     if (latest && (latest.status || '').toLowerCase() === 'paid' && latest.display_amount_base !== null) {
       lastPaidTotal += latest.display_amount_base;
@@ -629,6 +674,10 @@ export function financeOverview(db: DemoDb): FinanceOverview {
       card_team_count: key ? cardCounts.get(key) ?? 0 : 0,
       price_per_seat: team.billing_period === 'monthly' ? team.price_per_seat : null,
       seats_entitled: team.seats_entitled,
+      chatgpt_seats_billed: team.seat_capacity?.default?.paid ?? team.seats_entitled,
+      premium_seats_paid: premiumPaid,
+      premium_monthly_estimate_usd: premiumUsd,
+      premium_monthly_estimate_base: premiumBase,
       seats_in_use: usage.inUse,
       chatgpt_in_use: usage.activeChatgpt,
       codex_count: usage.codex,
@@ -652,6 +701,8 @@ export function financeOverview(db: DemoDb): FinanceOverview {
     fx_updated_at: db.finance.fx_updated_at,
     low_balance_threshold: threshold,
     monthly_total_base: round2(monthlyTotalBase),
+    premium_monthly_estimate_base_total: round2(premiumTotalBase),
+    premium_seat_price_estimate_usd: PREMIUM_SEAT_PRICE_ESTIMATE_USD,
     discount_total_base: round2(discountTotalBase),
     excluded_teams_count: excluded,
     last_paid_total_base: lastPaidCount > 0 ? round2(lastPaidTotal) : null,
