@@ -90,7 +90,7 @@ type ToastType = 'success' | 'error';
  * 巡逻只处理同步刚刷新成功的 Team，同步失败或已挂起的 Team 这一轮完全不碰。
  */
 function patrolRuleText(intervalMinutes: number): string {
-  return `每 ${intervalMinutes} 分钟巡逻一次，只处理未豁免的 Team：ChatGPT 席位超出时，移除绕过 TeamBoss 新加入的成员，最多移除超出的人数；绕过 TeamBoss 占用 Premium 席位的成员，不管是否超出都会移除（每个 Premium 席位都按月扣费）。`;
+  return `每 ${intervalMinutes} 分钟巡逻一次，只处理未豁免的 Team：ChatGPT 席位超出时，移除新的外部加入成员（绕过 TeamBoss 加入的），最多移除超出的人数；外部加入、占用 Premium 席位的成员，不管是否超出都会移除（每个 Premium 席位都按月扣费）。`;
 }
 
 const DIALOG_OVERLAY = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm';
@@ -328,7 +328,7 @@ function PatrolSection() {
       <section className={cn(CARD, 'p-4 sm:p-6')}>
         <SectionHeader
           title="Team 豁免"
-          description="点击 Team 切换豁免。豁免的 Team 巡逻不踢人（超员和外部 Premium 成员都不踢），发现外部人员占用 Premium 席位时只发 TG 提醒；开启 Codex 的 Team 自动豁免。"
+          description="点击 Team 切换豁免。豁免的 Team 巡逻不踢人（超员和外部加入的 Premium 成员都不踢），发现外部加入的 Premium 成员时只发 TG 提醒；开启 Codex 的 Team 自动豁免。"
           aside={
             <span className="shrink-0 whitespace-nowrap pt-0.5 text-xs tabular-nums text-gray-500 dark:text-ink-400">
               已豁免 {exemptCount} / {status.teams.length}
@@ -418,8 +418,8 @@ function PatrolSection() {
             </Dialog.Title>
             <Dialog.Description className={DIALOG_TEXT}>
               {pendingExempt?.willExempt
-                ? `把「${pendingExempt?.team.name}」加入豁免后，巡逻不会在这个 Team 踢人：超员和外部 Premium 成员都不踢，只发 TG 提醒。`
-                : `把「${pendingExempt?.team.name}」移出豁免后，超员时新加入的外部成员、以及绕过 TeamBoss 占用 Premium 席位的成员可能被自动踢人。`}
+                ? `把「${pendingExempt?.team.name}」加入豁免后，巡逻不会在这个 Team 踢人：超员和外部加入的 Premium 成员都不踢，只发 TG 提醒。`
+                : `把「${pendingExempt?.team.name}」移出豁免后，超员时新的外部加入成员、以及外部加入、占用 Premium 席位的成员可能被自动踢人。`}
             </Dialog.Description>
             <div className={DIALOG_ACTIONS}>
               <button onClick={() => setPendingExempt(null)} className={BUTTON.secondary}>

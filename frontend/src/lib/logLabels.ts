@@ -52,6 +52,7 @@ const ACTION_LABELS: Record<string, string> = {
   invite_gpt_member_lookup: '添加 GPT 成员（查询失败）',
   invite_gpt_member_cache_refresh: '添加 GPT 成员（刷新缓存）',
   create_tg_member_pairing_code: '生成成员 TG 绑定码',
+  create_access_token: '生成兑换码',
 
   // Self-service redemption
   self_service_lookup: '自助兑换：查询成员',
@@ -241,6 +242,16 @@ function isTrue(value: string): boolean {
   return BOOL[value.toLowerCase()] === '是';
 }
 
+// 「外部加入」= 绕过 TeamBoss 进了 Team 的人，全站同一个叫法（Team 卡片、用户管理、日志）。
+const PREMIUM_OUTSIDER = '外部加入，占用 Premium 席位';
+
+const PREMIUM_ALERT_KIND: Record<string, string> = {
+  premium_outsider: PREMIUM_OUTSIDER,
+  premium_detected_with_record: '外部加入的 Premium 成员，但 TeamBoss 有他的 Premium 记录',
+  premium_unswitched: 'TeamBoss 管理的成员在 Premium 席位上，但不是 TeamBoss 切的',
+  unknown_seat_type: '席位类型 TeamBoss 不认识',
+};
+
 /** "30d" → "30 天", "12h" → "12 小时", "3m" → "3 分钟", "never" → "永久". */
 function durationLabel(value: string): string {
   const match = /^(\d+)([mhd])$/i.exec(value.trim());
@@ -250,7 +261,7 @@ function durationLabel(value: string): string {
 }
 
 const SOURCES: Record<string, string> = {
-  detected: '外部添加',
+  detected: '外部加入',
   scheduled_data_sync: '定时同步',
   team_sync: '同步 Team',
   manual_token_refresh_all: '手动刷新全部令牌',
@@ -296,12 +307,23 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   teams_protected: (v) => `保护 ${v} 个 Team`,
   grandfathered: (v) => `保留现有成员 ${v}`,
   backfilled: (v) => `补录 ${v}`,
-  detected_kept: (v) => `仍在巡逻的外部成员 ${v}`,
+  detected_kept: (v) => `仍在巡逻的外部加入成员 ${v}`,
   patrolled: (v) => `巡逻 ${v} 个 Team`,
   skipped_unrefreshed: (v) => `跳过未刷新 ${v}`,
   refresh_failures: (v) => `刷新失败 ${v}`,
   over_by: (v) => `超员 ${v}`,
-  rule: (v) => ({ premium_outsider: '外部人员占用 Premium 席位', over_quota: '超员' } as Record<string, string>)[v] ?? v,
+  rule: (v) => ({ premium_outsider: PREMIUM_OUTSIDER, over_quota: '超员' } as Record<string, string>)[v] ?? v,
+  token_id: (v) => `兑换码 #${v}`,
+  grant_expires_in: (v) => `授予 ${durationLabel(v)}`,
+  token_ttl: (v) => `兑换有效期 ${durationLabel(v)}`,
+  member_seat_type: (v) => `成员席位 ${seatLabel(v)}`,
+  pending_seat_type: (v) => `待接受邀请席位 ${seatLabel(v)}`,
+  resend: (v) => (isTrue(v) ? '重发邀请' : null),
+  teams_checked: (v) => `查了 ${v} 个 Team`,
+  deferred: (v) => ({ seat_changed_after_snapshot: '快照后管理员改过席位，这轮先不移出' } as Record<string, string>)[v] ?? `推迟：${v}`,
+  batch_guard: (v) => ({ premium: 'Premium 批量保护', strict: '严格模式批量保护' } as Record<string, string>)[v] ?? `批量保护 ${v}`,
+  kind: (v) => PREMIUM_ALERT_KIND[v] ?? `类型 ${v}`,
+  status: (v) => ({ member: '成员', pending: '待接受邀请' } as Record<string, string>)[v] ?? `状态 ${v}`,
   position: (v) => `顺位 ${v}`,
   source: (v) => `来源 ${SOURCES[v] ?? v}`,
   first_seen_at: (v) => `首次发现 ${timeLabel(v)}`,
@@ -352,7 +374,10 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
     kick: '移出后',
     overage_forbidden: '席位已满，禁止超员',
     overage_needs_confirmation: '席位已满，等你确认加购',
-    premium_outsider: '外部人员占用 Premium 席位',
+    premium_outsider: PREMIUM_OUTSIDER,
+    seat_type_mismatch: '兑换码和成员的席位类型不符',
+    unknown_member_seat_type: '成员的席位类型 TeamBoss 不认识，未处理',
+    unknown_seat_type: '席位类型 TeamBoss 不认识，未处理',
   } as Record<string, string>)[v] ?? v,
   action: (v) => ({ renewed: '已续期', extended: '已延长', renewed_member: '续期成员', renewed_invite: '续期邀请' } as Record<string, string>)[v] ?? v,
   force: () => '强制同步',
@@ -367,7 +392,7 @@ const REJECT_REASONS: Record<string, string> = {
   'target is absent from current member cache': '成员已不在当前列表',
   'target is absent from current pending cache': '邀请已不在当前列表',
   'team is not currently over quota': 'Team 当前未超员',
-  'persisted source is not detected': '不是外部添加的成员',
+  'persisted source is not detected': '不是外部加入的成员',
   'target is not within the newest over-quota candidates': '不在最新的超员名单内',
   'cached target is missing user_id': '缺少成员 ID',
   'member operation already in progress': '该成员有操作正在进行',
@@ -376,7 +401,7 @@ const REJECT_REASONS: Record<string, string> = {
   'invite missing email': '邀请缺少邮箱',
   'strict mode is disabled': '严格模式未开启',
   'cached target has an expiry record': '成员有到期记录',
-  'persisted record has an expiry (not a stray external add)': '成员有到期记录（不是外部添加）',
+  'persisted record has an expiry (not a stray external add)': '成员有到期记录（不是外部加入）',
   'strict kick delay window has not elapsed': '严格模式等待期未到',
 };
 
