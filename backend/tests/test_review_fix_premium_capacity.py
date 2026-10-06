@@ -298,16 +298,6 @@ class PersistentReservationTest(unittest.TestCase):
         self.assertEqual(self._hold_rows(), [])
         self.assertEqual(asyncio.run(reserved_seats("t1", "default")), 2)
 
-    def test_release_seat_reservation_drops_memory_and_db(self):
-        async def scenario():
-            await reserve_seat("t1", "a@example.com", "prolite")
-            await team_locks.release_seat_reservation("t1", "A@example.com")
-            return await reserved_seats("t1", "prolite")
-
-        self.assertEqual(asyncio.run(scenario()), 0)
-        self.assertEqual(self._hold_rows(), [])
-        self.assertEqual(team_locks._reservations, {})
-
 
 # ---- 真实兑换流程 -------------------------------------------------------------------
 

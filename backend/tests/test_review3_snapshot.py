@@ -8,6 +8,7 @@
 - F1：卖座前现拉的待接受邀请和快照同一套完整性规则。第一页 100 条、total 101，第二页空、
   total 100（翻页期间少了一个邀请，Premium 邀请挪到了第一页范围里）：占用未知，兑换按没有
   空位拒绝、不消耗码。
+- N3：预留层没有不比版本就删持久占用的出口。
 
 累加器本身的规则在 test_snapshot_pages.py。上游一律是只记录调用的假客户端，绝不触网。
 """
@@ -45,7 +46,7 @@ from app import scheduler as app_scheduler
 from app.services import patrol as patrol_service
 from app.routes import access_tokens
 from app.services import seat_capacity as seat_capacity_module
-from app.services import team_health_alerts, tg_notify, tg_summary
+from app.services import team_health_alerts, team_locks, tg_notify, tg_summary
 from app.services.seat_capacity import (
     SeatCapacityFetchError,
     fetch_all_pending_invites,
@@ -459,6 +460,16 @@ class RedeemFailsClosedOnShiftingInvitesTest(_RedeemFlow):
         await self._assert_refused_unconsumed("atm_f1_chatgpt", "default", NO_CHATGPT_SEAT)
         self.assertEqual(self.invites, [])
 
+
+
+# ═══ N3：预留层不删持久占用 ═════════════════════════════════════════════════════
+
+class ReservationLayerTest(unittest.TestCase):
+    def test_no_versionless_hold_release_in_the_reservation_layer(self):
+        # 持久占用只在两处放掉：上游明确拒绝（兑换流程直接调 seat_holds.release_seat_hold）
+        # 和按版本（seat_type + created_at）删除的对账。预留层那个连库里占用一起、不比版本
+        # 就删的出口没人调用，留着只会被误用成「放掉这个人的占用」。
+        self.assertFalse(hasattr(team_locks, "release_seat_reservation"))
 
 if __name__ == "__main__":
     unittest.main()

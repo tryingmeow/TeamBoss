@@ -7,7 +7,7 @@ from typing import AsyncIterator
 
 from ..database import get_db
 from ..seat_types import DEFAULT_SEAT_TYPE, is_billed_seat_type
-from .seat_holds import held_seat_emails, hold_seat, release_seat_hold
+from .seat_holds import held_seat_emails, hold_seat
 
 
 _locks: dict[str, asyncio.Lock] = {}
@@ -83,20 +83,6 @@ async def release_default_seat_reservation(team_id: str, email: str) -> None:
     async with _reservations_guard:
         _drop_expired_reservations(monotonic())
         _reservations.pop(key, None)
-
-
-async def release_seat_reservation(team_id: str, email: str) -> None:
-    """Drop both the in-memory reservation and the persistent hold of ``email``.
-
-    Only for an explicit upstream rejection: an uncertain outcome keeps the seat.
-    """
-    key = _reservation_key(team_id, email)
-    if not key[0] or not key[1]:
-        return
-    async with _reservations_guard:
-        _drop_expired_reservations(monotonic())
-        _reservations.pop(key, None)
-    await release_seat_hold(key[0], key[1])
 
 
 async def reserved_seats(
