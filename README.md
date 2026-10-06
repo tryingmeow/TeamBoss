@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml/badge.svg)](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml)
 
-**English:** TeamBoss is a self-hosted admin panel for ChatGPT Team / Business workspaces (FastAPI + React, SQLite, Docker Compose). It puts seats, members, expiry and billing of multiple workspaces in one dashboard, with scheduled patrols, auto-removal of expired or unexpected members, self-service redemption codes and a Telegram bot. The UI and docs are in Chinese. It is unofficial and relies on ChatGPT's undocumented web endpoints. See the [getting-started guide](docs/getting-started.md) (Chinese) for a Docker Compose quickstart.
+**English:** TeamBoss is a self-hosted admin panel for ChatGPT Team / Business workspaces (FastAPI + React, SQLite, Docker Compose). It puts seats, members, expiry and billing of multiple workspaces in one dashboard, with a per-workspace overage policy, scheduled patrols, auto-removal of expired or unexpected members, self-service redemption codes and a Telegram bot. The UI and docs are in Chinese. It is unofficial and relies on ChatGPT's private, undocumented web endpoints, which can change or break at any time. Use it at your own risk: the authors accept no liability for any loss (charges, added seats, removed members, account restrictions). Review the code before using it in production. Premium seat support is beta and has never been tested in production. See the disclaimer (免责声明) below and the [getting-started guide](docs/getting-started.md) (Chinese) for a Docker Compose quickstart.
 
 ---
 
@@ -10,56 +10,84 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
 
 > 第一次用？跳到 **[上手指南](docs/getting-started.md)** —— 从 `.env` 到「后台里有一个能用的 Team、成员能自己兑换」，包含 session JSON 到底从哪里取。
 
-![Team 列表：四张 Team 卡片，每张显示 ChatGPT / Codex 席位占用、订阅周期、月费、卡号后四位和续费状态](docs/images/dashboard.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
+  <img alt="Team 列表：Team 卡片网格，每张卡片按颜色区分显示各类席位（ChatGPT / Codex / Premium）的占用，并列出订阅周期、月费、付款卡后四位和续费状态" src="docs/images/dashboard.png">
+</picture>
 
-<details>
-<summary><strong>免责声明</strong>（使用前请展开阅读）</summary>
+## 免责声明
 
-1. 本项目仅供学习与技术研究，请勿用于任何非法用途。
-2. 本项目与 OpenAI 无任何关联，并非其官方产品，相关商标归各自所有者所有。
-3. 本项目调用的是 ChatGPT 网页端的内部接口（非官方、无公开文档），这些接口可能在没有任何通知的情况下变更或失效。本项目所依赖的接口、成员操作方式及计费策略，均可能被官方随时调整，作者不保证功能的可用性、准确性与持续性。
-4. 项目内展示的席位、账单、金额、到期时间等数据仅供参考，一切以官方后台为准。
-5. 使用者应自行遵守所在地法律法规，以及与服务提供方之间的服务条款，并对自身使用行为负责。
-6. 因使用本项目而产生的任何直接或间接后果，包括但不限于账号异常、财务损失、数据丢失，均由使用者自行承担，作者不承担任何责任。
-7. 使用本项目即视为已阅读并同意本声明全部内容；若不同意，请停止使用并删除相关文件。
+**部署和使用之前请读完这一节。** 后台第一次在某个浏览器里打开时，也会要求你逐条勾选确认这些内容（见上手指南 [1.3](docs/getting-started.md#13-第一次打开后台)）。
 
-</details>
+1. **风险自负。** 用不用、怎么用由你自己决定，由此产生的一切后果由你自行负责。
+2. **依赖非官方接口，功能很可能有时效。** TeamBoss 调用的是 ChatGPT / OpenAI 网页端未公开的私有接口，不是官方 API，也没有公开文档。接口本身、成员操作方式和计费策略都可能被官方随时改动，所以这里的功能很可能只在一段时间内可用，随时会不经通知地失效或改变行为。
+3. **作者概不负责。** 因使用本项目造成的任何直接或间接损失，包括但不限于扣费、自动加购的席位、被移除的成员、账号被限制或封禁、数据丢失，作者一概不承担任何责任。
+4. **投入生产前先审代码。** 它会用你的 Owner 会话邀请、移除成员、切换席位，在超员策略允许时还会让 ChatGPT 加购席位并扣费。接入真实工作区之前，请自己审一遍代码，或者让一个 AI Agent 替你审。
+5. **Premium 席位是 Beta 功能，从未在生产环境中测试过。** 涉及 Premium 的邀请、切换席位、Premium 兑换码和巡逻移除都算在内（见下文「功能」和「成熟度」）。Premium 席位单价高，出错的代价也更大。
+
+另外：本项目与 OpenAI 没有任何关联，不是其官方产品，相关商标归各自所有者所有。后台显示的席位、账单、金额、到期时间等数据仅供参考，一切以 ChatGPT 官方后台为准。请遵守所在地法律法规以及你与服务提供方之间的服务条款，不要用于任何非法用途。使用本项目即视为已阅读并同意本声明；不同意请停止使用并删除相关文件。
+
+会话和密钥怎么存、为什么必须放在 TLS 后面，见下文 [安全须知](#安全须知)。
 
 ## 功能
 
-- **多 Team 总览** —— 一屏看所有 Team 的席位使用（ChatGPT / Codex）、成员数、到期情况。
-- **成员管理** —— 邀请、移除、切换席位类型（ChatGPT / Codex）。
+- **多 Team 总览** —— 一屏看所有 Team 的席位占用、成员数、到期和续费情况。席位按类型配色：ChatGPT 蓝、Codex 紫、Premium 粉；不认识的席位类型显示成灰色的「其他」，TeamBoss 不把它们算作空位，也不会邀请、切换或自动移除这些人。
+- **成员管理** —— 邀请、移除、切换席位类型（ChatGPT / Codex / Premium，**Premium 为 Beta**）；右上角「添加 GPT 成员」可以一次粘贴一批邮箱，按各 Team 的空位自动分配 ChatGPT 席位。
+- **每个 Team 自己的超员策略** —— 「禁止超员 / 超员需确认 / 超员自动」三选一（默认「超员需确认」），决定 ChatGPT / Premium 席位满了之后，加人或切换席位是直接拒绝、先问你、还是直接加（直接加会让 ChatGPT 自动加购席位并扣费）。见上手指南 [3.2](docs/getting-started.md#32-超员策略满了之后怎么办)。
 - **到期与自动踢人** —— 给成员设到期时间，后台定时任务到点自动移除。
-- **自助兑换** —— 生成一次性 access token，成员凭邮箱 + token 自助加入 / 续期 / 查自己的状态，无需你手动操作。
+- **自助兑换** —— 生成一次性兑换码，分 ChatGPT 码和 Premium 码（**Beta**）；成员凭邮箱 + 兑换码自助加入 / 续期 / 查自己的状态，无需你手动操作。兑换只用已经付费的空位，**任何超员策略下都不会加购席位**；没有空位就兑换失败，码不消耗。
 - **Session 管理** —— 导入 / 导出 ChatGPT 账号会话，access_token 过期自动用 session cookie 刷新。
-- **财务** —— 订阅、账单、汇率换算展示。
-- **巡检与告警** —— 定时巡检Team 健康，异常通过 Telegram 告警；续费前 3 天还有没人用的计费席位也会提醒一次（只提醒，不改账单）；发现计划外成员时按设置自动移除（**出厂是空跑演练**，要在后台「TG 与巡逻」页手动激活后才会真的移除人）。
+- **账单与财务** —— Team 卡片上的「查看账单」打开这个 Team 已同步的 Stripe 账单；「财务」页汇总各队订阅、账单、汇率换算。上游不提供 Premium 单价，Premium 支出一律标为「估算」。
+- **巡检与告警** —— 定时巡检 Team 健康，异常通过 Telegram 告警；续费前 3 天内还有没人用的计费席位（ChatGPT / Premium）会提醒一次，卡片上同时出现「续费前可减 N 席」（只提醒，不改账单）。巡逻会按规则自动移除绕过 TeamBoss 加入的外部成员：ChatGPT 席位超员时移除多出来的那几个；占用 Premium 席位的外部成员不论是否超员都会移除（**Beta**）；陌生的待接受邀请会被撤销。Owner、开启时已在队里的人、TeamBoss 邀请过或凭兑换码加入的人受保护，开了 Codex 或设了豁免的 Team 不踢人，完整规则见上手指南 [4.2](docs/getting-started.md#42-巡逻自动踢人--它会真的把人移出你的工作区)。巡逻**出厂是空跑演练**，要在后台「TG 与巡逻」页手动激活后才会真的移除人。
 - **Telegram 机器人** —— Team 状态与异常通知 + 常用命令（邀请 / 移除 / 查成员 / 查自己的到期等；管理命令仅限已配对管理员）。**默认关闭**，需填入 Bot Token 后在后台开启。
-- **操作日志** —— 成员操作、Team 管理、系统设置、代理、Telegram 配置、财务设置、巡检自动移除开关等写操作均留痕可查；密钥类字段只记掩码，不落明文。
+- **操作日志** —— 成员操作、Team 管理（含超员策略修改）、系统设置、代理、Telegram 配置、财务设置、巡检自动移除开关等写操作均留痕可查；密钥类字段只记掩码，不落明文。
+- **离线演示** —— `npm run demo` 不需要后端和 ChatGPT 账号，用浏览器内存里的虚构数据把整个后台跑起来，见下文「本地开发」。
 
 ## 界面
 
-用户管理：按 Team 列出所有成员和待接受邀请，一行看完状态、到期、席位类型和 Telegram 绑定。
+用户管理：列出所有 Team 的成员和待接受邀请，一行看完所属 Team、状态、到期、席位类型和 Telegram 绑定。
 
-![用户管理：按 Team 列出所有成员，带状态、发现时间、到期时间、席位类型和 Telegram 绑定状态](docs/images/users.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/users-dark.png">
+  <img alt="用户管理：成员表，每行显示成员、所属 Team / Owner、状态、加入时间、到期、按颜色区分的席位类型和 TG 绑定" src="docs/images/users.png">
+</picture>
 
-财务总览：各队订阅、折扣、余额按基准币种汇总，带 90 天支出趋势。
+查看账单：Team 卡片付款卡那一行的「查看账单」图标，打开这个 Team 已同步的 Stripe 账单，只读。
 
-![财务总览：月预计支出、折扣共省、30 天内续费数、预警数量四个指标，下方是 90 天支出趋势折线图](docs/images/finance.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/team-billing-dark.png">
+  <img alt="账单对话框：顶部是累计实付、近 30 天实付、最新一期三个汇总，下方是逐期账单表，列出账期、状态、应付、实付、说明和跳到 Stripe 发票的链接" src="docs/images/team-billing.png">
+</picture>
 
-一次性兑换码：发给成员自助加入 / 续期，完整 Code 只在生成时显示一次。
+财务总览：各队订阅、折扣、余额按基准币种汇总，带支出趋势；Premium 支出按估算单独标出。
 
-![兑换码页面：一次性兑换码列表，显示 Code 前缀、授予时长、未使用 / 已使用 / 已过期状态、有效期和最后使用时间](docs/images/access-tokens.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/finance-dark.png">
+  <img alt="财务总览：顶部是月预计支出、折扣共省、30 天内续费、预警四个指标卡，下方是可切换时间范围的支出趋势折线图" src="docs/images/finance.png">
+</picture>
 
-巡逻自动踢人：默认关闭，可以先「演练空跑」看一眼会踢谁；开启前会把当前成员一次性豁免。
+一次性兑换码：发给成员自助加入 / 续期，分 ChatGPT 码和 Premium 码，完整兑换码只在生成时显示一次。
 
-![TG 与巡逻页面：「巡逻」标签页里自动踢人显示「已开启」，下方是「演练空跑」按钮和按 Team 的豁免芯片，其中 Orion Lab 标为超员风险](docs/images/patrol.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/access-tokens-dark.png">
+  <img alt="兑换码页面：兑换码列表，每行显示兑换码前缀、席位类型、授予时长、状态（未使用 / 已使用 / 已过期 / 已停用）、备注、兑换截止和兑换时间" src="docs/images/access-tokens.png">
+</picture>
+
+巡逻自动踢人：默认关闭，可以先「演练空跑」算一遍会踢几个人（具体名单记在操作日志里）；开启前会把当前成员一次性豁免。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/patrol-dark.png">
+  <img alt="TG 与巡逻页面的「巡逻」标签页：自动踢人开关和状态、「演练空跑」按钮，以及按 Team 排列、可点击切换豁免的芯片，芯片用颜色区分已豁免、观察和超员风险" src="docs/images/patrol.png">
+</picture>
 
 成员自助页（部署地址的根路径）：填邮箱 + 兑换码即可加入或续期，也能只填邮箱查自己的到期。
 
-![成员自助页：查询标签页，填入邮箱后显示「已加入」、所属 Team 和到期时间](docs/images/self-service.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/self-service-dark.png">
+  <img alt="成员自助页的查询标签页：填入邮箱后显示加入状态、所属 Team 和到期时间" src="docs/images/self-service.png">
+</picture>
 
-> 以上截图来自一套全部由虚构数据填充的演示实例，Team 名、邮箱、金额、卡号均为编造。
+> 以上截图来自离线演示模式（`npm run demo`）里的虚构数据，Team 名、邮箱、金额、卡号均为编造。
 
 ## 技术栈
 
@@ -92,7 +120,7 @@ FastAPI + SQLite（后端）· React + Vite（前端）· Nginx（静态托管 +
    curl -fsS http://127.0.0.1:8080/api/health
    ```
 
-4. 打开后台 `http://127.0.0.1:8080/admin`，用 `.env` 里的管理员密码登录。
+4. 打开后台 `http://127.0.0.1:8080/admin`，先在使用条款确认页逐条勾选（内容即上面的「免责声明」），再用 `.env` 里的管理员密码登录。
 
    > 后台入口是 **`/admin`**。根路径 `/` 是给成员用的自助兑换页（填邮箱 + 兑换码），不是登录页。
 
@@ -133,6 +161,15 @@ docker compose down                        # 停止（不删数据）
 ```
 
 业务数据（SQLite、会话、备份）存在名为 `auto_team_data` 的 Docker 命名卷里；`docker compose down` 不会删，只有 `down -v` 或手动删卷才会清。可用 `AUTO_TEAM_DATA_VOLUME` 换卷名，便于并行测试或迁移。
+
+### 访问 chatgpt.com（curl_cffi 浏览器指纹）
+
+chatgpt.com 前面的 Cloudflare 会看 TLS 指纹：Python `requests` 的握手哪怕带着 Chrome 的 User-Agent，也会在订阅、席位、邀请和会话刷新这些接口上吃到 HTML 403（"Unable to load site"）。所以后端发往 chatgpt.com 的**所有**请求（包括会话刷新和代理的「测试连接」）都走 curl_cffi，模拟 Chrome 浏览器的 TLS / HTTP2 指纹。部署时要知道的：
+
+- **不用配，也配不了。** 模拟目标在代码里写死为 `chrome`（`backend/app/chatgpt_client.py` 里的 `IMPERSONATE`，即所装 curl_cffi 版本自带的最新 Chrome 配置），没有对应的环境变量或后台设置。
+- **它带二进制组件。** `backend/requirements.txt` 固定了 `curl_cffi==0.16.3`，这个包自带编译好的 libcurl。Docker 镜像（`python:3.12-slim`）里 `pip install` 就够了，不需要额外装系统包；裸机部署时如果你的平台装不上这个包，改用 Docker Compose。
+- **指纹解决不了 IP 的问题。** 服务器 IP 本身被风控时照样会 403 或弹人机验证页，这时要给 Team 挂代理，见上手指南 [2.4](docs/getting-started.md#24-需要走代理时)。Cloudflare 的放行规则不归本项目控制，哪天不再认这个指纹，所有 Team 会一起开始报 403——这也是「免责声明」里说功能可能随时失效的原因之一。
+- 只有发往 chatgpt.com 的请求走 curl_cffi 和 Team 代理。Telegram 机器人（`api.telegram.org`）和汇率接口（`open.er-api.com`）用普通 `requests` **直连**，不走任何代理，服务器需要能直接访问它们（汇率取不到时会退回内置的静态汇率表）。
 
 ## 备份与恢复
 
@@ -274,7 +311,15 @@ npm ci
 npm run dev                       # http://localhost:5173
 ```
 
-没有后端、也没有 ChatGPT 账号时，可以用 `npm run demo` 起一个离线演示：所有 `/api` 请求由前端内存里的虚构数据应答，任意密码都能登录，刷新即重置。
+没有后端、也没有 ChatGPT 账号时，可以起一个离线演示：
+
+```bash
+cd frontend
+npm ci
+npm run demo                      # 即 vite --mode demo，打开 http://localhost:5173/admin
+```
+
+演示模式下 Vite 不配置 `/api` 代理，前端启动时把浏览器的 `fetch` 换成一个内存里的假后端：所有 `/api/*` 请求（哪怕设置了 `VITE_API_BASE_URL`）都由浏览器里的虚构数据应答，**一条都不会发到真后端，也不会碰到 ChatGPT**，所以不需要后端在跑，也不需要 `.env`。任意密码都能登录，所有改动只存在内存里，刷新即重置。演示数据覆盖了三种超员策略、Premium 席位、会话失效、超员、多币种账单等状态，适合先看界面或截图（上面的截图就来自这里）；邮箱、卡号、金额全部是编造的。这段演示代码只在 `demo` 模式下加载，`npm run build` 出来的正式构建里没有它。
 
 `npm run dev` 起的 Vite 开发服务器会把 `/api` 请求代理到后端：目标地址优先取 `VITE_API_BASE_URL`，否则用 `http://AUTO_TEAM_BACKEND_HOST:AUTO_TEAM_BACKEND_PORT`（默认 `127.0.0.1:18087`），这些变量都从仓库根目录的 `.env` 读取。前端端口可用 `AUTO_TEAM_FRONTEND_PORT` 改。开发服务器默认只绑定 `127.0.0.1`；确需从其他机器访问时设置 `AUTO_TEAM_FRONTEND_HOST`（例如 `0.0.0.0`），注意这会把开发服务器暴露出去。
 
@@ -289,7 +334,11 @@ AUTO_TEAM_DATA_DIR=$(mktemp -d) python -m unittest discover -s tests
 
 ## 成熟度
 
-目前只有作者自己在生产环境跑，没有经过大范围真实使用的验证。涉及邀请、移除、到期、兑换的自动化都会直接改动你的工作区成员，接入前请先用一个不重要的 Team跑一遍，确认行为符合预期再接生产。
+目前只有作者自己在生产环境跑，没有经过大范围真实使用的验证。涉及邀请、移除、到期、兑换的自动化都会直接改动你的工作区成员，超员策略允许时还会让 ChatGPT 加购席位并扣费，接入前请先用一个不重要的 Team 跑一遍，确认行为符合预期再接生产。
+
+**Premium 席位（内部值 `prolite`）是 Beta，从未在生产环境中测试过。** 邀请和切换到 Premium、Premium 兑换码、巡逻移除 Premium 外部成员、Premium 的财务估算，都只在代码和自动化测试里验证过，作者自己的生产环境没有跑过。ChatGPT 侧怎么计费、怎么计数 Premium 席位，也可能和代码的假设不一致。要用的话，先在一个不重要的 Team 上手动验证每一步，并对照 ChatGPT 官方后台的账单。
+
+TeamBoss 依赖的是 ChatGPT 的私有接口，任何一项功能都可能因为官方改动而突然失效，见「免责声明」。
 
 ## 许可证
 
