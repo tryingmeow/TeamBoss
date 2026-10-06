@@ -9,7 +9,7 @@ import { SEAT_TYPES, overagePolicyLabel, parseOveragePolicy, parseSeatType } fro
 type TeamSeatFields = Pick<Team, 'seats_entitled' | 'seats_in_use' | 'codex_count' | 'chatgpt_count'>;
 /** Older payloads (and some pages) may lack the per-type fields; every reader treats them as unknown. */
 export type TeamCapacityFields = TeamSeatFields &
-  Partial<Pick<Team, 'seat_capacity' | 'seat_type_counts' | 'overage_policy'>>;
+  Partial<Pick<Team, 'seat_capacity' | 'seat_type_counts' | 'overage_policy' | 'pending_invite_counts'>>;
 
 function toNumber(value: number | null | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
@@ -63,6 +63,8 @@ export interface CachedFreeSeats {
   free: number;
   /** No per-type number for a type that needs one (Premium): counted as full. */
   unknown: boolean;
+  /** The workspace reports this type but has no paid seat of it at all (e.g. no Premium yet). */
+  noSeats: boolean;
 }
 
 /**
@@ -76,7 +78,7 @@ export function cachedFreeSeats(
   seatType: SeatType,
   pendingByType: Record<string, number> = {}
 ): CachedFreeSeats {
-  if (!SEAT_TYPES[seatType].billed) return { free: 0, unknown: false };
+  if (!SEAT_TYPES[seatType].billed) return { free: 0, unknown: false, noSeats: false };
   const pending = Math.max(0, toNumber(pendingByType[seatType]));
   const entry = capacityEntry(team, seatType);
   const perType = entry ? Math.max(0, entry.available - pending) : null;
@@ -84,8 +86,35 @@ export function cachedFreeSeats(
     ? Math.max(0, toNumber(team.seats_entitled) - activeChatGptSeats(team) - pending)
     : null;
   const candidates = [perType, legacy].filter((value): value is number => value !== null);
-  if (candidates.length === 0) return { free: 0, unknown: true };
-  return { free: Math.min(...candidates), unknown: false };
+  // 工作区报了分类型容量、却没有这个类型的已付席位（常见于还没买过 Premium 的 Team）。
+  const noSeats = seatType !== 'default' && Boolean(team.seat_capacity) && (!entry || entry.paid === 0);
+  if (candidates.length === 0) return { free: 0, unknown: !noSeats, noSeats };
+  return { free: Math.min(...candidates), unknown: false, noSeats };
+}
+
+/** Pending invites per type: the loaded member list when there is one, else the Team's cached counts. */
+export function teamPendingCounts(
+  team: Partial<Pick<Team, 'pending_invite_counts'>>,
+  invites?: ReadonlyArray<{ seat_type?: string | null }> | null
+): Record<string, number> {
+  if (invites) return pendingCountsByType(invites);
+  return team.pending_invite_counts ?? {};
+}
+
+/** What a billed seat block on the Team card shows; the same numbers the dialogs decide with. */
+export function billedSeatSummary(
+  team: TeamCapacityFields,
+  seatType: SeatType,
+  pendingByType: Record<string, number>
+): { inUse: number; paid: number; pending: number; free: number; unknown: boolean } {
+  const inUse = seatType === 'default'
+    ? activeChatGptSeats(team)
+    : Math.max(0, toNumber(team.seat_type_counts?.[seatType]));
+  const paid = seatType === 'default'
+    ? chatgptPaidSeats(team)
+    : Math.max(0, capacityEntry(team, seatType)?.paid ?? 0);
+  const { free, unknown } = cachedFreeSeats(team, seatType, pendingByType);
+  return { inUse, paid, pending: Math.max(0, toNumber(pendingByType[seatType])), free, unknown };
 }
 
 /** What adding `needed` people to seat type T on this Team would do, per its overage policy. */
@@ -98,6 +127,8 @@ export interface SeatGate {
   /** Seats ChatGPT would add (and charge) for this action. */
   extra: number;
   capacityUnknown: boolean;
+  /** The Team has no paid seat of this type at all. */
+  noSeats: boolean;
   policy: OveragePolicy;
   /** free: enough free seats (or not billed). Otherwise the policy decides. */
   action: 'free' | OveragePolicy;
@@ -113,9 +144,12 @@ export function seatGate(
   const policy = parseOveragePolicy(team.overage_policy);
   const want = Math.max(1, needed);
   if (!info.billed) {
-    return { seatType, label: info.label, billed: false, free: 0, needed: want, extra: 0, capacityUnknown: false, policy, action: 'free' };
+    return {
+      seatType, label: info.label, billed: false, free: 0, needed: want, extra: 0,
+      capacityUnknown: false, noSeats: false, policy, action: 'free',
+    };
   }
-  const { free, unknown } = cachedFreeSeats(team, seatType, pendingByType);
+  const { free, unknown, noSeats } = cachedFreeSeats(team, seatType, pendingByType);
   const extra = Math.max(0, want - free);
   return {
     seatType,
@@ -125,6 +159,7 @@ export function seatGate(
     needed: want,
     extra,
     capacityUnknown: unknown,
+    noSeats,
     policy,
     action: extra === 0 ? 'free' : policy,
   };
@@ -141,7 +176,9 @@ export function seatSwitchGate(
   return seatGate(team, target, pendingByType, 1);
 }
 
+/** Why a seat has to be bought: "ChatGPT 席位已满" / "这个 Team 还没有 Premium 席位" / … */
 function fullPhrase(gate: SeatGate): string {
+  if (gate.noSeats) return `这个 Team 还没有 ${gate.label} 席位`;
   if (gate.capacityUnknown) return `读不到 ${gate.label} 空位，按已满处理`;
   if (gate.free > 0) return `${gate.label} 只剩 ${gate.free} 个空位`;
   return `${gate.label} 席位已满`;
@@ -154,19 +191,21 @@ function fullPhrase(gate: SeatGate): string {
 export function gateMessage(gate: SeatGate): string | null {
   if (gate.action === 'free') return null;
   const charge = `ChatGPT 自动加购 ${gate.extra} 个 ${gate.label} 席位并扣费`;
+  // 前半句已经以「这个 Team」开头时不再重复主语。
+  const setTo = gate.noSeats ? '且设为' : '这个 Team 设为';
   if (gate.action === 'forbid') {
     return gate.free > 0 && !gate.capacityUnknown
-      ? `${fullPhrase(gate)}，这个 Team 设为「${overagePolicyLabel('forbid')}」，最多再加 ${gate.free} 人。`
-      : `${fullPhrase(gate)}，这个 Team 设为「${overagePolicyLabel('forbid')}」，不会自动加购。要加人请先在 Team 设置里改超员策略。`;
+      ? `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，最多再加 ${gate.free} 人。`
+      : `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，不会自动加购。要加人请先在 Team 设置里改超员策略。`;
   }
   if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续会让 ${charge}。`;
-  return `${fullPhrase(gate)}，这个 Team 设为「${overagePolicyLabel('auto')}」：提交后 ${charge}。`;
+  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交后 ${charge}。`;
 }
 
 /** Short hint under an option in a seat-switch menu. */
 export function gateShortHint(gate: SeatGate | null): string | null {
   if (!gate || gate.action === 'free') return null;
-  const full = gate.capacityUnknown ? '空位未知' : '已满';
+  const full = gate.noSeats ? '还没有席位' : gate.capacityUnknown ? '空位未知' : '已满';
   if (gate.action === 'forbid') return `${full} · 禁止超员`;
   if (gate.action === 'confirm') return `${full} · 需确认加购`;
   return `${full} · 会自动加购扣费`;
@@ -174,6 +213,22 @@ export function gateShortHint(gate: SeatGate | null): string | null {
 
 /** Confirm text before switching a member into a full billed type. */
 export function switchConfirmText(gate: SeatGate): string {
-  const lead = gate.capacityUnknown ? `读不到 ${gate.label} 空位，按已满处理：` : `${gate.label} 席位已满，`;
+  const lead = gate.noSeats
+    ? `这个 Team 还没有 ${gate.label} 席位，`
+    : gate.capacityUnknown ? `读不到 ${gate.label} 空位，按已满处理：` : `${gate.label} 席位已满，`;
   return `${lead}切换到 ${gate.label} 会让 ChatGPT 自动加购 1 个 ${gate.label} 席位并扣费。`;
+}
+
+/** "其中 22 个在「Aurora」自动加购并扣费" — the invites that made ChatGPT buy a seat. */
+export function overagePurchaseText(added: ReadonlyArray<{ team_name?: string; overage?: boolean }>): string | null {
+  const bought = added.filter((item) => item.overage);
+  if (bought.length === 0) return null;
+  const byTeam = new Map<string, number>();
+  for (const item of bought) {
+    const name = item.team_name || '未知 Team';
+    byTeam.set(name, (byTeam.get(name) ?? 0) + 1);
+  }
+  if (byTeam.size === 1) return `其中 ${bought.length} 个在「${[...byTeam.keys()][0]}」自动加购并扣费`;
+  const parts = [...byTeam].map(([name, count]) => `「${name}」${count} 个`).join('、');
+  return `其中 ${bought.length} 个自动加购并扣费：${parts}`;
 }

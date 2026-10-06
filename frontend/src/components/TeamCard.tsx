@@ -1,6 +1,6 @@
-import { useState, useRef, useEffect, type FormEvent } from 'react';
+import { useState, useRef, useEffect, type FormEvent, type ReactNode } from 'react';
 import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check, Gem, Ban } from 'lucide-react';
-import type { Team, TeamWorkspaceSettings, MembersData, ShowToast } from '../types';
+import type { MembersData, SeatType, ShowToast, Team, TeamWorkspaceSettings } from '../types';
 import MemberPanel from './MemberPanel';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
@@ -8,8 +8,8 @@ import AddMemberDialog from './AddMemberDialog';
 import TeamSettingsDialog from './TeamSettingsDialog';
 import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
-import { activeChatGptSeats, chatgptPaidSeats, premiumSeatUsage } from '../lib/seatCapacity';
-import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
+import { billedSeatSummary, premiumSeatUsage, teamPendingCounts } from '../lib/seatCapacity';
+import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, SEAT_TYPES, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
@@ -23,6 +23,69 @@ interface TeamCardProps {
   onSyncSucceeded: (team: Team) => void;
   syncError?: string;
   showToast: ShowToast;
+}
+
+/** Not a status: the policy is a setting, so it gets an outline instead of a status color. */
+const POLICY_CHIP =
+  'bg-white text-gray-700 ring-1 ring-inset ring-gray-300 dark:bg-transparent dark:text-ink-200 dark:ring-ink-600';
+
+/**
+ * One billed seat type on the card: in use / paid, plus the free seats the add and switch
+ * dialogs decide with (pending invites hold seats too, so they are counted and shown).
+ */
+function BilledSeatBlock({
+  seatType,
+  icon,
+  summary,
+  className = '',
+}: {
+  seatType: SeatType;
+  icon: ReactNode;
+  summary: ReturnType<typeof billedSeatSummary>;
+  className?: string;
+}) {
+  const style = SEAT_STYLE[seatType];
+  const label = SEAT_TYPES[seatType].label;
+  const { inUse, paid, pending, free, unknown } = summary;
+  const over = inUse > paid && (paid > 0 || inUse > 0);
+  const usedFill = paid > 0 ? Math.min(100, (inUse / paid) * 100) : inUse > 0 ? 100 : 0;
+  const heldFill = paid > 0 ? Math.min(100, ((inUse + pending) / paid) * 100) : 0;
+  const status = over
+    ? { text: `超出 ${inUse - paid}`, className: 'font-medium text-red-600 dark:text-red-400' }
+    : unknown
+      ? { text: '空位未知', className: 'text-gray-600 dark:text-ink-300' }
+      : free > 0
+        ? { text: `空 ${free}`, className: 'text-gray-600 dark:text-ink-300' }
+        : { text: '已满', className: 'font-medium text-gray-700 dark:text-ink-200' };
+  const title = [
+    `${label} 在用 ${inUse} 个，已付 ${paid} 个`,
+    pending > 0 ? `待接受 ${pending} 个` : '',
+    unknown ? '空位未知' : `空位 ${free} 个`,
+  ].filter(Boolean).join('，');
+  return (
+    <div className={`rounded-xl px-3.5 py-3 ${style.surface} ${className}`} title={title}>
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <span className={`flex min-w-0 items-center gap-1.5 whitespace-nowrap font-medium ${style.text}`}>
+          {icon} {label}<span className="hidden sm:inline"> 席位</span>
+        </span>
+        <span className={`shrink-0 whitespace-nowrap ${status.className}`}>{status.text}</span>
+      </div>
+      <div className="mt-1 flex items-baseline gap-1">
+        <span className={`text-xl font-semibold tabular-nums ${over ? 'text-red-600 dark:text-red-400' : style.text}`}>{inUse}</span>
+        <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {paid}</span>
+        <span className="ml-auto whitespace-nowrap text-[11px] text-gray-500 dark:text-ink-400">在用 / 已付</span>
+      </div>
+      <div className={`relative mt-2 h-1 overflow-hidden rounded-full ${style.track}`} aria-hidden="true">
+        {heldFill > usedFill && (
+          <div className={`absolute inset-y-0 left-0 rounded-full opacity-40 ${style.solid}`} style={{ width: `${heldFill}%` }} />
+        )}
+        <div className={`relative h-full rounded-full ${over ? 'bg-red-500' : style.solid}`} style={{ width: `${usedFill}%` }} />
+      </div>
+      {pending > 0 && (
+        <div className="mt-1.5 text-[11px] leading-4 text-gray-600 dark:text-ink-300">待接受 {pending} 个，也占席位</div>
+      )}
+    </div>
+  );
 }
 
 function formatShortDate(value: string | Date | null): string {
@@ -180,7 +243,6 @@ export default function TeamCard({
   const isWarning = (isNonRenewing || (team.days_remaining !== null && team.days_remaining <= 3))
     && !authBlocked
     && !isSubscriptionExpired;
-  const activeGptSeats = activeChatGptSeats(team);
   const monthlyTotal = discountedMonthlyTotal(team);
   const subtotal = monthlySubtotal(team);
   const [openingAddMember, setOpeningAddMember] = useState(false);
@@ -445,13 +507,12 @@ export default function TeamCard({
   const unit = moneySuffix(team);
   const teamDisplayName = team.remark ? `${team.name}（${team.remark}）` : team.name;
   // 已付 ChatGPT 席位：有分类型数据时用它（seats_entitled 可能把 Premium 也算进去）。
-  const seatsEntitled = chatgptPaidSeats(team);
-  const overSeats = seatsEntitled > 0 && activeGptSeats > seatsEntitled;
-  const seatFill = seatsEntitled > 0 ? Math.min(100, (activeGptSeats / seatsEntitled) * 100) : 0;
   const showCodex = team.is_codex_enabled && team.codex_count > 0;
   const premium = premiumSeatUsage(team);
-  const premiumOver = premium !== null && premium.inUse > premium.paid;
-  const premiumFill = premium && premium.paid > 0 ? Math.min(100, (premium.inUse / premium.paid) * 100) : premium?.inUse ? 100 : 0;
+  // 待接受邀请：成员名单拉到了就用它（最新），否则用列表接口缓存的计数。和弹窗用同一份数字。
+  const pendingByType = teamPendingCounts(team, membersData?.pending_invites);
+  const gptSeats = billedSeatSummary(team, 'default', pendingByType);
+  const premiumSeats = premium ? billedSeatSummary(team, 'prolite', pendingByType) : null;
   const seatBlocks = 1 + (showCodex ? 1 : 0) + (premium ? 1 : 0);
   // 默认的「超员需确认」不挂标签；另外两种会改变花钱方式，挂在卡片上一眼能看到。
   const overagePolicy = parseOveragePolicy(team.overage_policy);
@@ -624,7 +685,7 @@ export default function TeamCard({
                   event.stopPropagation();
                   void handleOpenSettings();
                 }}
-                className={`${PILL} ${overagePolicy === 'auto' ? TONE.warning : TONE.neutral} transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50`}
+                className={`${PILL} ${POLICY_CHIP} transition-colors hover:bg-gray-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 dark:hover:bg-ink-800`}
                 title={`超员策略：${overagePolicyOption.hint}。点击修改`}
               >
                 {overagePolicy === 'auto' ? <CreditCard size={11} /> : <Ban size={11} />}
@@ -653,19 +714,12 @@ export default function TeamCard({
           {/* Seats: each type is billed differently, so each box wears its seat color. With all
               three, ChatGPT takes the full first row and Codex / Premium share the second. */}
           <div className={`mt-4 grid gap-3 ${seatBlocks > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            <div className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.default.surface} ${seatBlocks === 3 ? 'col-span-2' : ''}`}>
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <span className={`flex items-center gap-1.5 whitespace-nowrap font-medium ${SEAT_STYLE.default.text}`}><Users size={13} /> ChatGPT 席位</span>
-                {overSeats && <span className="whitespace-nowrap font-medium text-red-600 dark:text-red-400">超出 {activeGptSeats - seatsEntitled}</span>}
-              </div>
-              <div className="mt-1 flex items-baseline gap-1">
-                <span className={`text-xl font-semibold tabular-nums ${overSeats ? 'text-red-600 dark:text-red-400' : SEAT_STYLE.default.text}`}>{activeGptSeats}</span>
-                <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {seatsEntitled}</span>
-              </div>
-              <div className={`mt-2 h-1 overflow-hidden rounded-full ${SEAT_STYLE.default.track}`} aria-hidden="true">
-                <div className={`h-full rounded-full ${overSeats ? 'bg-red-500' : SEAT_STYLE.default.solid}`} style={{ width: `${seatFill}%` }} />
-              </div>
-            </div>
+            <BilledSeatBlock
+              seatType="default"
+              icon={<Users size={13} className="shrink-0" />}
+              summary={gptSeats}
+              className={seatBlocks === 3 ? 'col-span-2' : ''}
+            />
             {showCodex && (
               <div className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.usage_based.surface}`}>
                 <div className={`flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${SEAT_STYLE.usage_based.text}`}>
@@ -677,24 +731,8 @@ export default function TeamCard({
                 </div>
               </div>
             )}
-            {premium && (
-              <div
-                className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.prolite.surface}`}
-                title={`Premium 在用 ${premium.inUse} 个，已付 ${premium.paid} 个`}
-              >
-                <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className={`flex items-center gap-1.5 whitespace-nowrap font-medium ${SEAT_STYLE.prolite.text}`}><Gem size={13} /> Premium 席位</span>
-                  {premiumOver && <span className="whitespace-nowrap font-medium text-red-600 dark:text-red-400">超出 {premium.inUse - premium.paid}</span>}
-                </div>
-                <div className="mt-1 flex items-baseline gap-1">
-                  <span className={`text-xl font-semibold tabular-nums ${premiumOver ? 'text-red-600 dark:text-red-400' : SEAT_STYLE.prolite.text}`}>{premium.inUse}</span>
-                  <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {premium.paid}</span>
-                  <span className="ml-auto whitespace-nowrap text-[11px] text-gray-500 dark:text-ink-400">在用 / 已付</span>
-                </div>
-                <div className={`mt-2 h-1 overflow-hidden rounded-full ${SEAT_STYLE.prolite.track}`} aria-hidden="true">
-                  <div className={`h-full rounded-full ${premiumOver ? 'bg-red-500' : SEAT_STYLE.prolite.solid}`} style={{ width: `${premiumFill}%` }} />
-                </div>
-              </div>
+            {premiumSeats && (
+              <BilledSeatBlock seatType="prolite" icon={<Gem size={13} className="shrink-0" />} summary={premiumSeats} />
             )}
           </div>
 

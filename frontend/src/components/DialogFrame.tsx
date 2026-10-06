@@ -20,6 +20,14 @@ interface DialogFrameProps {
   /** Button row pinned under the scrolling body: cancel/secondary first, primary action last. */
   footer?: ReactNode;
   children?: ReactNode;
+  /**
+   * Dialogs opened from this one (e.g. a confirm step). They are rendered inside this dialog's
+   * content so Radix treats them as nested: clicking in them is not a click outside this
+   * dialog, and closing them leaves this one open.
+   */
+  nested?: ReactNode;
+  /** Where focus lands on open; call event.preventDefault() and focus something else. */
+  onOpenAutoFocus?: (event: Event) => void;
 }
 
 /**
@@ -34,6 +42,8 @@ export default function DialogFrame({
   size = 'md',
   footer,
   children,
+  nested,
+  onOpenAutoFocus,
 }: DialogFrameProps) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -41,6 +51,7 @@ export default function DialogFrame({
         <Dialog.Overlay className="fixed inset-0 z-50 bg-gray-950/40 transition-opacity duration-150 starting:opacity-0 dark:bg-black/60" />
         <Dialog.Content
           {...(description ? {} : { 'aria-describedby': undefined })}
+          onOpenAutoFocus={onOpenAutoFocus}
           className={cn(
             'fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-xl border border-gray-200 bg-white shadow-2xl transition-[opacity,scale] duration-150 starting:scale-95 starting:opacity-0 focus:outline-none dark:border-ink-800 dark:bg-ink-900',
             WIDTH[size],
@@ -75,6 +86,7 @@ export default function DialogFrame({
               <X size={18} />
             </button>
           </Dialog.Close>
+          {nested}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

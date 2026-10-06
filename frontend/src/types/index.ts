@@ -49,6 +49,11 @@ export interface Team {
   seat_capacity: Record<string, SeatCapacityEntry> | null;
   /** 缓存的 seat_type_counts 原样计数（含未知类型）；{} = 未知。 */
   seat_type_counts: Record<string, number>;
+  /**
+   * 缓存的待接受邀请数 {seat_type: n}（它们也占着席位）。可选：缺失时卡片只在展开、
+   * 拉到成员名单后才把待接受算进空位。
+   */
+  pending_invite_counts?: Record<string, number>;
 }
 
 /** 注册表里的席位类型（正本：lib/seatType.ts 与后端 app/seat_types.py）。 */

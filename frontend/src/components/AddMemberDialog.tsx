@@ -1,13 +1,26 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { AlertTriangle, Ban, CreditCard, Loader2 } from 'lucide-react';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import { useKickPolicy } from '../hooks/useKickPolicy';
 import { selectionToDuration } from '../lib/expiry';
-import { inviteMember, OverageConfirmationError, type OveragePlanItem } from '../api/client';
-import { SEAT_STYLE, SEAT_TYPES, SEAT_TYPE_OPTIONS, parseSeatType } from '../lib/seatType';
-import { gateMessage, pendingCountsByType, seatGate, type TeamCapacityFields } from '../lib/seatCapacity';
-import type { PendingInvite, SeatType } from '../types';
+import {
+  fetchResourceUsage,
+  inviteMember,
+  OverageConfirmationError,
+  type OveragePlanItem,
+} from '../api/client';
+import { SEAT_STYLE, SEAT_TYPES, SEAT_TYPE_OPTIONS, parseOveragePolicy, parseSeatType } from '../lib/seatType';
+import {
+  cachedFreeSeats,
+  gateMessage,
+  overagePurchaseText,
+  pendingCountsByType,
+  seatGate,
+  teamPendingCounts,
+  type TeamCapacityFields,
+} from '../lib/seatCapacity';
+import type { PendingInvite, SeatType, Team } from '../types';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { BUTTON, INPUT } from './ui';
@@ -23,6 +36,8 @@ interface AddMemberDialogProps {
   team?: TeamCapacityFields | null;
   /** That Team's pending invites (they hold seats too). */
   pendingInvites?: PendingInvite[] | null;
+  /** Batch mode (no teamId): every Team, to say before submitting what would be bought where. */
+  teams?: Team[];
   title?: string;
   fixedSeatType?: SeatType;
   submitLabel?: string;
@@ -32,6 +47,10 @@ interface AddMemberDialogProps {
     seat_type: SeatType;
     expires_in?: string;
     allow_overage?: boolean;
+    /** The Teams of the overage plan the admin confirmed; the server overfills no other confirm Team. */
+    overage_team_ids?: string[];
+    /** How many seats that plan buys; the server buys no more on confirm Teams and asks again for the rest. */
+    overage_seat_limit?: number;
   }) => Promise<unknown>;
 }
 
@@ -40,12 +59,20 @@ interface BatchInviteFailure {
   error: string;
 }
 
-// Shape returned by batch invite endpoints (e.g. inviteGptMembers) — HTTP 200
-// even when some emails failed, with per-email reasons under `failed`.
-interface BatchInviteResultLike {
-  added?: Array<{ email: string }>;
-  failed?: BatchInviteFailure[];
-  no_place_emails?: string[];
+interface BatchInviteAdded {
+  email: string;
+  team_name?: string;
+  /** No free seat was left: ChatGPT added and charged one for this invite. */
+  overage?: boolean;
+}
+
+/** What a batch run did, merged across confirm rounds. Also handed to onSuccess. */
+export interface BatchInviteOutcome {
+  added: BatchInviteAdded[];
+  failed: BatchInviteFailure[];
+  no_place_emails: string[];
+  /** The admin declined the purchase: not invited, and not a failure. */
+  declined_emails: string[];
 }
 
 /** What the confirm step is about to buy, and what to resend once the admin agrees. */
@@ -53,25 +80,31 @@ interface OverageAsk {
   seatType: SeatType;
   message: ReactNode;
   emails: string[];
-  /** Batch: invites the server already made before asking (kept for the final result). */
-  carry?: { added: Array<{ email: string }>; failed: BatchInviteFailure[] };
+  /**
+   * Batch: the plan the admin is shown (its Teams and seat count go back as overage_team_ids /
+   * overage_seat_limit) and what the server already did before asking.
+   */
+  batch?: { planTeamIds: string[]; seatLimit: number; added: BatchInviteAdded[]; failed: BatchInviteFailure[] };
 }
 
 const NO_PLACE = '没位置，未邀请';
+const REPLAN_NOTE = '你确认过的超员计划已经不成立，需要重新确认。';
 
-function asBatchResult(result: unknown): BatchInviteResultLike | null {
-  if (!result || typeof result !== 'object') return null;
-  const candidate = result as BatchInviteResultLike;
-  if (!Array.isArray(candidate.failed)) return null;
-  return candidate;
+function asAdded(list: unknown): BatchInviteAdded[] {
+  if (!Array.isArray(list)) return [];
+  return list.filter((item): item is BatchInviteAdded =>
+    Boolean(item) && typeof (item as BatchInviteAdded).email === 'string');
 }
 
-function asFailures(list: unknown[]): BatchInviteFailure[] {
+function asFailures(list: unknown): BatchInviteFailure[] {
+  if (!Array.isArray(list)) return [];
   return list.filter((item): item is BatchInviteFailure =>
     Boolean(item) && typeof (item as BatchInviteFailure).email === 'string');
 }
 
 const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
+const NOTE_WARN = 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200';
+const NOTE_PLAIN = 'border-gray-200 bg-gray-50 text-gray-700 dark:border-ink-800 dark:bg-ink-950/60 dark:text-ink-200';
 
 // 新增成员的默认到期时间一直是 30 天，换成结构化选择项后仍然是同一个值。
 const DEFAULT_EXPIRY: ExpirySelection = { kind: 'duration', value: '30d' };
@@ -80,36 +113,62 @@ function parseEmails(raw: string): string[] {
   return raw.split(/\r?\n/).map((e) => e.trim()).filter(Boolean);
 }
 
-function BatchPlanMessage({ plan, total, remaining, added, addedOverage }: {
+/** 「A」、「B」 */
+function quoteNames(names: string[]): string {
+  return names.map((name) => `「${name}」`).join('、');
+}
+
+function BatchPlanMessage({ plan, total, remaining, invited, invitedOverage, replan }: {
   plan: OveragePlanItem[];
   total: number;
   remaining: number;
-  added: number;
-  /** Of `added`, how many went onto 超员自动 Teams (a seat was already bought for each). */
-  addedOverage: number;
+  invited: number;
+  /** Of `invited`, how many already made ChatGPT buy a seat (超员自动 Teams). */
+  invitedOverage: number;
+  replan: boolean;
 }) {
   const leftover = Math.max(0, remaining - total);
   return (
     <div className="space-y-2">
+      {replan && <p className="font-medium text-gray-900 dark:text-gray-100">{REPLAN_NOTE}</p>}
       <p>
-        {added > 0 && (
-          <>
-            {added} 个已加入
-            {addedOverage > 0 && <>（其中 {addedOverage} 个在「超员自动」的 Team，已加购席位）</>}。
-          </>
+        {invited > 0 && (
+          <>已邀请 {invited} 个{invitedOverage > 0 && <>（其中 {invitedOverage} 个已在「超员自动」的 Team 加购）</>}。</>
         )}
-        {remaining} 个邮箱没有空位，继续会让 ChatGPT 在这些 Team 自动加购 ChatGPT 席位并扣费：
+        {remaining} 个邮箱没有空位。
+        {plan.length === 1 && (
+          <>继续会让 ChatGPT 在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费。</>
+        )}
+        {plan.length > 1 && <>继续会让 ChatGPT 在这些 Team 自动加购 ChatGPT 席位并扣费：</>}
       </p>
-      <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 text-gray-700 dark:divide-ink-800 dark:border-ink-800 dark:text-ink-200">
-        {plan.map((item) => (
-          <li key={item.team_id || item.team_name} className="flex items-center justify-between gap-3 px-3 py-1.5">
-            <span className="min-w-0 truncate" title={item.team_name}>{item.team_name}</span>
-            <span className="shrink-0 font-medium tabular-nums">+{item.extra_seats} 席</span>
-          </li>
-        ))}
-      </ul>
-      <p className="font-medium text-gray-900 dark:text-gray-100">共加购 {total} 个 ChatGPT 席位。</p>
+      {plan.length > 1 && (
+        <>
+          <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 text-gray-700 dark:divide-ink-800 dark:border-ink-800 dark:text-ink-200">
+            {plan.map((item) => (
+              <li key={item.team_id || item.team_name} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                <span className="min-w-0 truncate" title={item.team_name}>{item.team_name}</span>
+                <span className="shrink-0 font-medium tabular-nums">+{item.extra_seats} 席</span>
+              </li>
+            ))}
+          </ul>
+          <p className="font-medium text-gray-900 dark:text-gray-100">共加购 {total} 个 ChatGPT 席位。</p>
+        </>
+      )}
       {leftover > 0 && <p>其余 {leftover} 个邮箱没位置，不会邀请。</p>}
+    </div>
+  );
+}
+
+function EmailList({ title, hint, emails }: { title: string; hint: string; emails: string[] }) {
+  return (
+    <div className={cn('rounded-lg border p-3 text-sm', NOTE_PLAIN)}>
+      <div className="font-medium text-gray-800 dark:text-gray-200">{title}（{emails.length}）</div>
+      <p className="mt-0.5 text-xs text-gray-600 dark:text-ink-300">{hint}</p>
+      <div className="mt-2 max-h-28 space-y-1 overflow-y-auto pr-1">
+        {emails.map((address, i) => (
+          <div key={`${address}-${i}`} className="break-all text-xs text-gray-700 dark:text-ink-200">{address}</div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -121,6 +180,7 @@ export default function AddMemberDialog({
   teamName,
   team,
   pendingInvites,
+  teams,
   title = '添加成员',
   fixedSeatType,
   submitLabel = '确认添加',
@@ -134,15 +194,65 @@ export default function AddMemberDialog({
   const [error, setError] = useState('');
   const kickPolicy = useKickPolicy();
   const [ask, setAsk] = useState<OverageAsk | null>(null);
-  const [batchResult, setBatchResult] = useState<BatchInviteResultLike | null>(null);
+  const [batchResult, setBatchResult] = useState<BatchInviteOutcome | null>(null);
+  // 批量模式：每个 Team 的缓存 ChatGPT 空位（已扣待接受邀请），用来在提交前说清楚会不会加购。
+  const [freeByTeam, setFreeByTeam] = useState<Map<string, number> | null>(null);
 
+  const batchMode = !teamId && Boolean(submitInvites);
   const effectiveSeatType = fixedSeatType ?? seatType;
   const emails = parseEmails(email);
   const pendingByType = useMemo(() => pendingCountsByType(pendingInvites), [pendingInvites]);
   // 单个 Team 才能事先判断：缓存的空位 + 这个 Team 的超员策略。服务端还会用实时数据再判一次。
-  const gate = teamId && team ? seatGate(team, effectiveSeatType, pendingByType, emails.length) : null;
+  const gate = teamId && team
+    ? seatGate(team, effectiveSeatType, pendingInvites ? pendingByType : teamPendingCounts(team), emails.length)
+    : null;
   const gateText = gate ? gateMessage(gate) : null;
   const blocked = gate?.action === 'forbid';
+
+  useEffect(() => {
+    if (!open || !batchMode) return;
+    let cancelled = false;
+    fetchResourceUsage(false)
+      .then((usage) => {
+        if (!cancelled) setFreeByTeam(new Map(usage.teams.map((item) => [item.team_id, item.free_gpt_seats])));
+      })
+      .catch(() => {
+        if (!cancelled) setFreeByTeam(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, batchMode]);
+
+  /** Batch: how many seats ChatGPT would add for these emails, and on which 超员自动 Teams. */
+  const batchPreview = useMemo(() => {
+    if (!batchMode || !teams || emails.length === 0) return null;
+    // 与后端批量挑 Team 的候选一致：状态正常、订阅没到期。
+    const candidates = teams.filter((item) => item.status === 'active' && item.subscription_status !== 'expired');
+    const free = candidates.reduce(
+      (total, item) => total + (freeByTeam?.get(item.id) ?? cachedFreeSeats(item, 'default', teamPendingCounts(item)).free),
+      0,
+    );
+    const extra = Math.max(0, emails.length - free);
+    const autoNames = candidates.filter((item) => parseOveragePolicy(item.overage_policy) === 'auto').map((item) => item.name);
+    const hasConfirm = candidates.some((item) => parseOveragePolicy(item.overage_policy) === 'confirm');
+    return { free, extra, autoNames, hasConfirm };
+  }, [batchMode, teams, emails.length, freeByTeam]);
+
+  const batchNote: { tone: 'warn' | 'plain'; text: string } | null = (() => {
+    if (!batchPreview || batchPreview.extra === 0) return null;
+    const { free, extra, autoNames, hasConfirm } = batchPreview;
+    const lead = `空闲 ChatGPT 席位约 ${free} 个，多出约 ${extra} 人。`;
+    if (autoNames.length === 1) {
+      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team「${autoNames[0]}」，ChatGPT 自动加购约 ${extra} 个 ChatGPT 席位并扣费。` };
+    }
+    if (autoNames.length > 1) {
+      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team（${quoteNames(autoNames)}），ChatGPT 自动加购约 ${extra} 个 ChatGPT 席位并扣费。` };
+    }
+    if (hasConfirm) return { tone: 'warn', text: `${lead}超出的部分要加购，提交后会先问你。` };
+    return { tone: 'plain', text: `${lead}其余 Team 都是「禁止超员」，多出的不会邀请，也不会加购。` };
+  })();
+  const batchWillBuy = Boolean(batchPreview && batchPreview.extra > 0 && batchPreview.autoNames.length > 0);
 
   const resetForm = () => {
     setEmail('');
@@ -160,60 +270,73 @@ export default function AddMemberDialog({
     onOpenChange(nextOpen);
   };
 
-  const handleRetryFailed = () => {
-    if (!batchResult?.failed?.length) return;
-    setEmail(batchResult.failed.map((f) => f.email).join('\n'));
-    setBatchResult(null);
-    setError('');
-  };
-
   const closeAll = () => {
     onOpenChange(false);
     resetForm();
   };
 
-  /** Batch (no teamId): the server picks the Teams and asks once before overfilling any. */
-  const submitBatch = async (list: string[], allowOverage: boolean, carry?: OverageAsk['carry']) => {
+  /** Shows a finished batch and leaves only the emails that were not invited in the box. */
+  const finishBatch = (outcome: BatchInviteOutcome) => {
+    onSuccess(outcome);
+    const leftover = [...outcome.failed.map((item) => item.email), ...outcome.declined_emails];
+    if (leftover.length === 0 && !overagePurchaseText(outcome.added)) {
+      closeAll();
+      return;
+    }
+    // 结果留在弹窗里（花了钱、或有人没加上）；输入框只留没邀请的，「重新提交」不会重复邀请。
+    setBatchResult(outcome);
+    setEmail(leftover.join('\n'));
+  };
+
+  /** Batch (no teamId): the server picks the Teams and asks before overfilling a 超员需确认 Team. */
+  const submitBatch = async (list: string[], allowOverage: boolean, prior?: OverageAsk['batch']) => {
     if (!submitInvites) return;
+    const carriedAdded = prior?.added ?? [];
+    const carriedFailed = prior?.failed ?? [];
     try {
       const result = await submitInvites({
         emails: list,
         seat_type: effectiveSeatType,
         expires_in: selectionToDuration(expiry),
         allow_overage: allowOverage,
+        overage_team_ids: allowOverage ? prior?.planTeamIds ?? [] : undefined,
+        overage_seat_limit: allowOverage ? prior?.seatLimit ?? 0 : undefined,
       });
-      const batch = asBatchResult(result);
-      const merged: BatchInviteResultLike | null = carry
-        ? {
-          ...(batch ?? {}),
-          added: [...carry.added, ...(batch?.added ?? [])],
-          failed: [...carry.failed, ...(batch?.failed ?? [])],
-        }
-        : batch;
+      const body = (result && typeof result === 'object' ? result : {}) as Record<string, unknown>;
+      const failed = [...carriedFailed, ...asFailures(body.failed)];
+      const noPlace = Array.isArray(body.no_place_emails)
+        ? body.no_place_emails.filter((item): item is string => typeof item === 'string')
+        : failed.filter((item) => item.error === NO_PLACE).map((item) => item.email);
       setAsk(null);
-      onSuccess(merged ?? result);
-      if (merged?.failed && merged.failed.length > 0) {
-        // 部分或全部失败：弹窗留在原地展示每个失败邮箱的原因，不假装成功关掉。
-        setBatchResult(merged);
-        return;
-      }
-      closeAll();
+      finishBatch({
+        added: [...carriedAdded, ...asAdded(body.added)],
+        failed,
+        no_place_emails: noPlace,
+        declined_emails: [],
+      });
     } catch (err) {
-      if (err instanceof OverageConfirmationError && !allowOverage) {
+      if (err instanceof OverageConfirmationError) {
+        // 第一次问，或者确认过的计划已经不成立（服务端带新计划再问）：都重新给他看计划。
         const remaining = err.remainingEmails.length > 0 ? err.remainingEmails : list;
-        const added = (err.added as Array<{ email: string; overage?: boolean }>).filter((item) => item && typeof item.email === 'string');
+        const added = [...carriedAdded, ...asAdded(err.added)];
         setAsk({
           seatType: 'default',
           emails: remaining,
-          carry: { added, failed: asFailures(err.failed) },
+          batch: {
+            planTeamIds: err.overagePlan.map((item) => item.team_id).filter(Boolean),
+            seatLimit: err.extraSeatsTotal,
+            added,
+            failed: [...carriedFailed, ...asFailures(err.failed)],
+          },
           message: err.overagePlan.length > 0
             ? (
               <BatchPlanMessage
                 plan={err.overagePlan}
                 total={err.extraSeatsTotal}
                 remaining={remaining.length}
-                added={added.length}
-                addedOverage={added.filter((item) => item.overage).length}
+                invited={added.length}
+                invitedOverage={added.filter((item) => item.overage).length}
+                replan={allowOverage || err.message.startsWith(REPLAN_NOTE)}
               />
             )
             : err.message,
@@ -221,7 +344,18 @@ export default function AddMemberDialog({
         return;
       }
       setAsk(null);
-      setError(err instanceof Error ? err.message : '添加失败');
+      const message = err instanceof Error ? err.message : '添加失败';
+      if (carriedAdded.length > 0) {
+        // 前几轮已经邀请的是真的：照实报出来，其余邮箱留在输入框里。
+        finishBatch({
+          added: carriedAdded,
+          failed: [...carriedFailed, ...list.map((address) => ({ email: address, error: message }))],
+          no_place_emails: [],
+          declined_emails: [],
+        });
+        return;
+      }
+      setError(message);
     }
   };
 
@@ -255,13 +389,13 @@ export default function AddMemberDialog({
         setAsk({
           seatType: parseSeatType(err.seatType) ?? effectiveSeatType,
           emails: err.remainingEmails.length > 0 ? err.remainingEmails : rest,
-          message: done > 0 ? `已添加 ${done} 个。${err.message}` : err.message,
+          message: done > 0 ? `已邀请 ${done} 个。${err.message}` : err.message,
         });
         return;
       }
       setAsk(null);
       const message = err instanceof Error ? err.message : '添加失败';
-      setError(done > 0 ? `已添加 ${done} 个，其余未添加：${message}` : message);
+      setError(done > 0 ? `已邀请 ${done} 个，其余未添加：${message}` : message);
     }
   };
 
@@ -291,67 +425,69 @@ export default function AddMemberDialog({
     if (!ask) return;
     setLoading(true);
     try {
-      if (submitInvites) await submitBatch(ask.emails, true, ask.carry);
+      if (submitInvites) await submitBatch(ask.emails, true, ask.batch);
       else await submitToTeam(ask.emails, true);
     } finally {
       setLoading(false);
     }
   };
 
+  /** 取消加购：只关确认这一步，表单和已填的邮箱都留着。 */
   const handleAskOpenChange = (nextOpen: boolean) => {
     if (nextOpen || loading) return;
-    // 批量模式下服务端在问之前已经用空位加了一些人：取消加购也要把这部分如实报出来。
-    if (ask?.carry && (ask.carry.added.length > 0 || ask.carry.failed.length > 0)) {
-      const result: BatchInviteResultLike = {
-        added: ask.carry.added,
-        failed: [
-          ...ask.carry.failed,
-          ...ask.emails.map((address) => ({ email: address, error: '没确认加购，未邀请' })),
-        ],
-      };
-      onSuccess(result);
-      setBatchResult(result);
-    }
+    const prior = ask?.batch;
     setAsk(null);
+    // 批量模式下服务端在问之前可能已经用空位邀请了一些人：照实报出来；没确认的不算失败。
+    if (prior && (prior.added.length > 0 || prior.failed.length > 0)) {
+      finishBatch({
+        added: prior.added,
+        failed: prior.failed,
+        no_place_emails: prior.failed.filter((item) => item.error === NO_PLACE).map((item) => item.email),
+        declined_emails: ask?.emails ?? [],
+      });
+    }
   };
 
-  const noPlace = new Set(
-    batchResult?.no_place_emails ?? (batchResult?.failed ?? []).filter((f) => f.error === NO_PLACE).map((f) => f.email),
-  );
-  const noPlaceList = (batchResult?.failed ?? []).filter((f) => noPlace.has(f.email));
+  const noPlace = new Set(batchResult?.no_place_emails ?? []);
+  const noPlaceList = (batchResult?.failed ?? []).filter((f) => noPlace.has(f.email)).map((f) => f.email);
   const otherFailed = (batchResult?.failed ?? []).filter((f) => !noPlace.has(f.email));
-  const addedCount = batchResult?.added?.length ?? 0;
+  const declined = batchResult?.declined_emails ?? [];
+  const addedCount = batchResult?.added.length ?? 0;
+  const purchaseText = batchResult ? overagePurchaseText(batchResult.added) : null;
+  const hasLeftover = emails.length > 0;
 
   const submitText = loading
     ? '添加中…'
     : batchResult
-      ? '重新提交'
+      ? '重新提交没加上的'
       : gate?.action === 'auto'
         ? `添加并加购 ${gate.extra} 席`
-        : submitLabel;
+        : batchWillBuy && batchPreview
+          ? `添加并加购约 ${batchPreview.extra} 席`
+          : submitLabel;
 
   return (
-    <>
-      <DialogFrame
-        open={open}
-        onOpenChange={handleDialogOpenChange}
-        title={title}
-        description={
-          !teamId
-            ? '先用有空闲 ChatGPT 席位的 Team。空位不够时按各 Team 的超员策略：「超员自动」直接加购，「超员需确认」先问你，「禁止超员」不加。'
-            : teamName && (
-              <>
-                邀请加入 <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>
-              </>
-            )
-        }
-        footer={
-          <>
-            <Dialog.Close asChild>
-              <button type="button" onClick={resetForm} className={BUTTON.secondary}>
-                {batchResult ? '完成' : '取消'}
-              </button>
-            </Dialog.Close>
+    <DialogFrame
+      open={open}
+      onOpenChange={handleDialogOpenChange}
+      title={title}
+      description={
+        !teamId
+          ? '先用有空闲 ChatGPT 席位的 Team。空位不够时按各 Team 的超员策略：「超员自动」直接加购，「超员需确认」先问你，「禁止超员」不加。'
+          : teamName && (
+            <>
+              邀请加入 <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>
+            </>
+          )
+      }
+      footer={
+        <>
+          <Dialog.Close asChild>
+            <button type="button" onClick={resetForm} className={BUTTON.secondary}>
+              {batchResult ? '完成' : '取消'}
+            </button>
+          </Dialog.Close>
+          {(!batchResult || hasLeftover) && (
             <button
               type="button"
               onClick={() => { void handleSubmit(); }}
@@ -362,148 +498,154 @@ export default function AddMemberDialog({
               {loading && <Loader2 size={14} className="animate-spin" />}
               {submitText}
             </button>
-          </>
-        }
-      >
-        <div className="space-y-5">
-          <div>
-            <label htmlFor="add-member-emails" className={LABEL}>
-              邮箱 <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>
-            </label>
-            <textarea
-              id="add-member-emails"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder={'user@example.com\nanother@example.com'}
-              rows={4}
-              className={cn(INPUT, 'min-h-24 resize-y')}
-            />
-          </div>
-
-          {!fixedSeatType && (
-            <div>
-              <span className={LABEL}>席位类型</span>
-              <div className="grid grid-cols-3 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950" role="group" aria-label="席位类型">
-                {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => setSeatType(value)}
-                    aria-pressed={seatType === value}
-                    className={cn(
-                      'inline-flex h-8 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-1 text-sm font-medium transition-colors',
-                      seatType === value
-                        ? cn('shadow-sm', SEAT_STYLE[value].pill)
-                        : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
-                    )}
-                  >
-                    <span className={cn('size-2 shrink-0 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {gate && !gateText && (
-                <p className="mt-1.5 text-xs text-gray-500 dark:text-ink-400">
-                  {gate.billed
-                    ? `还有 ${gate.free} 个 ${gate.label} 空位，不会加购。`
-                    : `${SEAT_TYPES[effectiveSeatType].label} 按用量计费，不占付费席位。`}
-                </p>
-              )}
-            </div>
           )}
-
-          {gateText && (
-            <div
-              role={blocked ? 'alert' : 'status'}
-              className={cn(
-                'flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm leading-6',
-                blocked
-                  ? 'border-gray-200 bg-gray-50 text-gray-700 dark:border-ink-800 dark:bg-ink-950/60 dark:text-ink-200'
-                  : 'border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200',
-              )}
-            >
-              {blocked
-                ? <Ban size={15} className="mt-1 shrink-0 text-gray-500 dark:text-ink-400" />
-                : <CreditCard size={15} className="mt-1 shrink-0 text-amber-600 dark:text-amber-400" />}
-              <span>
-                {gateText}
-                {gate?.action === 'confirm' && ' 提交前会再问你一次。'}
-              </span>
-            </div>
-          )}
-
-          <div>
-            <span className={LABEL}>到期时间</span>
-            <ExpiryPicker value={expiry} onChange={setExpiry} policy={kickPolicy} disabled={loading} />
-          </div>
-
-          {error && (
-            <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>
-          )}
-
-          {batchResult?.failed && batchResult.failed.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
-                <AlertTriangle size={15} className="shrink-0 text-amber-500" />
-                {[
-                  addedCount > 0 ? `${addedCount} 个已添加` : '',
-                  noPlaceList.length > 0 ? `${noPlaceList.length} 个没位置` : '',
-                  otherFailed.length > 0 ? `${otherFailed.length} 个失败` : '',
-                ].filter(Boolean).join('，')}
-              </div>
-
-              {noPlaceList.length > 0 && (
-                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-ink-800 dark:bg-ink-950/60">
-                  <div className="font-medium text-gray-800 dark:text-gray-200">{NO_PLACE}</div>
-                  <p className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">能用的 Team 都满了，又不允许再超员，这些邮箱没有发邀请，也没有加购。</p>
-                  <div className="mt-2 max-h-28 space-y-1 overflow-y-auto pr-1">
-                    {noPlaceList.map((f, i) => (
-                      <div key={`${f.email}-${i}`} className="break-all text-xs text-gray-700 dark:text-ink-200">{f.email}</div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {otherFailed.length > 0 && (
-                <div className="space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm dark:border-red-500/30 dark:bg-red-500/10">
-                  <div className="max-h-36 space-y-1.5 overflow-y-auto pr-1">
-                    {otherFailed.map((f, i) => (
-                      <div
-                        key={`${f.email}-${i}`}
-                        className="rounded-md border border-red-100 bg-white px-2 py-1.5 dark:border-red-500/20 dark:bg-ink-900"
-                      >
-                        <div className="break-all text-xs font-medium text-gray-800 dark:text-gray-200">{f.email}</div>
-                        <div className="mt-0.5 text-xs text-red-600 dark:text-red-400">{f.error}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={handleRetryFailed}
-                className="text-xs font-medium text-blue-700 underline decoration-dotted underline-offset-2 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200"
-              >
-                把没加上的邮箱放回输入框
-              </button>
-            </div>
-          )}
+        </>
+      }
+      nested={
+        <ConfirmDialog
+          open={ask !== null}
+          onOpenChange={handleAskOpenChange}
+          title={`确认加购 ${SEAT_TYPES[ask?.seatType ?? 'default'].label} 席位`}
+          message={ask?.message ?? ''}
+          confirmLabel="加购并添加"
+          destructive
+          loading={loading}
+          onConfirm={() => { void handleConfirmOverage(); }}
+        >
+          <p className="text-xs text-gray-600 dark:text-ink-300">超员策略可在 Team 设置里修改。</p>
+        </ConfirmDialog>
+      }
+    >
+      <div className="space-y-5">
+        <div>
+          <label htmlFor="add-member-emails" className={LABEL}>
+            {batchResult ? '没加上的邮箱' : '邮箱'} <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>
+          </label>
+          <textarea
+            id="add-member-emails"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder={'user@example.com\nanother@example.com'}
+            rows={4}
+            className={cn(INPUT, 'min-h-24 resize-y')}
+          />
         </div>
-      </DialogFrame>
 
-      <ConfirmDialog
-        open={ask !== null}
-        onOpenChange={handleAskOpenChange}
-        title={`确认加购 ${SEAT_TYPES[ask?.seatType ?? 'default'].label} 席位`}
-        message={ask?.message ?? ''}
-        confirmLabel="加购并添加"
-        destructive
-        loading={loading}
-        onConfirm={() => { void handleConfirmOverage(); }}
-      >
-        <p className="text-xs text-gray-500 dark:text-ink-400">超员策略可在 Team 设置里修改。</p>
-      </ConfirmDialog>
-    </>
+        {!fixedSeatType && (
+          <div>
+            <span className={LABEL}>席位类型</span>
+            <div className="grid grid-cols-3 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950" role="group" aria-label="席位类型">
+              {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setSeatType(value)}
+                  aria-pressed={seatType === value}
+                  className={cn(
+                    'inline-flex h-8 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-1 text-sm font-medium transition-colors',
+                    seatType === value
+                      ? cn('shadow-sm', SEAT_STYLE[value].pill)
+                      : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
+                  )}
+                >
+                  <span className={cn('size-2 shrink-0 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
+                  {label}
+                </button>
+              ))}
+            </div>
+            {gate && !gateText && (
+              <p className="mt-1.5 text-xs text-gray-500 dark:text-ink-400">
+                {gate.billed
+                  ? `还有 ${gate.free} 个 ${gate.label} 空位，不会加购。`
+                  : `${SEAT_TYPES[effectiveSeatType].label} 按用量计费，不占付费席位。`}
+              </p>
+            )}
+          </div>
+        )}
+
+        {gateText && (
+          <div
+            role={blocked ? 'alert' : 'status'}
+            className={cn('flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm leading-6', blocked ? NOTE_PLAIN : NOTE_WARN)}
+          >
+            {blocked
+              ? <Ban size={15} className="mt-1 shrink-0 text-gray-500 dark:text-ink-400" />
+              : <CreditCard size={15} className="mt-1 shrink-0 text-amber-600 dark:text-amber-400" />}
+            <span>
+              {gateText}
+              {gate?.action === 'confirm' && '提交前会再问你一次。'}
+            </span>
+          </div>
+        )}
+
+        {!batchResult && batchNote && (
+          <div
+            role="status"
+            className={cn('flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm leading-6', batchNote.tone === 'warn' ? NOTE_WARN : NOTE_PLAIN)}
+          >
+            <CreditCard size={15} className={cn('mt-1 shrink-0', batchNote.tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : 'text-gray-500 dark:text-ink-400')} />
+            <span>{batchNote.text}</span>
+          </div>
+        )}
+
+        <div>
+          <span className={LABEL}>到期时间</span>
+          <ExpiryPicker value={expiry} onChange={setExpiry} policy={kickPolicy} disabled={loading} />
+        </div>
+
+        {error && (
+          <p role="alert" className="text-sm text-red-600 dark:text-red-400">{error}</p>
+        )}
+
+        {batchResult && (
+          <div className="space-y-3" role="status">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+              {(otherFailed.length > 0 || noPlaceList.length > 0) && <AlertTriangle size={15} className="shrink-0 text-amber-500" />}
+              {[
+                `已邀请 ${addedCount} 个`,
+                noPlaceList.length > 0 ? `${noPlaceList.length} 个没位置` : '',
+                declined.length > 0 ? `${declined.length} 个没确认加购` : '',
+                otherFailed.length > 0 ? `${otherFailed.length} 个失败` : '',
+              ].filter(Boolean).join('，')}
+            </div>
+
+            {purchaseText && (
+              <div className={cn('flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm leading-6', NOTE_WARN)}>
+                <CreditCard size={15} className="mt-1 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span>{purchaseText}。</span>
+              </div>
+            )}
+
+            {noPlaceList.length > 0 && (
+              <EmailList
+                title={NO_PLACE}
+                hint="能用的 Team 都满了，又不允许再超员，这些邮箱没有发邀请，也没有加购。"
+                emails={noPlaceList}
+              />
+            )}
+
+            {declined.length > 0 && (
+              <EmailList title="没确认加购，未邀请" hint="你取消了加购，这些邮箱没有发邀请，也没有扣费。" emails={declined} />
+            )}
+
+            {otherFailed.length > 0 && (
+              <div className="space-y-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm dark:border-red-500/30 dark:bg-red-500/10">
+                <div className="max-h-36 space-y-1.5 overflow-y-auto pr-1">
+                  {otherFailed.map((f, i) => (
+                    <div
+                      key={`${f.email}-${i}`}
+                      className="rounded-md border border-red-100 bg-white px-2 py-1.5 dark:border-red-500/20 dark:bg-ink-900"
+                    >
+                      <div className="break-all text-xs font-medium text-gray-800 dark:text-gray-200">{f.email}</div>
+                      <div className="mt-0.5 text-xs text-red-600 dark:text-red-400">{f.error}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </DialogFrame>
   );
 }

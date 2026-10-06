@@ -397,10 +397,18 @@ export interface InviteGptMembersResult {
   total: number;
 }
 
+/**
+ * Batch invite onto any Team. With `allow_overage`, `overage_team_ids` and `overage_seat_limit`
+ * are the Teams and seat count of the overage plan the admin confirmed: no other 超员需确认 Team
+ * is overfilled, no more seats than that are bought on them, and if the plan no longer fits the
+ * server asks again (409) with a new plan.
+ */
 export async function inviteGptMembers(data: {
   emails: string[];
   expires_in?: string;
   allow_overage?: boolean;
+  overage_team_ids?: string[];
+  overage_seat_limit?: number;
 }): Promise<InviteGptMembersResult> {
   return request<InviteGptMembersResult>('/api/gpt-members/invite', {
     method: 'POST',

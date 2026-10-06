@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeftRight, ChevronDown, Loader2 } from 'lucide-react';
 import type { OveragePolicy, Team, TeamWorkspaceSettings, WorkspaceDefaultSeatType } from '../types';
 import {
@@ -63,16 +63,19 @@ export default function TeamSettingsDialog({
   const [policy, setPolicy] = useState<OveragePolicy>(() => parseOveragePolicy(overagePolicy));
   const [savingPolicy, setSavingPolicy] = useState<OveragePolicy | null>(null);
   const [policyError, setPolicyError] = useState('');
+  const [confirmAutoOpen, setConfirmAutoOpen] = useState(false);
+  const policyRadios = useRef<Partial<Record<OveragePolicy, HTMLInputElement | null>>>({});
 
   useEffect(() => {
     if (!open) return;
     setPolicy(parseOveragePolicy(overagePolicy));
     setPolicyError('');
+    setConfirmAutoOpen(false);
     // 只在打开时同步；打开期间父组件刷新不该把管理员刚点的选项拍回去。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, teamId]);
 
-  const handlePolicyChange = async (next: OveragePolicy) => {
+  const savePolicy = async (next: OveragePolicy) => {
     if (next === policy || savingPolicy) return;
     const previous = policy;
     setPolicy(next);
@@ -88,6 +91,16 @@ export default function TeamSettingsDialog({
     } finally {
       setSavingPolicy(null);
     }
+  };
+
+  // 改成「超员自动」以后满了就直接扣费，多问一步；改成另外两种是更保守的，直接生效。
+  const handlePolicyChange = (next: OveragePolicy) => {
+    if (next === policy || savingPolicy) return;
+    if (next === 'auto') {
+      setConfirmAutoOpen(true);
+      return;
+    }
+    void savePolicy(next);
   };
 
   useEffect(() => {
@@ -203,7 +216,10 @@ export default function TeamSettingsDialog({
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen) setConfirmOpen(false);
+    if (!nextOpen) {
+      setConfirmOpen(false);
+      setConfirmAutoOpen(false);
+    }
     onOpenChange(nextOpen);
   };
 
@@ -216,145 +232,170 @@ export default function TeamSettingsDialog({
   const selectedProxy = proxies.find((p) => p.id === selectedProxyId);
 
   return (
-    <>
-      <DialogFrame
-        open={open}
-        onOpenChange={handleOpenChange}
-        title="Team 设置"
-        description={
-          (teamName || ownerEmail) && (
-            <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-              {teamName && <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>}
-              {ownerEmail && (
-                <span className="min-w-0 truncate text-gray-500 dark:text-ink-400" title={ownerEmail}>{ownerEmail}</span>
-              )}
-            </span>
-          )
-        }
-        size="md"
-      >
-        <div className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
-          <fieldset className="p-3" disabled={savingPolicy !== null}>
-            <legend className="sr-only">超员策略</legend>
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-gray-900 dark:text-gray-100" aria-hidden>超员策略</div>
-                <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">ChatGPT / Premium 席位满了时，加人或切换怎么办</div>
-              </div>
-              {savingPolicy && <Loader2 size={14} className="shrink-0 animate-spin text-gray-400" aria-label="保存中" />}
-            </div>
-            <div className="mt-2.5 grid gap-1.5">
-              {OVERAGE_POLICY_OPTIONS.map((option) => (
-                <label
-                  key={option.value}
-                  className={cn(
-                    'flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors',
-                    policy === option.value
-                      ? 'border-blue-500 bg-blue-50/70 dark:border-blue-400/60 dark:bg-blue-500/10'
-                      : 'border-gray-200 hover:bg-gray-50 dark:border-ink-800 dark:hover:bg-ink-850',
-                    savingPolicy !== null && 'cursor-wait',
-                  )}
-                >
-                  <input
-                    type="radio"
-                    name={`overage-policy-${teamId}`}
-                    value={option.value}
-                    checked={policy === option.value}
-                    onChange={() => void handlePolicyChange(option.value)}
-                    className="mt-0.5 size-4 shrink-0 accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500/50 dark:accent-blue-500"
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm font-medium text-gray-900 dark:text-gray-100">{option.label}</span>
-                    <span className="block text-xs leading-5 text-gray-500 dark:text-ink-400">{option.hint}</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            {policyError && <p role="alert" className="mt-2 text-sm text-red-600 dark:text-red-400">{policyError}</p>}
-          </fieldset>
-
-          <div className="flex items-center justify-between gap-3 p-3">
+    <DialogFrame
+      open={open}
+      onOpenChange={handleOpenChange}
+      title="Team 设置"
+      description={
+        (teamName || ownerEmail) && (
+          <span className="flex min-w-0 flex-wrap items-baseline gap-x-2">
+            {teamName && <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>}
+            {ownerEmail && (
+              <span className="min-w-0 truncate text-gray-500 dark:text-ink-400" title={ownerEmail}>{ownerEmail}</span>
+            )}
+          </span>
+        )
+      }
+      size="md"
+      onOpenAutoFocus={(event) => {
+        // 打开时焦点落在当前选中的策略上，而不是第一个选项。
+        const selected = policyRadios.current[parseOveragePolicy(overagePolicy)];
+        if (!selected) return;
+        event.preventDefault();
+        selected.focus();
+      }}
+      nested={
+        <>
+          <ConfirmDialog
+            open={confirmOpen}
+            onOpenChange={setConfirmOpen}
+            title="切换默认邀请席位"
+            message={`成员邀请的默认席位将从 ${formatSeatTypeLabel(currentSeat)} 改为 ${formatSeatTypeLabel(nextSeat)}。`}
+            confirmLabel="切换"
+            loading={saving}
+            onConfirm={handleConfirmSwitch}
+          />
+          <ConfirmDialog
+            open={confirmAutoOpen}
+            onOpenChange={(next) => {
+              if (!next && savingPolicy !== 'auto') setConfirmAutoOpen(false);
+            }}
+            title="改为超员自动？"
+            message="以后这个 Team 的 ChatGPT 或 Premium 席位满了时，加人或切换会直接进行，ChatGPT 自动加购并扣费，不再先问你。"
+            confirmLabel="改为超员自动"
+            destructive
+            loading={savingPolicy === 'auto'}
+            onConfirm={() => {
+              void savePolicy('auto').then(() => setConfirmAutoOpen(false));
+            }}
+          />
+        </>
+      }
+    >
+      <div className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
+        <fieldset className="p-3" disabled={savingPolicy !== null}>
+          <legend className="sr-only">超员策略</legend>
+          <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-sm font-medium text-gray-900 dark:text-gray-100">默认邀请席位</div>
-              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">成员邀请默认使用的席位</div>
+              <div className="text-sm font-medium text-gray-900 dark:text-gray-100" aria-hidden>超员策略</div>
+              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">ChatGPT / Premium 席位满了时，加人或切换怎么办</div>
             </div>
-            <button
-              type="button"
-              disabled={loading || !settings}
-              onClick={() => setConfirmOpen(true)}
-              className={cn(
-                'inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-                SEAT_STYLE[currentSeat].surface,
-                SEAT_STYLE[currentSeat].text,
-                'hover:brightness-95 dark:hover:brightness-125',
-              )}
-              aria-label={`默认邀请席位：${formatSeatTypeLabel(currentSeat)}，点击切换`}
-              title="切换"
-            >
-              {loading ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" />
-                  查询中…
-                </>
-              ) : (
-                <>
-                  {formatSeatTypeLabel(currentSeat)}
-                  <ArrowLeftRight size={13} className="opacity-70" />
-                </>
-              )}
-            </button>
+            {savingPolicy && <Loader2 size={14} className="shrink-0 animate-spin text-gray-400" aria-label="保存中" />}
           </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 p-3">
-            <div className="min-w-0 flex-1 basis-40">
-              <label htmlFor="team-proxy" className="text-sm font-medium text-gray-900 dark:text-gray-100">代理</label>
-              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">访问 ChatGPT 时使用的网络</div>
-            </div>
-            <div className="relative w-full sm:w-44">
-              <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2">
-                {savingProxy ? (
-                  <Loader2 size={12} className="animate-spin text-gray-400" />
-                ) : (
-                  <span
-                    className={cn(
-                      'block size-2 rounded-full',
-                      selectedProxyId == null ? 'bg-emerald-500' : proxyStatusDot(selectedProxy ?? ({ status: 'unknown' } as Proxy)),
-                    )}
-                  />
+          <div className="mt-2.5 grid gap-1.5">
+            {OVERAGE_POLICY_OPTIONS.map((option) => (
+              <label
+                key={option.value}
+                className={cn(
+                  'flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors',
+                  policy === option.value
+                    ? 'border-blue-500 bg-blue-50/70 dark:border-blue-400/60 dark:bg-blue-500/10'
+                    : 'border-gray-200 hover:bg-gray-50 dark:border-ink-800 dark:hover:bg-ink-850',
+                  savingPolicy !== null && 'cursor-wait',
                 )}
-              </span>
-              <select
-                id="team-proxy"
-                value={selectedProxyId ?? ''}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  handleProxyChange(val === '' ? null : Number(val));
-                }}
-                disabled={savingProxy}
-                className="h-9 w-full cursor-pointer appearance-none truncate rounded-lg border border-gray-200 bg-white pl-7 pr-8 text-sm text-gray-700 transition-colors hover:border-gray-300 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 disabled:opacity-50 dark:border-ink-800 dark:bg-ink-950 dark:text-gray-200 dark:hover:border-ink-700"
               >
-                <option value="">直连</option>
-                {proxies.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-              <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 dark:text-ink-500" />
-            </div>
+                <input
+                  ref={(node) => {
+                    policyRadios.current[option.value] = node;
+                  }}
+                  type="radio"
+                  name={`overage-policy-${teamId}`}
+                  value={option.value}
+                  checked={policy === option.value}
+                  onChange={() => handlePolicyChange(option.value)}
+                  className="mt-0.5 size-4 shrink-0 accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500/50 dark:accent-blue-500"
+                />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium text-gray-900 dark:text-gray-100">{option.label}</span>
+                  <span className="block text-xs leading-5 text-gray-500 dark:text-ink-400">{option.hint}</span>
+                </span>
+              </label>
+            ))}
           </div>
+          {policyError && <p role="alert" className="mt-2 text-sm text-red-600 dark:text-red-400">{policyError}</p>}
+        </fieldset>
+
+        <div className="flex items-center justify-between gap-3 p-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-gray-900 dark:text-gray-100">默认邀请席位</div>
+            <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">成员邀请默认使用的席位</div>
+          </div>
+          <button
+            type="button"
+            disabled={loading || !settings}
+            onClick={() => setConfirmOpen(true)}
+            className={cn(
+              'inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+              SEAT_STYLE[currentSeat].surface,
+              SEAT_STYLE[currentSeat].text,
+              'hover:brightness-95 dark:hover:brightness-125',
+            )}
+            aria-label={`默认邀请席位：${formatSeatTypeLabel(currentSeat)}，点击切换`}
+            title="切换"
+          >
+            {loading ? (
+              <>
+                <Loader2 size={14} className="animate-spin" />
+                查询中…
+              </>
+            ) : (
+              <>
+                {formatSeatTypeLabel(currentSeat)}
+                <ArrowLeftRight size={13} className="opacity-70" />
+              </>
+            )}
+          </button>
         </div>
 
-        {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
-      </DialogFrame>
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 p-3">
+          <div className="min-w-0 flex-1 basis-40">
+            <label htmlFor="team-proxy" className="text-sm font-medium text-gray-900 dark:text-gray-100">代理</label>
+            <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">访问 ChatGPT 时使用的网络</div>
+          </div>
+          <div className="relative w-full sm:w-44">
+            <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2">
+              {savingProxy ? (
+                <Loader2 size={12} className="animate-spin text-gray-400" />
+              ) : (
+                <span
+                  className={cn(
+                    'block size-2 rounded-full',
+                    selectedProxyId == null ? 'bg-emerald-500' : proxyStatusDot(selectedProxy ?? ({ status: 'unknown' } as Proxy)),
+                  )}
+                />
+              )}
+            </span>
+            <select
+              id="team-proxy"
+              value={selectedProxyId ?? ''}
+              onChange={(e) => {
+                const val = e.target.value;
+                handleProxyChange(val === '' ? null : Number(val));
+              }}
+              disabled={savingProxy}
+              className="h-9 w-full cursor-pointer appearance-none truncate rounded-lg border border-gray-200 bg-white pl-7 pr-8 text-sm text-gray-700 transition-colors hover:border-gray-300 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 disabled:opacity-50 dark:border-ink-800 dark:bg-ink-950 dark:text-gray-200 dark:hover:border-ink-700"
+            >
+              <option value="">直连</option>
+              {proxies.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 dark:text-ink-500" />
+          </div>
+        </div>
+      </div>
 
-      <ConfirmDialog
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title="切换默认邀请席位"
-        message={`成员邀请的默认席位将从 ${formatSeatTypeLabel(currentSeat)} 改为 ${formatSeatTypeLabel(nextSeat)}。`}
-        confirmLabel="切换"
-        loading={saving}
-        onConfirm={handleConfirmSwitch}
-      />
-    </>
+      {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+    </DialogFrame>
   );
 }

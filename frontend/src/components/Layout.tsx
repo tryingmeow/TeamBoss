@@ -21,16 +21,15 @@ import {
   exportAllSessions,
   importSessions,
   inviteGptMembers,
-  type InviteGptMembersResult,
   clearStoredAdminApiKey,
 } from '../api/client';
 import { prefetchAdminPages } from '../adminPages';
-import { activeChatGptSeats, chatgptPaidSeats } from '../lib/seatCapacity';
+import { activeChatGptSeats, chatgptPaidSeats, overagePurchaseText } from '../lib/seatCapacity';
 import { cn } from '../lib/utils';
 import Dashboard from './Dashboard';
 import DashboardSortControl, { type SortDirection, type SortKey } from './DashboardSortControl';
 import AddTeamDialog from './AddTeamDialog';
-import AddMemberDialog from './AddMemberDialog';
+import AddMemberDialog, { type BatchInviteOutcome } from './AddMemberDialog';
 import SettingsDialog from './SettingsDialog';
 import ConfirmDialog from './ConfirmDialog';
 import BrandMark from './BrandMark';
@@ -260,19 +259,20 @@ export default function Layout() {
   };
 
   const handleGptMembersAdded = async (result?: unknown) => {
-    const data = result as InviteGptMembersResult | undefined;
+    const data = result as Partial<BatchInviteOutcome> | undefined;
     const added = data?.added?.length ?? 0;
     const failed = data?.failed?.length ?? 0;
     const noPlace = data?.no_place_emails?.length ?? 0;
+    const declined = data?.declined_emails?.length ?? 0;
     await refresh(false);
-    if (failed > 0) {
-      const parts = [`已添加 ${added} 个`];
-      if (noPlace > 0) parts.push(`${noPlace} 个没位置未邀请`);
-      if (failed - noPlace > 0) parts.push(`失败 ${failed - noPlace} 个`);
-      showToast(parts.join('，'), 'error');
-      return;
-    }
-    showToast(added > 0 ? `已添加 ${added} 个 GPT 成员` : '已提交 GPT 成员邀请');
+    const parts = [`已邀请 ${added} 个`];
+    const purchase = overagePurchaseText(data?.added ?? []);
+    if (purchase) parts.push(purchase);
+    if (noPlace > 0) parts.push(`${noPlace} 个没位置未邀请`);
+    if (declined > 0) parts.push(`${declined} 个没确认加购未邀请`);
+    if (failed - noPlace > 0) parts.push(`失败 ${failed - noPlace} 个`);
+    // 没确认加购、没位置都不是失败；只有真正出错的邮箱才用错误样式。
+    showToast(parts.join('，'), failed - noPlace > 0 ? 'error' : 'success');
   };
 
   const isDashboard = location.pathname.replace(/\/+$/, '') === '/admin/dashboard';
@@ -479,8 +479,9 @@ export default function Layout() {
           title="添加 GPT 成员"
           fixedSeatType="default"
           submitLabel="添加"
-          submitInvites={({ emails, expires_in, allow_overage }) =>
-            inviteGptMembers({ emails, expires_in, allow_overage })
+          teams={teams}
+          submitInvites={({ emails, expires_in, allow_overage, overage_team_ids, overage_seat_limit }) =>
+            inviteGptMembers({ emails, expires_in, allow_overage, overage_team_ids, overage_seat_limit })
           }
           onSuccess={handleGptMembersAdded}
         />
