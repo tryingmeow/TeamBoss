@@ -18,10 +18,13 @@ PUBLIC_SETTINGS_KEYS = (
     "expiry_kick_mode",
     "expiry_kick_delay_hours",
     # 已退役：超员改成每个 Team 自己的 overage_policy（services/overage_policy.py），
-    # 这个全局开关只在那一列第一次加上时迁移过一次（database.py）。旧前端还会读写它，
-    # 这里照收照存，但没有任何代码再读它。
+    # 这个全局开关只在那一列第一次加上时迁移过一次（database.py）。还开着旧页面的浏览器
+    # 会读它，读到 true 就在单个邀请里自动带上超员确认。所以接口照收这个键（不报错），
+    # 但只存、只回 false，见 RETIRED_FALSE_KEYS。
     "skip_overage_confirmation",
 )
+# 已退役、只能是 false 的键：PATCH 收到任何值都存 "false"，GET 一律回 "false"。
+RETIRED_FALSE_KEYS = ("skip_overage_confirmation",)
 
 
 def _now_iso() -> str:
@@ -49,7 +52,11 @@ async def get_settings():
             PUBLIC_SETTINGS_KEYS,
         )
         rows = await cursor.fetchall()
-    return {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]} for row in rows}
+    result = {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]} for row in rows}
+    for key in RETIRED_FALSE_KEYS:
+        if key in result:
+            result[key]["value"] = "false"
+    return result
 
 
 @router.patch("")
@@ -78,8 +85,8 @@ async def update_settings(req: SettingsUpdate):
         updates["expiry_kick_delay_hours"] = req.expiry_kick_delay_hours
 
     if req.skip_overage_confirmation is not None:
-        # 已退役，存了也不生效，见 PUBLIC_SETTINGS_KEYS 的注释。
-        updates["skip_overage_confirmation"] = "true" if req.skip_overage_confirmation else "false"
+        # 已退役：照收不报错，但永远存 false（旧页面读到 true 会自动确认超员）。
+        updates["skip_overage_confirmation"] = "false"
 
     if updates:
         try:

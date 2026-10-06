@@ -68,6 +68,30 @@ class OveragePolicyEndpointTest(TempDbMixin, unittest.TestCase):
 
         self.assertEqual(self.http.get(f"/api/teams/{TEAM}").json()["overage_policy"], "confirm")
 
+    def test_retired_global_toggle_is_never_stored_or_reported_as_true(self):
+        """旧页面读到 true 会在单个邀请里自动带上超员确认：存的、回的都只能是 false。"""
+        conn = self._conn()
+        conn.execute("UPDATE settings SET value = 'true' WHERE key = 'skip_overage_confirmation'")
+        conn.commit()
+        conn.close()
+        self.assertEqual(
+            asyncio.run(settings_route.get_settings())["skip_overage_confirmation"]["value"], "false",
+            "库里还是旧的 true 时，GET 也必须回 false",
+        )
+
+        result = asyncio.run(settings_route.update_settings(SettingsUpdate(skip_overage_confirmation=True)))
+
+        self.assertEqual(result["status"], "ok")
+        conn = self._conn()
+        stored = conn.execute(
+            "SELECT value FROM settings WHERE key = 'skip_overage_confirmation'"
+        ).fetchone()["value"]
+        conn.close()
+        self.assertEqual(stored, "false")
+        self.assertEqual(
+            asyncio.run(settings_route.get_settings())["skip_overage_confirmation"]["value"], "false"
+        )
+
 
 class PolicyChangeWaitsForInFlightInviteTest(TempDbMixin, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
