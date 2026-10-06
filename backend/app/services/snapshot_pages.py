@@ -4,8 +4,9 @@
 **完整**的名单才能拿来判断「某人不在」，进而放掉持久席位占用、关掉 member_expiry 行、
 踢人或撤邀请。拉不全、读不懂的名单是未知状态：调用方保留上一份缓存，这次刷新算失败。
 
-逐页的判定集中在 ``SnapshotPageAccumulator``，三处分页循环（member_cache_service 的
-异步刷新、scheduler 的同步拉取、patrol 严格模式的动手前刷新）都用它，规则只写这里：
+逐页的判定集中在 ``SnapshotPageAccumulator``，四处分页循环（member_cache_service 的
+异步刷新、scheduler 的同步拉取、patrol 严格模式的动手前刷新、seat_capacity 卖座前现拉的
+待接受邀请）都用它，规则只写这里。卖座那一处同样只认完整名单：拉不全 = 占用未知 = 没有空位。
 
 - 每一页必须是对象；带 ``error`` 键 = 这一页失败（``SnapshotPageError.upstream_error``
   带着上游原样的错误，调用方沿用自己原来的报错文字）。

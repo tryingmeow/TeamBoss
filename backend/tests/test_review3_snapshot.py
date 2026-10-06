@@ -5,6 +5,9 @@
 - F3：空的 /users 回复（``{"items": [], "total": 0}``）不完整——真实名单里至少有 owner。
   数据同步不关行、异步刷新不动缓存和占用、踢人监视不收尾、到期踢人的查找不说「人不在」、
   patrol 严格模式的刷新失败。空的邀请名单照常有效。
+- F1：卖座前现拉的待接受邀请和快照同一套完整性规则。第一页 100 条、total 101，第二页空、
+  total 100（翻页期间少了一个邀请，Premium 邀请挪到了第一页范围里）：占用未知，兑换按没有
+  空位拒绝、不消耗码。
 
 累加器本身的规则在 test_snapshot_pages.py。上游一律是只记录调用的假客户端，绝不触网。
 """
@@ -21,6 +24,13 @@ from test_review2_holds import (  # noqa: I001  (_isolation first, via the suppo
 from test_premium_overage_support import direct_call
 from test_premium_patrol import OLD, RecordingClient, _live, _member
 from test_review_fix_premium_patrol import _Fixture as _PatrolFixture
+from test_review_fix_premium_capacity import (
+    NO_CHATGPT_SEAT,
+    PagedClient,
+    _filler,
+    _premium_subscription,
+    _RedeemFlow,
+)
 
 import asyncio
 import json
@@ -33,7 +43,15 @@ from fastapi import HTTPException
 from app import member_cache_service
 from app import scheduler as app_scheduler
 from app.services import patrol as patrol_service
+from app.routes import access_tokens
+from app.services import seat_capacity as seat_capacity_module
 from app.services import team_health_alerts, tg_notify, tg_summary
+from app.services.seat_capacity import (
+    SeatCapacityFetchError,
+    fetch_all_pending_invites,
+    fetch_live_chatgpt_seat_capacity,
+    fetch_live_seat_type_capacity,
+)
 from app.services.snapshot_pages import SnapshotPageAccumulator
 
 OWNER = {
@@ -349,6 +367,97 @@ class StrictRefreshEmptyMemberListTest(_PatrolFixture):
         self._patrol(dry_run=False)
 
         self.assertEqual(self._calls("remove_member"), [("remove_member", "u-d")])
+
+
+# ═══ F1：卖座前的待接受邀请读取 ═════════════════════════════════════════════════
+
+# 读第一页时有 101 个邀请（第 101 个是 Premium 邀请）；读第二页之前少了一个，Premium 邀请
+# 挪到 offset 99，第二页是空的、total 100。拼起来的 100 条里没有那个 Premium 邀请。
+SHIFTED_INVITE_PAGES = [
+    {"items": _filler(100), "total": 101},
+    {"items": [], "total": 100},
+]
+
+
+def _premium_counts():
+    return {"default": 0, "usage_based": 0, "prolite": 0}
+
+
+class CapacityPendingReadTest(unittest.TestCase):
+    def _run(self, coro):
+        with patch.object(seat_capacity_module, "run_chatgpt_call", new=direct_call):
+            return asyncio.run(coro)
+
+    def test_total_changing_between_pages_is_unknown(self):
+        client = PagedClient({}, {}, SHIFTED_INVITE_PAGES)
+        with self.assertRaises(SeatCapacityFetchError) as ctx:
+            self._run(fetch_all_pending_invites(client))
+        self.assertIn("total changed between pages", str(ctx.exception))
+        self.assertEqual(client.pending_calls, [(0, 100), (100, 100)])
+
+    def test_premium_and_chatgpt_capacity_are_unknown(self):
+        premium = PagedClient(_premium_subscription(paid=1, available=1), _premium_counts(),
+                              SHIFTED_INVITE_PAGES)
+        with self.assertRaises(SeatCapacityFetchError):
+            self._run(fetch_live_seat_type_capacity(premium, "prolite"))
+        chatgpt = PagedClient({"seats_entitled": 2, "seats_in_use": 1},
+                              {"default": 1, "usage_based": 0}, SHIFTED_INVITE_PAGES)
+        with self.assertRaises(SeatCapacityFetchError):
+            self._run(fetch_live_chatgpt_seat_capacity(chatgpt))
+
+    def test_identity_rules_apply_to_capacity_reads(self):
+        for label, pages in {
+            "duplicate invite email": [{"items": [
+                {"email_address": "dup@example.com", "seat_type": "prolite"},
+                {"email_address": "DUP@example.com", "seat_type": "prolite"},
+            ], "total": 2}],
+            "identity-less invite": [{"items": [{"seat_type": "prolite"}], "total": 1}],
+            "more invites than the total": [{"items": _filler(3), "total": 2}],
+        }.items():
+            with self.subTest(reply=label):
+                with self.assertRaises(SeatCapacityFetchError):
+                    self._run(fetch_all_pending_invites(PagedClient({}, {}, pages)))
+
+    def test_page_cap_is_unknown(self):
+        endless = [{"items": _filler(100, prefix=f"cap{n}-")} for n in range(5)]
+        with patch.object(seat_capacity_module, "MAX_PENDING_PAGES", 3):
+            with self.assertRaises(SeatCapacityFetchError) as ctx:
+                self._run(fetch_all_pending_invites(PagedClient({}, {}, endless)))
+        self.assertIn("paging limit", str(ctx.exception))
+
+    def test_upstream_error_text_is_kept(self):
+        with self.assertRaises(SeatCapacityFetchError) as ctx:
+            self._run(fetch_all_pending_invites(PagedClient({}, {}, [{"error": "HTTP 401 Unauthorized"}])))
+        self.assertEqual(str(ctx.exception), "HTTP 401 Unauthorized")
+
+    def test_consistent_pages_still_read_in_full(self):
+        pages = [
+            {"items": _filler(100), "total": 101},
+            {"items": [{"email_address": "held@example.com", "seat_type": "prolite"}], "total": 101},
+        ]
+        capacity, _sub, _counts, pending = self._run(fetch_live_seat_type_capacity(
+            PagedClient(_premium_subscription(paid=1, available=1), _premium_counts(), pages), "prolite"
+        ))
+        self.assertEqual(pending["total"], 101)
+        self.assertEqual(capacity.pending, 1)
+        self.assertEqual(capacity.available, 0)
+
+
+class RedeemFailsClosedOnShiftingInvitesTest(_RedeemFlow):
+    async def test_premium_seat_is_not_sold(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1, pages=SHIFTED_INVITE_PAGES)
+        await self._assert_refused_unconsumed(
+            "atm_f1_premium", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(self.invites, [])
+        self.assertEqual(await self._hold_rows(), [])
+
+    async def test_chatgpt_seat_is_not_sold(self):
+        await self._team()
+        self._chatgpt_upstream(entitled=2, active=1, pages=SHIFTED_INVITE_PAGES)
+        await self._assert_refused_unconsumed("atm_f1_chatgpt", "default", NO_CHATGPT_SEAT)
+        self.assertEqual(self.invites, [])
 
 
 if __name__ == "__main__":

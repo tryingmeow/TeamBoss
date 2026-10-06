@@ -8,6 +8,7 @@ from ..chatgpt_limiter import run_chatgpt_call
 from ..database import get_db
 from ..seat_types import DEFAULT_SEAT_TYPE, is_billed_seat_type, normalize_seat_type
 from ..utils.durations import utc_now
+from .snapshot_pages import SnapshotPageAccumulator, SnapshotPageError
 
 logger = logging.getLogger(__name__)
 
@@ -430,37 +431,22 @@ async def fetch_all_pending_invites(
 ) -> dict[str, Any]:
     """分页拉完整份待接受邀请，返回 ``{"items": [...], "total": n}``。
 
-    拿不到完整名单一律抛 SeatCapacityFetchError（占用未知 = 没有空位）：
-    任何一页报错、没有可用列表、条目不是对象；给了 ``total`` 却在凑够之前收到短页；
-    翻到 ``MAX_PENDING_PAGES`` 还没结束。没有 ``total`` 时，短页（不足 ``limit`` 条）就是最后一页。
+    何时算完整只按 ``SnapshotPageAccumulator``（snapshot_pages 正本），和成员快照同一套规则：
+    任何一页报错或读不懂、行认不出是谁或重复、``total`` 翻页期间变了、条数和 ``total``
+    对不上、翻到 ``MAX_PENDING_PAGES`` 还没结束，一律抛 SeatCapacityFetchError
+    （占用未知 = 没有空位）。上游报错页的原因沿用上游原样的 error。
     """
-    page_size = max(1, int(limit))
-    items: list[dict[str, Any]] = []
-    offset = 0
+    pages = SnapshotPageAccumulator("invites", limit=limit)
     for _ in range(MAX_PENDING_PAGES):
-        data = await run_chatgpt_call(client.get_pending_invites, offset, page_size)
-        error = chatgpt_api_error(data)
-        if error:
-            raise SeatCapacityFetchError(error)
-        page_items = _pending_items(data)
-        items.extend(page_items)
-        total = data.get("total")
-        if isinstance(total, bool) or not isinstance(total, int):
-            total = None
-        short_page = len(page_items) < page_size
-        if total is not None:
-            if len(items) >= total:
-                break
-            if short_page:
-                raise SeatCapacityFetchError(
-                    "pending invites truncated before the reported total"
-                )
-        elif short_page:
-            break
-        offset += page_size
-    else:
-        raise SeatCapacityFetchError("pending invites exceed the paging limit")
-    return {"items": items, "total": len(items)}
+        data = await run_chatgpt_call(client.get_pending_invites, pages.next_offset, pages.limit)
+        try:
+            if pages.add(data):
+                return {"items": pages.items, "total": len(pages.items)}
+        except SnapshotPageError as exc:
+            raise SeatCapacityFetchError(
+                exc.upstream_error or f"pending invites: {exc.reason}"
+            ) from exc
+    raise SeatCapacityFetchError("pending invites exceed the paging limit")
 
 
 def chatgpt_api_error(result: dict[str, Any]) -> str | None:
