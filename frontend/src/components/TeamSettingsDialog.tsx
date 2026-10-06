@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeftRight, ChevronDown, Loader2 } from 'lucide-react';
-import type { SeatType, TeamWorkspaceSettings } from '../types';
+import type { OveragePolicy, Team, TeamWorkspaceSettings, WorkspaceDefaultSeatType } from '../types';
 import {
   checkProxy,
   fetchProxies,
   fetchTeamWorkspaceSettings,
   updateTeamDefaultSeatType,
+  updateTeamOveragePolicy,
   updateTeamProxy,
   type Proxy,
 } from '../api/client';
-import { SEAT_STYLE, formatSeatTypeLabel, normalizeSeatType } from '../lib/seatType';
+import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { cn } from '../lib/utils';
@@ -22,13 +23,18 @@ interface TeamSettingsDialogProps {
   teamName?: string;
   ownerEmail?: string;
   currentProxyId: number | null;
+  /** The Team's overage policy as last loaded. */
+  overagePolicy?: OveragePolicy | null;
   initialSettings?: TeamWorkspaceSettings | null;
   onChanged?: (settings: TeamWorkspaceSettings) => void;
   onProxyChanged?: (proxyId: number | null) => void;
+  /** The server's Team after the overage policy changed. */
+  onTeamUpdated?: (team: Team) => void;
 }
 
-function normalizeWorkspaceSeatType(value: TeamWorkspaceSettings['default_seat_type']): SeatType {
-  return normalizeSeatType(value);
+/** The workspace default is ChatGPT or Codex only; anything else upstream reports reads as ChatGPT. */
+function normalizeWorkspaceSeatType(value: string | null | undefined): WorkspaceDefaultSeatType {
+  return value === 'usage_based' ? 'usage_based' : 'default';
 }
 
 export default function TeamSettingsDialog({
@@ -38,9 +44,11 @@ export default function TeamSettingsDialog({
   teamName,
   ownerEmail,
   currentProxyId,
+  overagePolicy,
   initialSettings,
   onChanged,
   onProxyChanged,
+  onTeamUpdated,
 }: TeamSettingsDialogProps) {
   const [settings, setSettings] = useState<TeamWorkspaceSettings | null>(null);
   const [loading, setLoading] = useState(false);
@@ -51,6 +59,36 @@ export default function TeamSettingsDialog({
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [selectedProxyId, setSelectedProxyId] = useState<number | null>(currentProxyId);
   const [savingProxy, setSavingProxy] = useState(false);
+
+  const [policy, setPolicy] = useState<OveragePolicy>(() => parseOveragePolicy(overagePolicy));
+  const [savingPolicy, setSavingPolicy] = useState<OveragePolicy | null>(null);
+  const [policyError, setPolicyError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setPolicy(parseOveragePolicy(overagePolicy));
+    setPolicyError('');
+    // 只在打开时同步；打开期间父组件刷新不该把管理员刚点的选项拍回去。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, teamId]);
+
+  const handlePolicyChange = async (next: OveragePolicy) => {
+    if (next === policy || savingPolicy) return;
+    const previous = policy;
+    setPolicy(next);
+    setSavingPolicy(next);
+    setPolicyError('');
+    try {
+      const updated = await updateTeamOveragePolicy(teamId, next);
+      setPolicy(parseOveragePolicy(updated.overage_policy ?? next));
+      onTeamUpdated?.(updated);
+    } catch (err) {
+      setPolicy(previous);
+      setPolicyError(err instanceof Error ? err.message : '保存失败');
+    } finally {
+      setSavingPolicy(null);
+    }
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -111,11 +149,11 @@ export default function TeamSettingsDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, teamId, currentProxyId]);
 
-  const currentSeat = useMemo<SeatType>(
-    () => normalizeWorkspaceSeatType(settings?.default_seat_type ?? 'default'),
+  const currentSeat = useMemo<WorkspaceDefaultSeatType>(
+    () => normalizeWorkspaceSeatType(settings?.default_seat_type),
     [settings]
   );
-  const nextSeat: SeatType = currentSeat === 'usage_based' ? 'default' : 'usage_based';
+  const nextSeat: WorkspaceDefaultSeatType = currentSeat === 'usage_based' ? 'default' : 'usage_based';
 
   const handleConfirmSwitch = async () => {
     setSaving(true);
@@ -196,6 +234,45 @@ export default function TeamSettingsDialog({
         size="md"
       >
         <div className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
+          <fieldset className="p-3" disabled={savingPolicy !== null}>
+            <legend className="sr-only">超员策略</legend>
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-gray-900 dark:text-gray-100" aria-hidden>超员策略</div>
+                <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">ChatGPT / Premium 席位满了时，加人或切换怎么办</div>
+              </div>
+              {savingPolicy && <Loader2 size={14} className="shrink-0 animate-spin text-gray-400" aria-label="保存中" />}
+            </div>
+            <div className="mt-2.5 grid gap-1.5">
+              {OVERAGE_POLICY_OPTIONS.map((option) => (
+                <label
+                  key={option.value}
+                  className={cn(
+                    'flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors',
+                    policy === option.value
+                      ? 'border-blue-500 bg-blue-50/70 dark:border-blue-400/60 dark:bg-blue-500/10'
+                      : 'border-gray-200 hover:bg-gray-50 dark:border-ink-800 dark:hover:bg-ink-850',
+                    savingPolicy !== null && 'cursor-wait',
+                  )}
+                >
+                  <input
+                    type="radio"
+                    name={`overage-policy-${teamId}`}
+                    value={option.value}
+                    checked={policy === option.value}
+                    onChange={() => void handlePolicyChange(option.value)}
+                    className="mt-0.5 size-4 shrink-0 accent-blue-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500/50 dark:accent-blue-500"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-sm font-medium text-gray-900 dark:text-gray-100">{option.label}</span>
+                    <span className="block text-xs leading-5 text-gray-500 dark:text-ink-400">{option.hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            {policyError && <p role="alert" className="mt-2 text-sm text-red-600 dark:text-red-400">{policyError}</p>}
+          </fieldset>
+
           <div className="flex items-center justify-between gap-3 p-3">
             <div className="min-w-0">
               <div className="text-sm font-medium text-gray-900 dark:text-gray-100">默认邀请席位</div>

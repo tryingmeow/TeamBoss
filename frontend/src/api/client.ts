@@ -1,4 +1,14 @@
-import type { MembersData, SeatType, Settings, Team, TeamSyncResult, TeamWorkspaceSettings } from '../types';
+import type {
+  CodeSeatType,
+  MembersData,
+  OveragePolicy,
+  SeatType,
+  Settings,
+  Team,
+  TeamSyncResult,
+  TeamWorkspaceSettings,
+  WorkspaceDefaultSeatType,
+} from '../types';
 
 const BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const ADMIN_API_KEY_STORAGE = 'auto_team_admin_api_key';
@@ -23,6 +33,24 @@ export interface OverageCapacity {
   active_team_count?: number;
 }
 
+/** Batch invite only: extra seats ChatGPT would add (and charge) per Team if the admin confirms. */
+export interface OveragePlanItem {
+  team_id: string;
+  team_name: string;
+  extra_seats: number;
+}
+
+/** Who a 409 overage refusal is about. Absent fields (older backend) stay empty. */
+export interface OverageRefusalInfo {
+  seatType: string;
+  policy: OveragePolicy | null;
+  operation: 'invite' | 'seat_switch' | 'batch' | null;
+  teamId: string;
+  teamName: string;
+  /** The live seat read failed; the server counted the Team as full. */
+  capacityUnknown: boolean;
+}
+
 /** A non-2xx response. `status` lets callers tell an auth rejection from an outage. */
 export class ApiError extends Error {
   readonly status: number;
@@ -37,18 +65,30 @@ export class ApiError extends Error {
 /** Team 的 ChatGPT 登录已失效（后端 auth_state 已是 rejected），只能重新导入 session。 */
 export class TeamAuthRejectedError extends Error {}
 
+/** 409 require_overage_confirmation: the seat type is full and the Team asks before buying. */
 export class OverageConfirmationError extends Error {
   capacity: OverageCapacity;
   remainingEmails: string[];
   added: unknown[];
   failed: unknown[];
+  seatType: string;
+  policy: OveragePolicy | null;
+  operation: OverageRefusalInfo['operation'];
+  teamId: string;
+  teamName: string;
+  capacityUnknown: boolean;
+  overagePlan: OveragePlanItem[];
+  extraSeatsTotal: number;
 
   constructor(
     message: string,
     capacity: OverageCapacity,
     remainingEmails: string[] = [],
     added: unknown[] = [],
-    failed: unknown[] = []
+    failed: unknown[] = [],
+    info: Partial<OverageRefusalInfo> = {},
+    overagePlan: OveragePlanItem[] = [],
+    extraSeatsTotal = 0
   ) {
     super(message);
     this.name = 'OverageConfirmationError';
@@ -56,7 +96,63 @@ export class OverageConfirmationError extends Error {
     this.remainingEmails = remainingEmails;
     this.added = added;
     this.failed = failed;
+    this.seatType = info.seatType ?? 'default';
+    this.policy = info.policy ?? null;
+    this.operation = info.operation ?? null;
+    this.teamId = info.teamId ?? '';
+    this.teamName = info.teamName ?? '';
+    this.capacityUnknown = info.capacityUnknown ?? false;
+    this.overagePlan = overagePlan;
+    this.extraSeatsTotal = extraSeatsTotal || overagePlan.reduce((total, item) => total + item.extra_seats, 0);
   }
+}
+
+/** 409 overage_forbidden: the seat type is full and the Team is set to 禁止超员. Nothing was bought. */
+export class OverageForbiddenError extends Error implements OverageRefusalInfo {
+  seatType: string;
+  policy: OveragePolicy | null;
+  operation: OverageRefusalInfo['operation'];
+  teamId: string;
+  teamName: string;
+  capacityUnknown: boolean;
+
+  constructor(message: string, info: Partial<OverageRefusalInfo> = {}) {
+    super(message);
+    this.name = 'OverageForbiddenError';
+    this.seatType = info.seatType ?? 'default';
+    this.policy = info.policy ?? 'forbid';
+    this.operation = info.operation ?? null;
+    this.teamId = info.teamId ?? '';
+    this.teamName = info.teamName ?? '';
+    this.capacityUnknown = info.capacityUnknown ?? false;
+  }
+}
+
+function refusalInfo(detail: Record<string, unknown>): Partial<OverageRefusalInfo> {
+  const capacity = (detail.capacity && typeof detail.capacity === 'object' ? detail.capacity : {}) as Record<string, unknown>;
+  const operation = detail.operation;
+  const policy = detail.policy;
+  return {
+    seatType: typeof detail.seat_type === 'string' ? detail.seat_type
+      : typeof capacity.seat_type === 'string' ? capacity.seat_type : undefined,
+    policy: policy === 'forbid' || policy === 'confirm' || policy === 'auto' ? policy : undefined,
+    operation: operation === 'invite' || operation === 'seat_switch' || operation === 'batch' ? operation : undefined,
+    teamId: typeof detail.team_id === 'string' ? detail.team_id : undefined,
+    teamName: typeof detail.team_name === 'string' ? detail.team_name : undefined,
+    capacityUnknown: capacity.capacity_unknown === true,
+  };
+}
+
+function parseOveragePlan(raw: unknown): OveragePlanItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map((item) => ({
+      team_id: String(item.team_id ?? ''),
+      team_name: String(item.team_name ?? item.team_id ?? ''),
+      extra_seats: Math.max(0, Number(item.extra_seats) || 0),
+    }))
+    .filter((item) => item.extra_seats > 0);
 }
 
 function errorMessageFromBody(body: string, fallback: string): string {
@@ -113,6 +209,9 @@ async function request<T>(url: string, options?: RequestInit, behavior: RequestB
         if (parsed?.detail?.code === 'team_auth_rejected') {
           throw new TeamAuthRejectedError(parsed.detail.message ?? '登录已失效，请重新导入');
         }
+        if (parsed?.detail?.code === 'overage_forbidden') {
+          throw new OverageForbiddenError(parsed.detail.message ?? '席位已满，这个 Team 禁止超员', refusalInfo(parsed.detail));
+        }
         if (parsed?.detail?.code === 'require_overage_confirmation') {
           const capacity = parsed.detail.capacity ?? {};
           throw new OverageConfirmationError(
@@ -127,10 +226,17 @@ async function request<T>(url: string, options?: RequestInit, behavior: RequestB
             Array.isArray(parsed.detail.remaining_emails) ? parsed.detail.remaining_emails : [],
             Array.isArray(parsed.detail.added) ? parsed.detail.added : [],
             Array.isArray(parsed.detail.failed) ? parsed.detail.failed : [],
+            refusalInfo(parsed.detail),
+            parseOveragePlan(parsed.detail.overage_plan),
+            Number(parsed.detail.extra_seats_total) || 0,
           );
         }
       } catch (e) {
-        if (e instanceof OverageConfirmationError || e instanceof TeamAuthRejectedError) throw e;
+        if (
+          e instanceof OverageConfirmationError ||
+          e instanceof OverageForbiddenError ||
+          e instanceof TeamAuthRejectedError
+        ) throw e;
       }
     }
     throw new ApiError(errorMessageFromBody(body, `HTTP ${res.status}`), res.status);
@@ -213,7 +319,7 @@ export async function fetchTeamWorkspaceSettings(
 
 export async function updateTeamDefaultSeatType(
   teamId: string,
-  seatType: SeatType
+  seatType: WorkspaceDefaultSeatType
 ): Promise<TeamWorkspaceSettings> {
   return request<TeamWorkspaceSettings>(`/api/teams/${teamId}/workspace-settings/default-seat-type`, {
     method: 'POST',
@@ -258,9 +364,17 @@ export async function updateTeamRemark(teamId: string, remark: string): Promise<
   });
 }
 
+/** What a Team does when a billed seat type is full. Returns the updated Team. */
+export async function updateTeamOveragePolicy(teamId: string, policy: OveragePolicy): Promise<Team> {
+  return request<Team>(`/api/teams/${teamId}/overage-policy`, {
+    method: 'PATCH',
+    body: JSON.stringify({ overage_policy: policy }),
+  });
+}
+
 export async function inviteMember(
   teamId: string,
-  data: { email: string; seat_type: string; expires_in?: string; allow_overage?: boolean }
+  data: { email: string; seat_type: SeatType; expires_in?: string; allow_overage?: boolean }
 ): Promise<unknown> {
   return request(`/api/teams/${teamId}/members/invite`, {
     method: 'POST',
@@ -278,6 +392,8 @@ export interface InviteGptMembersResult {
     overage?: boolean;
   }>;
   failed: Array<{ email: string; error: string }>;
+  /** No Team could take them without overfilling one it may not overfill: not invited (also in `failed`). */
+  no_place_emails?: string[];
   total: number;
 }
 
@@ -296,10 +412,19 @@ export async function removeMember(teamId: string, userId: string): Promise<void
   return request<void>(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' });
 }
 
-export async function changeSeat(teamId: string, userId: string, seatType: string): Promise<void> {
+/**
+ * Switch a member's seat type. `allowOverage` is the explicit confirmation that ChatGPT may
+ * add and charge a seat of the target type when none is free; send it only after asking.
+ */
+export async function changeSeat(
+  teamId: string,
+  userId: string,
+  seatType: SeatType,
+  allowOverage = false
+): Promise<void> {
   return request<void>(`/api/teams/${teamId}/members/${userId}/seat`, {
     method: 'PATCH',
-    body: JSON.stringify({ seat_type: seatType }),
+    body: JSON.stringify({ seat_type: seatType, allow_overage: allowOverage }),
   });
 }
 
@@ -516,12 +641,7 @@ export async function updateMemberExpiry(teamId: string, userId: string, expires
   });
 }
 
-export async function updateMemberSeat(teamId: string, userId: string, seatType: string): Promise<void> {
-  return request<void>(`/api/teams/${teamId}/members/${userId}/seat`, {
-    method: 'PATCH',
-    body: JSON.stringify({ seat_type: seatType }),
-  });
-}
+export const updateMemberSeat = changeSeat;
 
 export async function kickMember(teamId: string, userId: string): Promise<void> {
   return request<void>(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' });
@@ -759,6 +879,14 @@ export interface FinanceTeamItem {
   will_renew: number;
   subscription_status: 'renewing' | 'nonrenewing' | 'expired' | 'stale';
   latest_invoice: FinanceLatestInvoice | null;
+  /** ChatGPT seats the monthly cost multiplies: per-type paid count when known, else seats_entitled. */
+  chatgpt_seats_billed?: number | null;
+  /** Paid Premium seats (0 when unknown). */
+  premium_seats_paid?: number;
+  /** premium_seats_paid × the estimated Premium price; there is no upstream price source. */
+  premium_monthly_estimate_usd?: number;
+  /** The same estimate in the base currency; null when there is no FX rate. */
+  premium_monthly_estimate_base?: number | null;
 }
 
 export interface FinanceLatestInvoice {
@@ -824,6 +952,10 @@ export interface FinanceOverview {
   excluded_teams_count: number;
   last_paid_total_base: number | null;
   last_paid_count: number;
+  /** Sum of premium_monthly_estimate_base (estimate; not part of monthly_total_base). */
+  premium_monthly_estimate_base_total?: number;
+  /** Estimated Premium price per seat per month (USD). */
+  premium_seat_price_estimate_usd?: number;
   teams: FinanceTeamItem[];
   timeline: FinanceTimelineItem[];
   alerts: FinanceAlert[];
@@ -1100,6 +1232,8 @@ export async function deleteTgCode(id: number): Promise<void> {
 export interface AccessTokenListItem {
   id: number;
   token_prefix: string;
+  /** Seat the code gives; missing (older backend) = ChatGPT. */
+  seat_type?: string;
   grant_expires_in: string;
   token_expires_at: string | null;
   max_uses: number;
@@ -1114,6 +1248,7 @@ export interface AccessTokenResponse {
   id: number;
   token: string;
   token_prefix: string;
+  seat_type?: string;
   grant_expires_in: string;
   token_expires_at: string | null;
   max_uses: number;
@@ -1130,6 +1265,7 @@ export async function createAccessToken(body: {
   grant_expires_in: string;
   token_ttl?: string;
   note?: string;
+  seat_type?: CodeSeatType;
 }): Promise<AccessTokenResponse> {
   return request<AccessTokenResponse>('/api/access-tokens', {
     method: 'POST',

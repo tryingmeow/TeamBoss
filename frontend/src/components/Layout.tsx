@@ -25,7 +25,7 @@ import {
   clearStoredAdminApiKey,
 } from '../api/client';
 import { prefetchAdminPages } from '../adminPages';
-import { activeChatGptSeats } from '../lib/seatCapacity';
+import { activeChatGptSeats, chatgptPaidSeats } from '../lib/seatCapacity';
 import { cn } from '../lib/utils';
 import Dashboard from './Dashboard';
 import DashboardSortControl, { type SortDirection, type SortKey } from './DashboardSortControl';
@@ -263,9 +263,13 @@ export default function Layout() {
     const data = result as InviteGptMembersResult | undefined;
     const added = data?.added?.length ?? 0;
     const failed = data?.failed?.length ?? 0;
+    const noPlace = data?.no_place_emails?.length ?? 0;
     await refresh(false);
     if (failed > 0) {
-      showToast(`已添加 ${added} 个，失败 ${failed} 个`, 'error');
+      const parts = [`已添加 ${added} 个`];
+      if (noPlace > 0) parts.push(`${noPlace} 个没位置未邀请`);
+      if (failed - noPlace > 0) parts.push(`失败 ${failed - noPlace} 个`);
+      showToast(parts.join('，'), 'error');
       return;
     }
     showToast(added > 0 ? `已添加 ${added} 个 GPT 成员` : '已提交 GPT 成员邀请');
@@ -275,7 +279,7 @@ export default function Layout() {
 
   const summary = useMemo(() => {
     const seatsUsed = teams.reduce((total, team) => total + activeChatGptSeats(team), 0);
-    const seatsTotal = teams.reduce((total, team) => total + (Number(team.seats_entitled) || 0), 0);
+    const seatsTotal = teams.reduce((total, team) => total + chatgptPaidSeats(team), 0);
     const attention = teams.filter((team) => needsAttention(team, syncFailures)).length;
     return { seatsUsed, seatsTotal, attention };
   }, [teams, syncFailures]);

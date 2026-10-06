@@ -1,33 +1,60 @@
-import type { SeatType } from '../types';
+/**
+ * 本文件是前端席位类型注册表与超员策略文案的正本。后端正本：backend/app/seat_types.py。
+ *
+ * Only registry types are ever offered as an action (invite, switch, code). Anything else the
+ * workspace reports (e.g. `automation`) shows as 「其他（<raw>）」 in a neutral style and gets no
+ * menu, matching the backend, which never acts on it.
+ */
+import type { CodeSeatType, OveragePolicy, SeatType, WorkspaceDefaultSeatType } from '../types';
 
-export const SEAT_TYPE_OPTIONS: { value: SeatType; label: string }[] = [
-  { value: 'default', label: 'ChatGPT' },
-  { value: 'usage_based', label: 'Codex' },
+export interface SeatTypeInfo {
+  value: SeatType;
+  label: string;
+  /** No free paid seat → inviting or switching into it makes ChatGPT add a seat and charge. */
+  billed: boolean;
+}
+
+export const SEAT_TYPES: Record<SeatType, SeatTypeInfo> = {
+  default: { value: 'default', label: 'ChatGPT', billed: true },
+  usage_based: { value: 'usage_based', label: 'Codex', billed: false },
+  prolite: { value: 'prolite', label: 'Premium', billed: true },
+};
+
+/** Every type an admin may pick when inviting or switching a member. */
+export const SEAT_TYPE_OPTIONS: SeatTypeInfo[] = [SEAT_TYPES.default, SEAT_TYPES.usage_based, SEAT_TYPES.prolite];
+
+/** The workspace "default invite seat type": never Premium (members would land on a $125 seat). */
+export const WORKSPACE_DEFAULT_SEAT_OPTIONS: Array<SeatTypeInfo & { value: WorkspaceDefaultSeatType }> = [
+  { ...SEAT_TYPES.default, value: 'default' },
+  { ...SEAT_TYPES.usage_based, value: 'usage_based' },
 ];
 
-const CODEX_ALIASES = new Set(['usage_based', 'codex']);
-const CHATGPT_ALIASES = new Set(['default', 'gpt', 'chatgpt']);
+/** Redemption codes sell paid seats only (Codex is pay-as-you-go). */
+export const CODE_SEAT_OPTIONS: Array<SeatTypeInfo & { value: CodeSeatType }> = [
+  { ...SEAT_TYPES.default, value: 'default' },
+  { ...SEAT_TYPES.prolite, value: 'prolite' },
+];
 
-/** Map API / legacy values to canonical seat type sent to backend. */
-export function normalizeSeatType(value: string | null | undefined): SeatType {
-  const raw = (value || '').trim().toLowerCase();
-  if (CODEX_ALIASES.has(raw)) return 'usage_based';
-  if (CHATGPT_ALIASES.has(raw)) return 'default';
-  return 'default';
+/** Same rule as the backend's normalize_seat_type: missing/blank = 'default', unknown = null. */
+export function parseSeatType(value: string | null | undefined): SeatType | null {
+  const raw = (value ?? '').trim();
+  if (!raw) return 'default';
+  return Object.prototype.hasOwnProperty.call(SEAT_TYPES, raw) ? (raw as SeatType) : null;
 }
 
-/** Display label for UI — only ChatGPT or Codex. */
 export function formatSeatTypeLabel(value: string | null | undefined): string {
-  return normalizeSeatType(value) === 'usage_based' ? 'Codex' : 'ChatGPT';
+  const seatType = parseSeatType(value);
+  return seatType ? SEAT_TYPES[seatType].label : `其他（${(value ?? '').trim()}）`;
 }
 
-export function isCodexSeat(value: string | null | undefined): boolean {
-  return normalizeSeatType(value) === 'usage_based';
+export function isBilledSeatType(value: string | null | undefined): boolean {
+  const seatType = parseSeatType(value);
+  return seatType ? SEAT_TYPES[seatType].billed : false;
 }
 
 /**
- * The two seat types are billed differently, so each keeps one color everywhere it
- * appears: ChatGPT = blue, Codex = purple. Red / amber / green stay reserved for status.
+ * Each seat type keeps one color everywhere it appears: ChatGPT = blue, Codex = purple,
+ * Premium = pink. Red / amber / green stay reserved for status; unknown types are gray.
  */
 export interface SeatStyle {
   /** Badge colors; pair with PILL. Tinted fill, accent text, hairline ring. */
@@ -58,10 +85,46 @@ export const SEAT_STYLE: Record<SeatType, SeatStyle> = {
     solid: 'bg-purple-500',
     track: 'bg-purple-200/70 dark:bg-purple-400/15',
   },
+  prolite: {
+    pill: 'bg-pink-100 text-pink-700 ring-1 ring-inset ring-pink-600/20 dark:bg-pink-500/15 dark:text-pink-300 dark:ring-pink-400/30',
+    surface: 'border border-pink-200/80 bg-pink-50 dark:border-pink-400/25 dark:bg-[color-mix(in_oklab,var(--color-pink-500)_10%,var(--color-ink-900))]',
+    text: 'text-pink-700 dark:text-pink-300',
+    solid: 'bg-pink-500',
+    track: 'bg-pink-200/70 dark:bg-pink-400/15',
+  },
+};
+
+const UNKNOWN_SEAT_STYLE: SeatStyle = {
+  pill: 'bg-gray-100 text-gray-600 ring-1 ring-inset ring-gray-500/20 dark:bg-ink-800 dark:text-ink-300 dark:ring-ink-600/50',
+  surface: 'border border-gray-200 bg-gray-50 dark:border-ink-800 dark:bg-ink-850',
+  text: 'text-gray-600 dark:text-ink-300',
+  solid: 'bg-gray-400 dark:bg-ink-500',
+  track: 'bg-gray-200 dark:bg-ink-800',
 };
 
 export function seatStyle(value: string | null | undefined): SeatStyle {
-  return SEAT_STYLE[normalizeSeatType(value)];
+  const seatType = parseSeatType(value);
+  return seatType ? SEAT_STYLE[seatType] : UNKNOWN_SEAT_STYLE;
+}
+
+// ── Overage policy (per Team) ───────────────────────────────────────────────────
+
+export const OVERAGE_POLICY_OPTIONS: { value: OveragePolicy; label: string; hint: string }[] = [
+  { value: 'forbid', label: '禁止超员', hint: '满了就拒绝，不会自动加购' },
+  { value: 'confirm', label: '超员需确认', hint: '满了先问你，确认后 ChatGPT 自动加购并扣费' },
+  { value: 'auto', label: '超员自动', hint: '满了直接加，ChatGPT 自动加购并扣费' },
+];
+
+/** Same rule as the backend: missing = 'confirm' (the default); anything unrecognised = 'forbid'. */
+export function parseOveragePolicy(value: string | null | undefined): OveragePolicy {
+  const raw = (value ?? '').trim().toLowerCase();
+  if (!raw) return 'confirm';
+  return OVERAGE_POLICY_OPTIONS.some((option) => option.value === raw) ? (raw as OveragePolicy) : 'forbid';
+}
+
+export function overagePolicyLabel(value: string | null | undefined): string {
+  const policy = parseOveragePolicy(value);
+  return OVERAGE_POLICY_OPTIONS.find((option) => option.value === policy)!.label;
 }
 
 /** True when an API error looks like an HTTP 403 (used to special-case

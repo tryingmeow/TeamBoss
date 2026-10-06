@@ -3,7 +3,7 @@ import { AlertCircle, Plus, SearchX } from 'lucide-react';
 import type { Team, ShowToast } from '../types';
 import TeamCard from './TeamCard';
 import type { SortDirection, SortKey } from './DashboardSortControl';
-import { activeChatGptSeats } from '../lib/seatCapacity';
+import { activeChatGptSeats, chatgptPaidSeats } from '../lib/seatCapacity';
 import { BUTTON } from './ui';
 
 interface DashboardProps {
@@ -31,7 +31,7 @@ function renewalTimestamp(team: Team): number | null {
 }
 
 function idleRate(team: Team): number | null {
-  const entitled = Number(team.seats_entitled) || 0;
+  const entitled = chatgptPaidSeats(team);
   if (entitled <= 0) return null;
   const freeSeats = Math.max(0, entitled - activeChatGptSeats(team));
   return freeSeats / entitled;

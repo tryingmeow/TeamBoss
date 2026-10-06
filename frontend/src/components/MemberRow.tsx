@@ -1,16 +1,11 @@
 import { useRef, useState } from 'react';
-import { CalendarClock, Check, ChevronDown, Crown, Trash2 } from 'lucide-react';
+import { CalendarClock, ChevronDown, Crown, Trash2 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import type { Member, ShowToast } from '../types';
 import { removeMember, changeSeat, extendMemberExpiry, removeExpiry, updateMemberExpiry } from '../api/client';
-import {
-  SEAT_STYLE,
-  SEAT_TYPE_OPTIONS,
-  formatSeatTypeLabel,
-  normalizeSeatType,
-  seatStyle,
-  seatUpdateErrorMessage,
-} from '../lib/seatType';
+import { formatSeatTypeLabel, parseSeatType, seatStyle } from '../lib/seatType';
+import { seatSwitchGate, type TeamCapacityFields } from '../lib/seatCapacity';
+import { SeatSwitchOptions, useSeatSwitch } from './SeatSwitchMenu';
 import { NO_EXPIRY_LABEL, formatAppLocalFull, noExpiryKind, toAppLocal } from '../lib/expiry';
 import ExpiryPicker, { type ExpirySelection } from './ExpiryPicker';
 import MemberRemarkEditor from './MemberRemarkEditor';
@@ -23,6 +18,10 @@ import { cn } from '../lib/utils';
 interface MemberRowProps {
   member: Member;
   teamId: string;
+  /** Cached seats and overage policy of the member's Team; decides grey / confirm in the seat menu. */
+  team?: TeamCapacityFields | null;
+  /** Pending invites per seat type on this Team (they hold seats too). */
+  pendingByType?: Record<string, number>;
   isCodexEnabled?: boolean;
   onUpdate: () => void;
   onRemarkSaved: (email: string, remark: string | null) => void;
@@ -72,7 +71,16 @@ export function ExpiryLabel({ iso, source }: { iso: string | null; source?: stri
   );
 }
 
-export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, onRemarkSaved, showToast }: MemberRowProps) {
+export default function MemberRow({
+  member,
+  teamId,
+  team,
+  pendingByType,
+  isCodexEnabled,
+  onUpdate,
+  onRemarkSaved,
+  showToast,
+}: MemberRowProps) {
   const [seatOpen, setSeatOpen] = useState(false);
   const [expiryOpen, setExpiryOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -80,20 +88,18 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
   const extensionRequestIds = useRef(new ExpiryExtensionRequestIds());
   const kickPolicy = useKickPolicy();
 
-  const handleChangeSeat = async (newSeat: string) => {
-    setLoading(true);
-    try {
-      await changeSeat(teamId, member.id, newSeat);
+  // 失败时浮层保留：让管理员看到当前选择仍未生效，而不是悄悄关掉装作成功。
+  const seatSwitch = useSeatSwitch({
+    apply: (seatType, allowOverage) => changeSeat(teamId, member.id, seatType, allowOverage),
+    onSwitched: () => {
       onUpdate();
       setSeatOpen(false);
-      showToast('席位类型已更新');
-    } catch (err) {
-      // 保留浮层：失败时让管理员看到当前选择仍未生效，而不是悄悄关掉装作成功。
-      showToast(seatUpdateErrorMessage(err, normalizeSeatType(newSeat), isCodexEnabled), 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
+    },
+    onAsk: () => setSeatOpen(false),
+    showToast,
+    isCodexEnabled,
+  });
+  const currentSeat = parseSeatType(member.seat_type);
 
   const handleSetExpiry = async (selection: ExpirySelection) => {
     setLoading(true);
@@ -173,40 +179,34 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
       </div>
 
       <div className="flex shrink-0 flex-col items-end gap-1">
-        <Popover.Root open={seatOpen} onOpenChange={setSeatOpen}>
-          <Popover.Trigger asChild>
-            <button
-              type="button"
-              className={cn(seatPillClass(member.seat_type), 'transition-opacity', loading ? 'cursor-wait opacity-60' : 'hover:opacity-80')}
-              disabled={loading}
-              aria-label={`席位类型 ${seatLabel}，点击修改`}
-            >
-              {seatLabel}
-              <ChevronDown size={11} className="opacity-70" />
-            </button>
-          </Popover.Trigger>
-          <Popover.Portal>
-            <Popover.Content className={cn(POPOVER, 'w-40 p-1')} sideOffset={6} align="end" collisionPadding={16}>
-              {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => handleChangeSeat(value)}
-                  disabled={loading}
-                  className="flex h-9 w-full items-center justify-between rounded-lg px-3 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100 disabled:cursor-wait disabled:opacity-60 dark:text-gray-200 dark:hover:bg-ink-800"
-                >
-                  <span className="flex items-center gap-2">
-                    <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
-                    {label}
-                  </span>
-                  {normalizeSeatType(member.seat_type) === value && (
-                    <Check size={14} className="text-blue-600 dark:text-blue-400" />
-                  )}
-                </button>
-              ))}
-            </Popover.Content>
-          </Popover.Portal>
-        </Popover.Root>
+        {currentSeat === null ? (
+          // 不认识的席位类型：只显示，不给菜单（后端也绝不会动它）。
+          <span className={seatPillClass(member.seat_type)} title="TeamBoss 不管理这种席位">{seatLabel}</span>
+        ) : (
+          <Popover.Root open={seatOpen} onOpenChange={setSeatOpen}>
+            <Popover.Trigger asChild>
+              <button
+                type="button"
+                className={cn(seatPillClass(member.seat_type), 'transition-opacity', seatSwitch.busy ? 'cursor-wait opacity-60' : 'hover:opacity-80')}
+                disabled={seatSwitch.busy}
+                aria-label={`席位类型 ${seatLabel}，点击修改`}
+              >
+                {seatLabel}
+                <ChevronDown size={11} className="opacity-70" />
+              </button>
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content className={cn(POPOVER, 'w-48 p-1')} sideOffset={6} align="end" collisionPadding={16}>
+                <SeatSwitchOptions
+                  current={currentSeat}
+                  gateFor={(target) => seatSwitchGate(team, member.seat_type, target, pendingByType)}
+                  disabled={seatSwitch.busy}
+                  onPick={seatSwitch.pick}
+                />
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+        )}
 
         {!member.is_owner && (
           <Popover.Root open={expiryOpen} onOpenChange={setExpiryOpen}>
@@ -268,6 +268,7 @@ export default function MemberRow({ member, teamId, isCodexEnabled, onUpdate, on
         loading={loading}
         onConfirm={handleDelete}
       />
+      {seatSwitch.dialog}
     </li>
   );
 }

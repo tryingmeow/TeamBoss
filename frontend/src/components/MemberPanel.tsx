@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import type { MembersData, ShowToast } from '../types';
 import MemberRow, { ExpiryLabel } from './MemberRow';
@@ -7,12 +7,15 @@ import LoadingSpinner from './LoadingSpinner';
 import ConfirmDialog from './ConfirmDialog';
 import { revokeInvite } from '../api/client';
 import { formatSeatTypeLabel, seatStyle } from '../lib/seatType';
+import { pendingCountsByType, type TeamCapacityFields } from '../lib/seatCapacity';
 import { formatAppLocalFull } from '../lib/expiry';
 import { PILL, TONE } from './ui';
 import { cn } from '../lib/utils';
 
 interface MemberPanelProps {
   teamId: string;
+  /** Cached seats and overage policy; lets the seat menus grey out or confirm before money is spent. */
+  team?: TeamCapacityFields | null;
   data: MembersData | null;
   loading: boolean;
   settling?: boolean;
@@ -22,8 +25,9 @@ interface MemberPanelProps {
   showToast: ShowToast;
 }
 
-export default function MemberPanel({ teamId, data, loading, settling, isCodexEnabled, onRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
+export default function MemberPanel({ teamId, team, data, loading, settling, isCodexEnabled, onRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
   const [revoking, setRevoking] = useState<string | null>(null);
+  const pendingByType = useMemo(() => pendingCountsByType(data?.pending_invites), [data]);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
 
   const handleRevoke = async (email: string) => {
@@ -80,6 +84,8 @@ export default function MemberPanel({ teamId, data, loading, settling, isCodexEn
               key={m.id}
               member={m}
               teamId={teamId}
+              team={team}
+              pendingByType={pendingByType}
               isCodexEnabled={isCodexEnabled}
               onUpdate={onRefresh}
               onRemarkSaved={onRemarkSaved}

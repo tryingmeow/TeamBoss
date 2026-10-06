@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Popover from '@radix-ui/react-popover';
-import type { SeatType } from '../../types';
+import type { SeatType, Team } from '../../types';
 import ExpiryPicker, { type ExpirySelection } from '../../components/ExpiryPicker';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import PageShell from '../../components/PageShell';
@@ -42,10 +42,11 @@ import {
   SEAT_STYLE,
   SEAT_TYPE_OPTIONS,
   formatSeatTypeLabel,
-  normalizeSeatType,
+  parseSeatType,
   seatStyle,
-  seatUpdateErrorMessage,
 } from '../../lib/seatType';
+import { pendingCountsByType, seatSwitchGate } from '../../lib/seatCapacity';
+import { SeatSwitchOptions, useSeatSwitch } from '../../components/SeatSwitchMenu';
 import { ExpiryExtensionRequestIds } from '../../lib/expiryExtensionRequest';
 import { currentPeriodStart, formatPeriodRange, periodEnds } from '../../lib/billingPeriod';
 
@@ -582,60 +583,77 @@ function CodexBadge({ isCodexEnabled }: { isCodexEnabled?: boolean | number }) {
   );
 }
 
+/** What a seat menu needs to know about the member's Team (cached; the server re-checks). */
+interface SeatSwitchContext {
+  teamId: string;
+  userId: string;
+  team: Team | null;
+  pendingByType: Record<string, number>;
+  isCodexEnabled?: boolean | number;
+  onSwitched: () => void;
+  showToast: ShowToast;
+}
+
 function SeatTypeCell({
   variant,
   seatType,
   editable,
-  onChange,
+  context,
 }: {
   variant: Variant;
   seatType: string | null | undefined;
   editable: boolean;
-  onChange?: (value: SeatType) => void;
+  context?: SeatSwitchContext;
 }) {
+  const [open, setOpen] = useState(false);
+  const seatSwitch = useSeatSwitch({
+    apply: (target, allowOverage) =>
+      context ? updateMemberSeat(context.teamId, context.userId, target, allowOverage) : Promise.resolve(),
+    onSwitched: () => context?.onSwitched(),
+    onAsk: () => setOpen(false),
+    showToast: context?.showToast ?? (() => {}),
+    isCodexEnabled: context?.isCodexEnabled,
+  });
+  const current = parseSeatType(seatType);
   if (!seatType && !editable) {
     return <span className="text-gray-400 dark:text-ink-500">—</span>;
   }
+  // 不认识的席位类型只显示：TeamBoss 不会切换它。
+  const canEdit = editable && context && current !== null;
   return (
     <div className="flex items-center gap-1">
       <span className={cn(PILL, seatStyle(seatType).pill)}>
         {formatSeatTypeLabel(seatType)}
       </span>
-      {editable && onChange && (
-        <Popover.Root>
+      {canEdit && (
+        <Popover.Root open={open} onOpenChange={setOpen}>
           <Popover.Trigger asChild>
             <button
               type="button"
               title="修改席位类型"
               aria-label="修改席位类型"
+              disabled={seatSwitch.busy}
               className={cn(ICON_BUTTON, ICON_BUTTON_SIZE[variant])}
             >
               <Pencil className="size-3.5" />
             </button>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content className={cn(POPOVER, 'w-44 p-1')} sideOffset={6} collisionPadding={16}>
-              {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
-                <Popover.Close asChild key={value}>
-                  <button
-                    type="button"
-                    onClick={() => onChange(value)}
-                    className="flex h-9 w-full items-center justify-between rounded-md px-2.5 text-sm text-gray-700 transition-colors hover:bg-gray-100 hover:text-gray-900 dark:text-ink-300 dark:hover:bg-ink-800 dark:hover:text-gray-100"
-                  >
-                    <span className="flex items-center gap-2">
-                      <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} />
-                      {label}
-                    </span>
-                    {normalizeSeatType(seatType) === value && (
-                      <Check className="size-4 text-blue-600 dark:text-blue-400" />
-                    )}
-                  </button>
-                </Popover.Close>
-              ))}
+            <Popover.Content className={cn(POPOVER, 'w-48 p-1')} sideOffset={6} collisionPadding={16}>
+              <SeatSwitchOptions
+                current={current}
+                gateFor={(target) => seatSwitchGate(context.team, seatType, target, context.pendingByType)}
+                disabled={seatSwitch.busy}
+                onPick={(target, gate) => {
+                  if (gate?.action !== 'forbid') setOpen(false);
+                  seatSwitch.pick(target, gate);
+                }}
+              />
             </Popover.Content>
           </Popover.Portal>
         </Popover.Root>
       )}
+      {seatSwitch.dialog}
     </div>
   );
 }
@@ -812,7 +830,7 @@ function OwnerList({
   showToast: ShowToast;
 }) {
   const [owners, setOwners] = useState<OwnerRow[]>([]);
-  const [billingPeriods, setBillingPeriods] = useState<Map<string, string | null>>(new Map());
+  const [teamsById, setTeamsById] = useState<Map<string, Team>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
@@ -826,7 +844,7 @@ function OwnerList({
       .then(([res, teams]) => {
         if (cancelled) return;
         setOwners(res.items);
-        if (teams) setBillingPeriods(new Map(teams.map((team) => [team.id, team.billing_period])));
+        if (teams) setTeamsById(new Map(teams.map((team) => [team.id, team])));
         setLoadError('');
       })
       .catch((err) => {
@@ -837,26 +855,6 @@ function OwnerList({
       });
     return () => { cancelled = true; };
   }, [refreshTrigger]);
-
-  const handleUpdateSeat = async (
-    teamId: string,
-    userId: string,
-    seatType: SeatType,
-    isCodexEnabled?: boolean | number
-  ) => {
-    if (!userId) {
-      showToast('无法获取 Owner ID，请刷新后重试', 'error');
-      return;
-    }
-    try {
-      await updateMemberSeat(teamId, userId, seatType);
-      setRefreshTrigger((v) => v + 1);
-      showToast('席位类型已更新');
-    } catch (err) {
-      console.error(err);
-      showToast(seatUpdateErrorMessage(err, seatType, isCodexEnabled), 'error');
-    }
-  };
 
   const handleUpdateDisplayName = async (email: string, systemDisplayName: string | null) => {
     await updateUserDisplayName(email, systemDisplayName);
@@ -889,12 +887,21 @@ function OwnerList({
     />
   );
 
+  // Owner 列表没有待接受邀请的数据，按 0 算；服务端会用实时数据再判一次。
   const seat = (owner: OwnerRow, variant: Variant) => (
     <SeatTypeCell
       variant={variant}
       seatType={owner.seat_type}
-      editable
-      onChange={(value) => handleUpdateSeat(owner.team_id, owner.user_id, value, owner.is_codex_enabled)}
+      editable={Boolean(owner.user_id)}
+      context={{
+        teamId: owner.team_id,
+        userId: owner.user_id,
+        team: teamsById.get(owner.team_id) ?? null,
+        pendingByType: {},
+        isCodexEnabled: owner.is_codex_enabled,
+        onSwitched: () => setRefreshTrigger((v) => v + 1),
+        showToast,
+      }}
     />
   );
 
@@ -950,7 +957,7 @@ function OwnerList({
                     <td className={TD}>{seat(owner, 'row')}</td>
                     <td className={TD}>{card4(owner)}</td>
                     <td className={TD}>
-                      <BillingCycleCell cycle={owner.billing_cycle} billingPeriod={billingPeriods.get(owner.team_id)} />
+                      <BillingCycleCell cycle={owner.billing_cycle} billingPeriod={teamsById.get(owner.team_id)?.billing_period} />
                     </td>
                   </tr>
                 ))}
@@ -971,7 +978,7 @@ function OwnerList({
                   <CardField label="席位">{seat(owner, 'card')}</CardField>
                   <CardField label="卡号后四位">{card4(owner)}</CardField>
                   <CardField label="计费周期">
-                    <BillingCycleCell cycle={owner.billing_cycle} billingPeriod={billingPeriods.get(owner.team_id)} className="flex-wrap" />
+                    <BillingCycleCell cycle={owner.billing_cycle} billingPeriod={teamsById.get(owner.team_id)?.billing_period} className="flex-wrap" />
                   </CardField>
                 </dl>
               </article>
@@ -1153,6 +1160,8 @@ function MemberList({
   const [focusEmail, setFocusEmail] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  // 席位菜单要知道每个 Team 的缓存空位和超员策略；拿不到时菜单照常可用，由服务端判。
+  const [teamsById, setTeamsById] = useState<Map<string, Team>>(new Map());
   const latestLoad = useRef(0);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const [copyingBindingEmail, setCopyingBindingEmail] = useState<string | null>(null);
@@ -1163,6 +1172,11 @@ function MemberList({
   const fetchMembers = (showLoading = true) => {
     const requestId = ++latestLoad.current;
     if (showLoading) setLoading(true);
+    fetchTeams()
+      .then((teams) => {
+        if (requestId === latestLoad.current) setTeamsById(new Map(teams.map((team) => [team.id, team])));
+      })
+      .catch(() => {});
     return fetchAllMembers({ includeOwners: true })
       .then((res) => {
         if (requestId !== latestLoad.current) return;
@@ -1236,7 +1250,7 @@ function MemberList({
         return (member.email || '').trim().toLowerCase() === focusEmail;
       }
       if (!statusFilters.has(member.status)) return false;
-      if (seatFilter !== 'all' && normalizeSeatType(member.seat_type) !== seatFilter) {
+      if (seatFilter !== 'all' && parseSeatType(member.seat_type) !== seatFilter) {
         return false;
       }
       return matchesSearch(member, search, ['email', 'name', 'team_name', 'owner_email', 'system_display_name']);
@@ -1281,21 +1295,14 @@ function MemberList({
     }
   };
 
-  const handleUpdateSeat = async (
-    teamId: string,
-    userId: string,
-    seatType: SeatType,
-    isCodexEnabled?: boolean | number
-  ) => {
-    try {
-      await updateMemberSeat(teamId, userId, seatType);
-      setRefreshTrigger((v) => v + 1);
-      showToast('席位类型已更新');
-    } catch (err) {
-      console.error(err);
-      showToast(seatUpdateErrorMessage(err, seatType, isCodexEnabled), 'error');
-    }
-  };
+  const pendingByTeam = useMemo(() => {
+    const rows = new Map<string, Array<{ seat_type: string }>>();
+    members.forEach((member) => {
+      if (member.status !== 'pending' || !member.team_id) return;
+      rows.set(member.team_id, [...(rows.get(member.team_id) ?? []), member]);
+    });
+    return new Map([...rows].map(([teamId, invites]) => [teamId, pendingCountsByType(invites)]));
+  }, [members]);
 
   const handleKick = async (teamId: string, identifier: string, isPending: boolean) => {
     try {
@@ -1407,7 +1414,15 @@ function MemberList({
           variant={variant}
           seatType={member.seat_type}
           editable={member.status === 'joined' && Boolean(member.user_id)}
-          onChange={(value) => handleUpdateSeat(member.team_id, member.user_id, value, member.is_codex_enabled)}
+          context={{
+            teamId: member.team_id,
+            userId: member.user_id,
+            team: teamsById.get(member.team_id) ?? null,
+            pendingByType: pendingByTeam.get(member.team_id) ?? {},
+            isCodexEnabled: member.is_codex_enabled,
+            onSwitched: () => setRefreshTrigger((v) => v + 1),
+            showToast,
+          }}
         />
       ),
       tg: (

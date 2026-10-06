@@ -89,7 +89,6 @@ export default function SettingsDialog({
   const [concurrency, setConcurrency] = useState(settings.api_concurrency);
   const [kickMode, setKickMode] = useState(settings.expiry_kick_mode);
   const [kickDelayHours, setKickDelayHours] = useState(settings.expiry_kick_delay_hours);
-  const [skipOverageConfirmation, setSkipOverageConfirmation] = useState(settings.skip_overage_confirmation);
   const [account, setAccount] = useState<AdminAccount | null>(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -118,7 +117,6 @@ export default function SettingsDialog({
     setConcurrency(settings.api_concurrency);
     setKickMode(settings.expiry_kick_mode);
     setKickDelayHours(settings.expiry_kick_delay_hours);
-    setSkipOverageConfirmation(settings.skip_overage_confirmation);
   }, [settings, open]);
 
   // Success notes ("已保存", "API Key 已更新") confirm one action; they clear on the next
@@ -172,7 +170,6 @@ export default function SettingsDialog({
     api_concurrency: concurrency,
     expiry_kick_mode: kickMode,
     expiry_kick_delay_hours: kickDelayHours,
-    skip_overage_confirmation: skipOverageConfirmation,
   });
   const dirty = Object.keys(changes).length > 0;
   // Never write while the form may be showing client defaults (e.g. a 0-hour grace period).
@@ -413,20 +410,9 @@ export default function SettingsDialog({
                 </div>
               </fieldset>
 
-              <div>
-                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-ink-200">
-                  <input
-                    type="checkbox"
-                    checked={skipOverageConfirmation}
-                    onChange={(event) => setSkipOverageConfirmation(event.target.checked)}
-                    className={cn(NATIVE_CONTROL, 'size-4')}
-                  />
-                  超额添加不再确认
-                </label>
-                <p className="mt-1 pl-6 text-xs text-gray-500 dark:text-ink-400">
-                  席位不足时直接超额添加，不再弹确认框；额外席位照常计费。
-                </p>
-              </div>
+              <p className="text-xs text-gray-500 dark:text-ink-400">
+                席位满了要不要加购，改在每个 Team 的设置里选（超员策略）。
+              </p>
 
               <div className="flex justify-end">
                 <button type="button" onClick={handleSaveSettings} disabled={!canSaveSettings} className={BUTTON.primary}>

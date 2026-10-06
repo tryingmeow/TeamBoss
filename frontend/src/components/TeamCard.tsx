@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, type FormEvent } from 'react';
-import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check } from 'lucide-react';
+import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check, Gem, Ban } from 'lucide-react';
 import type { Team, TeamWorkspaceSettings, MembersData, ShowToast } from '../types';
 import MemberPanel from './MemberPanel';
 import ConfirmDialog from './ConfirmDialog';
@@ -8,8 +8,8 @@ import AddMemberDialog from './AddMemberDialog';
 import TeamSettingsDialog from './TeamSettingsDialog';
 import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
-import { activeChatGptSeats } from '../lib/seatCapacity';
-import { SEAT_STYLE, formatSeatTypeLabel } from '../lib/seatType';
+import { activeChatGptSeats, chatgptPaidSeats, premiumSeatUsage } from '../lib/seatCapacity';
+import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
@@ -444,10 +444,18 @@ export default function TeamCard({
 
   const unit = moneySuffix(team);
   const teamDisplayName = team.remark ? `${team.name}（${team.remark}）` : team.name;
-  const seatsEntitled = Number(team.seats_entitled) || 0;
+  // 已付 ChatGPT 席位：有分类型数据时用它（seats_entitled 可能把 Premium 也算进去）。
+  const seatsEntitled = chatgptPaidSeats(team);
   const overSeats = seatsEntitled > 0 && activeGptSeats > seatsEntitled;
   const seatFill = seatsEntitled > 0 ? Math.min(100, (activeGptSeats / seatsEntitled) * 100) : 0;
   const showCodex = team.is_codex_enabled && team.codex_count > 0;
+  const premium = premiumSeatUsage(team);
+  const premiumOver = premium !== null && premium.inUse > premium.paid;
+  const premiumFill = premium && premium.paid > 0 ? Math.min(100, (premium.inUse / premium.paid) * 100) : premium?.inUse ? 100 : 0;
+  const seatBlocks = 1 + (showCodex ? 1 : 0) + (premium ? 1 : 0);
+  // 默认的「超员需确认」不挂标签；另外两种会改变花钱方式，挂在卡片上一眼能看到。
+  const overagePolicy = parseOveragePolicy(team.overage_policy);
+  const overagePolicyOption = OVERAGE_POLICY_OPTIONS.find((option) => option.value === overagePolicy)!;
 
   const renewalLabel = isSubscriptionExpired || isNonRenewing ? '到期' : '续费';
   const renewalWhen = isSubscriptionExpired
@@ -609,6 +617,20 @@ export default function TeamCard({
             <span className={`${PILL} ${team.is_codex_enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral}`}>
               <Zap size={11} /> {team.is_codex_enabled ? 'Codex 已开' : 'Codex 未开'}
             </span>
+            {overagePolicy !== 'confirm' && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void handleOpenSettings();
+                }}
+                className={`${PILL} ${overagePolicy === 'auto' ? TONE.warning : TONE.neutral} transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50`}
+                title={`超员策略：${overagePolicyOption.hint}。点击修改`}
+              >
+                {overagePolicy === 'auto' ? <CreditCard size={11} /> : <Ban size={11} />}
+                {overagePolicyOption.label}
+              </button>
+            )}
             <span
               className={`${PILL} ${defaultSeatPill}`}
             >
@@ -628,16 +650,17 @@ export default function TeamCard({
             </span>
           </div>
 
-          {/* Seats: ChatGPT and Codex are billed differently, so each box wears its seat color. */}
-          <div className={`mt-4 grid gap-3 ${showCodex ? 'grid-cols-2' : 'grid-cols-1'}`}>
-            <div className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.default.surface}`}>
+          {/* Seats: each type is billed differently, so each box wears its seat color. With all
+              three, ChatGPT takes the full first row and Codex / Premium share the second. */}
+          <div className={`mt-4 grid gap-3 ${seatBlocks > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <div className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.default.surface} ${seatBlocks === 3 ? 'col-span-2' : ''}`}>
               <div className="flex items-center justify-between gap-2 text-xs">
                 <span className={`flex items-center gap-1.5 whitespace-nowrap font-medium ${SEAT_STYLE.default.text}`}><Users size={13} /> ChatGPT 席位</span>
                 {overSeats && <span className="whitespace-nowrap font-medium text-red-600 dark:text-red-400">超出 {activeGptSeats - seatsEntitled}</span>}
               </div>
               <div className="mt-1 flex items-baseline gap-1">
                 <span className={`text-xl font-semibold tabular-nums ${overSeats ? 'text-red-600 dark:text-red-400' : SEAT_STYLE.default.text}`}>{activeGptSeats}</span>
-                <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {team.seats_entitled}</span>
+                <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {seatsEntitled}</span>
               </div>
               <div className={`mt-2 h-1 overflow-hidden rounded-full ${SEAT_STYLE.default.track}`} aria-hidden="true">
                 <div className={`h-full rounded-full ${overSeats ? 'bg-red-500' : SEAT_STYLE.default.solid}`} style={{ width: `${seatFill}%` }} />
@@ -651,6 +674,25 @@ export default function TeamCard({
                 <div className="mt-1 flex items-baseline gap-1">
                   <span className={`text-xl font-semibold tabular-nums ${SEAT_STYLE.usage_based.text}`}>{team.codex_count}</span>
                   <span className="text-sm text-gray-500 dark:text-ink-400">人</span>
+                </div>
+              </div>
+            )}
+            {premium && (
+              <div
+                className={`rounded-xl px-3.5 py-3 ${SEAT_STYLE.prolite.surface}`}
+                title={`Premium 在用 ${premium.inUse} 个，已付 ${premium.paid} 个`}
+              >
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className={`flex items-center gap-1.5 whitespace-nowrap font-medium ${SEAT_STYLE.prolite.text}`}><Gem size={13} /> Premium 席位</span>
+                  {premiumOver && <span className="whitespace-nowrap font-medium text-red-600 dark:text-red-400">超出 {premium.inUse - premium.paid}</span>}
+                </div>
+                <div className="mt-1 flex items-baseline gap-1">
+                  <span className={`text-xl font-semibold tabular-nums ${premiumOver ? 'text-red-600 dark:text-red-400' : SEAT_STYLE.prolite.text}`}>{premium.inUse}</span>
+                  <span className="text-sm tabular-nums text-gray-500 dark:text-ink-400">/ {premium.paid}</span>
+                  <span className="ml-auto whitespace-nowrap text-[11px] text-gray-500 dark:text-ink-400">在用 / 已付</span>
+                </div>
+                <div className={`mt-2 h-1 overflow-hidden rounded-full ${SEAT_STYLE.prolite.track}`} aria-hidden="true">
+                  <div className={`h-full rounded-full ${premiumOver ? 'bg-red-500' : SEAT_STYLE.prolite.solid}`} style={{ width: `${premiumFill}%` }} />
                 </div>
               </div>
             )}
@@ -767,6 +809,7 @@ export default function TeamCard({
             <div className="border-t border-gray-100 px-2 pb-3 dark:border-ink-800">
               <MemberPanel
                 teamId={team.id}
+                team={team}
                 data={membersData}
                 loading={membersLoading || syncing}
                 settling={settling}
@@ -867,6 +910,8 @@ export default function TeamCard({
         onOpenChange={setAddMemberOpen}
         teamId={team.id}
         teamName={teamDisplayName}
+        team={team}
+        pendingInvites={membersData?.pending_invites}
         onSuccess={startMemberSettle}
       />
 
@@ -877,6 +922,11 @@ export default function TeamCard({
         teamName={teamDisplayName}
         ownerEmail={team.owner_email}
         currentProxyId={team.proxy_id}
+        overagePolicy={team.overage_policy}
+        onTeamUpdated={(updated) => onTeamSynced({
+          ...updated,
+          cached_member_emails: updated.cached_member_emails ?? team.cached_member_emails ?? [],
+        })}
         initialSettings={workspaceSettings}
         onChanged={(settings) => {
           setWorkspaceSettings(settings);

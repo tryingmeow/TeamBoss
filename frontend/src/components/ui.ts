@@ -33,4 +33,4 @@ export const TONE = {
   warning: 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300',
   danger: 'bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-300',
 } as const;
-// ChatGPT / Codex seat colors live in SEAT_STYLE (lib/seatType), not here.
+// Seat-type colors (ChatGPT / Codex / Premium) live in SEAT_STYLE (lib/seatType), not here.

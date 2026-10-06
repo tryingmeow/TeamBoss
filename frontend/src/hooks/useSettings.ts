@@ -7,7 +7,6 @@ const DEFAULT_SETTINGS: Settings = {
   api_concurrency: 4,
   expiry_kick_mode: 'delay_hours',
   expiry_kick_delay_hours: 0,
-  skip_overage_confirmation: false,
 };
 
 interface SettingsSnapshot {
@@ -20,7 +19,7 @@ interface SettingsSnapshot {
   loaded: boolean;
 }
 
-// 多处（Settings 弹窗、AddMemberDialog 的超额确认弹窗）各自 useSettings()，
+// 多处（Settings 弹窗、到期时间选择器的移出规则）各自 useSettings()，
 // 但都要看到同一份设置：状态提到模块级，任何一个实例 load/save 之后广播给
 // 其余订阅者，而不是各拉各的、互相看不到对方刚存的值。
 let snapshot: SettingsSnapshot = { settings: DEFAULT_SETTINGS, loaded: false };
@@ -54,7 +53,6 @@ async function fetchShared(): Promise<boolean> {
             ? 'day_end'
             : 'delay_hours',
         expiry_kick_delay_hours: Number(raw?.expiry_kick_delay_hours?.value ?? 0),
-        skip_overage_confirmation: raw?.skip_overage_confirmation?.value === 'true',
         ...savedSinceRequest,
       },
       loaded: true,
@@ -104,7 +102,7 @@ export function useSettings() {
     for (const key of Object.keys(data) as Array<keyof Settings>) {
       savedFieldRevisions[key] = savedRevision;
     }
-    // A partial save (e.g. only skip_overage_confirmation) says nothing about the other
+    // A partial save (e.g. only the sync interval) says nothing about the other
     // fields, so it must not mark the settings as loaded: they may still be defaults.
     broadcast({ settings: { ...snapshot.settings, ...data }, loaded: snapshot.loaded });
   }, []);
