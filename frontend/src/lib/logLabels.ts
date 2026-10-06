@@ -248,6 +248,7 @@ const PREMIUM_OUTSIDER = '外部加入，占用 Premium 席位';
 const PREMIUM_ALERT_KIND: Record<string, string> = {
   premium_outsider: PREMIUM_OUTSIDER,
   premium_detected_with_record: '外部加入的 Premium 成员，但 TeamBoss 有他的 Premium 记录',
+  premium_detected_was_managed: '外部加入的 Premium 成员，但 TeamBoss 以前拉过他或他兑换过',
   premium_unswitched: 'TeamBoss 管理的成员在 Premium 席位上，但不是 TeamBoss 切的',
   unknown_seat_type: '席位类型 TeamBoss 不认识',
 };
@@ -321,8 +322,17 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   pending_seat_type: (v) => `待接受邀请席位 ${seatLabel(v)}`,
   resend: (v) => (isTrue(v) ? '重发邀请' : null),
   teams_checked: (v) => `查了 ${v} 个 Team`,
-  deferred: (v) => ({ seat_changed_after_snapshot: '快照后管理员改过席位，这轮先不移出' } as Record<string, string>)[v] ?? `推迟：${v}`,
-  batch_guard: (v) => ({ premium: 'Premium 批量保护', strict: '严格模式批量保护' } as Record<string, string>)[v] ?? `批量保护 ${v}`,
+  deferred: (v) => ({
+    seat_changed_after_snapshot: '快照后管理员改过席位，这轮先不移出',
+    teamboss_record: 'TeamBoss 有他的记录，这轮先不移出',
+  } as Record<string, string>)[v] ?? `推迟：${v}`,
+  batch_guard: (v) => ({
+    outsiders: '外部成员过多保护',
+    premium: 'Premium 批量保护',
+    strict: '严格模式批量保护',
+  } as Record<string, string>)[v] ?? `批量保护 ${v}`,
+  outsiders: (v) => `外部成员 ${v}`,
+  premium_kicks: (v) => `本轮已移出 Premium ${v}`,
   kind: (v) => PREMIUM_ALERT_KIND[v] ?? `类型 ${v}`,
   status: (v) => ({ member: '成员', pending: '待接受邀请' } as Record<string, string>)[v] ?? `状态 ${v}`,
   position: (v) => `顺位 ${v}`,

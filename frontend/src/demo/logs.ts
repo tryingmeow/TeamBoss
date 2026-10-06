@@ -373,7 +373,7 @@ export function buildLogs(db: DemoDb): DemoLogRow[] {
   });
   log(5.2 * D, {
     team_id: id('quasar'), action: 'patrol_kick_batch_capped', trigger_type: 'patrol',
-    detail: 'reason=premium_outsider, batch_guard=premium, candidates=5, team_size=8, capped_to=0',
+    detail: 'reason=premium_outsider, batch_guard=outsiders, outsiders=5, candidates=5, team_size=8, capped_to=0',
   });
   log(0.5 * D, {
     action: 'create_access_token', detail: 'token_id=15, grant_expires_in=30d, token_ttl=14d, seat_type=prolite',
