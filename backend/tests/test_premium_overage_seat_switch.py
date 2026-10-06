@@ -175,6 +175,27 @@ class SwitchToPremiumTest(_SeatHarness):
         self.assertEqual(client.mutations, [("change_seat_type", USER_ID, "prolite")])
         self.assertEqual(asyncio.run(reserved_seats(TEAM, "prolite")), 1)
 
+    def test_premium_is_reserved_even_when_the_refresh_already_shows_it(self):
+        client = _full_client(seat_capacity=capacity_entries(prolite=(1, 1)))
+
+        result, exc = self.switch(
+            client, "prolite", current="default",
+            snapshots=[_snapshot("default"), _snapshot("default"), _snapshot("prolite")],
+        )
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(client.mutations, [("change_seat_type", USER_ID, "prolite")])
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "prolite")), 1)
+
+    def test_chatgpt_is_not_reserved_when_the_refresh_already_shows_it(self):
+        result, exc = self.switch(
+            _full_client(), "default", policy="auto",
+            snapshots=[_snapshot("usage_based"), _snapshot("usage_based"), _snapshot("default")],
+        )
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "default")), 0)
+
     def test_no_premium_entry_is_full(self):
         client = _full_client(seat_capacity=capacity_entries(default=(2, 0)))
 

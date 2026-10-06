@@ -24,6 +24,7 @@ from ..services.member_expiry import (
 from ..seat_types import (
     CODEX_SEAT_TYPE,
     DEFAULT_SEAT_TYPE,
+    PREMIUM_SEAT_TYPE,
     is_billed_seat_type,
     is_known_seat_type,
     normalize_seat_type,
@@ -321,6 +322,18 @@ def _seat_check_log_suffix(check) -> str:
     return ""
 
 
+def _must_reserve(seat_type: str, *, shown: bool) -> bool:
+    """邀请 / 切换成功后要不要先占住一个这个类型的席位（进程内预留，15 分钟过期）。
+
+    * ChatGPT：刷新后的名单还没反映出来时才占（与以前相同）。
+    * Premium：总是占。上游的待接受邀请万一不带 seat_type，会按 ChatGPT 计数，
+      不再占着那个 Premium 席位；宁可 15 分钟内少卖一个，也不让下一个人触发加购。
+    """
+    if seat_type == PREMIUM_SEAT_TYPE:
+        return True
+    return not shown
+
+
 async def _reserve_billed_seat(team_id: str, email: str, seat_type: str) -> None:
     """邀请 / 切换成功但刷新后的名单还没反映出来时，先占住这个类型的一个席位。"""
     if not email or not is_billed_seat_type(seat_type):
@@ -387,6 +400,27 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
     pending_invite = await _pending_invite_or_refuse_member(team_id, client, req.email)
     resend = pending_invite is not None
     seat_type = normalize_seat_type(req.seat_type)
+    if resend:
+        pending_seat_type = normalize_seat_type(pending_invite.get("seat_type"))
+        if not is_known_seat_type(pending_seat_type):
+            # 待接受邀请的席位类型 TeamBoss 不认识（例如 automation）：重发或改它，上游
+            # 会怎么计费不确定，一律不动。在任何策略检查和上游写请求之前拒绝。
+            message = (
+                f"该邮箱有一个待接受的邀请，席位类型是 {seat_type_label(pending_seat_type)}，"
+                "TeamBoss 不认识这个类型，不会重发或改动它。"
+            )
+            await log_operation(
+                team_id,
+                "invite_member",
+                req.email,
+                f"seat_type={seat_type}, pending_seat_type={pending_seat_type}, resend=True",
+                "skipped",
+                message,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "seat_type_unknown", "message": message, "seat_type": pending_seat_type},
+            )
     # 同类席位的待接受邀请已经计入该类型的待接受数、占着那个席位，重发不新增席位，
     # 不该再按超员策略拦。席位类型不同时上游怎么处理不确定，照常检查。
     same_seat_resend = resend and normalize_seat_type(pending_invite.get("seat_type")) == seat_type
@@ -461,7 +495,7 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
         "success",
     )
     snapshot = await _refresh_members_after_mutation(team_id, "invite", email=req.email)
-    if not _snapshot_contains_email(snapshot, req.email):
+    if _must_reserve(seat_type, shown=_snapshot_contains_email(snapshot, req.email)):
         await _reserve_billed_seat(team_id, req.email, seat_type)
 
     await notify_member_event(
@@ -640,7 +674,8 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
     refreshed = [
         m for m in (snapshot or {}).get("members", []) if _member_user_id(m) == user_id
     ]
-    if not (refreshed and normalize_seat_type(refreshed[0].get("seat_type")) == target):
+    shown = bool(refreshed and normalize_seat_type(refreshed[0].get("seat_type")) == target)
+    if _must_reserve(target, shown=shown):
         await _reserve_billed_seat(team_id, email, target)
 
     return {"status": "ok", "result": result}

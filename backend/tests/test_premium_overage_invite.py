@@ -42,13 +42,19 @@ class _InviteHarness(TempDbMixin, unittest.TestCase):
         self._start_db()
         self.track_reservation(TEAM, EMAIL)
 
-    def invite(self, client, *, policy=None, seat_type="default", allow_overage=False, snapshot=ABSENT):
+    def invite(self, client, *, policy=None, seat_type="default", allow_overage=False, snapshot=ABSENT,
+               refreshed=None):
+        """``snapshot``：邀请前现拉的名单；``refreshed``：邀请成功后刷新拿到的名单（默认同前）。"""
         if policy is not None:
             self.set_policy(TEAM, policy)
         self.client = client
         patches = [
             patch.object(members, "get_team_client", new=AsyncMock(return_value=client)),
-            patch.object(members, "fetch_and_cache_members", new=AsyncMock(return_value=snapshot)),
+            patch.object(
+                members,
+                "fetch_and_cache_members",
+                new=AsyncMock(side_effect=[snapshot, snapshot if refreshed is None else refreshed]),
+            ),
             patch.object(members, "run_chatgpt_call", new=direct_call),
             patch.object(seat_capacity, "run_chatgpt_call", new=direct_call),
             patch.object(members, "add_member_watch", new=AsyncMock()),
@@ -165,6 +171,45 @@ class ConfirmPolicyTest(_InviteHarness):
         self.assert_invited(response, exc)
         self.assertTrue(response["resent"])
         self.assertEqual(self.client.capacity_reads, 0)
+
+
+class UnknownPendingSeatTypeTest(_InviteHarness):
+    def test_resend_of_unknown_type_pending_invite_is_refused_before_anything(self):
+        self.insert_team(TEAM, policy="auto")
+        snapshot = {"members": [], "pending_invites": [{"email": EMAIL, "seat_type": "automation"}]}
+
+        _response, exc = self.invite(_free_default_client(), snapshot=snapshot)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["code"], "seat_type_unknown")
+        self.assertEqual(exc.detail["seat_type"], "automation")
+        self.assertIn("其他（automation）", exc.detail["message"])
+        self.assertEqual(self.client.reads, [], "不做策略检查、不读容量")
+        self.assertEqual(self.client.mutations, [])
+        log = self.logs("invite_member")[-1]
+        self.assertEqual(log["result"], "skipped")
+        self.assertIn("pending_seat_type=automation", log["detail"])
+
+
+class ReservationAfterInviteTest(_InviteHarness):
+    """Premium 邀请成功后总是占一个 Premium 预留；ChatGPT 只在刷新名单还没反映时才占。"""
+
+    def setUp(self):
+        super().setUp()
+        self.insert_team(TEAM, policy="auto")
+        self.shown = {"members": [], "pending_invites": [{"email": EMAIL}]}  # 上游没带 seat_type
+
+    def test_premium_is_reserved_even_when_the_refresh_already_shows_the_invite(self):
+        response, exc = self.invite(_full_default_client(), seat_type="prolite", refreshed=self.shown)
+
+        self.assert_invited(response, exc, seat_type="prolite")
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "prolite")), 1)
+
+    def test_chatgpt_is_not_reserved_when_the_refresh_shows_the_invite(self):
+        response, exc = self.invite(_full_default_client(), refreshed=self.shown)
+
+        self.assert_invited(response, exc)
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "default")), 0)
 
 
 class AutoPolicyTest(_InviteHarness):
