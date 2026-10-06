@@ -7,6 +7,7 @@ import DialogFrame from './DialogFrame';
 import AddMemberDialog from './AddMemberDialog';
 import TeamSettingsDialog from './TeamSettingsDialog';
 import TeamBillingDialog from './TeamBillingDialog';
+import SeatBetaBadge from './BetaBadge';
 import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
 import { billedSeatSummary, premiumSeatUsage, teamPendingCounts } from '../lib/seatCapacity';
@@ -66,11 +67,22 @@ function BilledSeatBlock({
   ].filter(Boolean).join('，');
   return (
     <div className={`rounded-xl px-3.5 py-3 ${style.surface} ${className}`} title={title}>
-      <div className="flex items-center justify-between gap-2 text-xs">
+      {/* A Beta badge takes the place of the icon and 「席位」 so the row still fits a half-width
+          block; where it doesn't, the status wraps to the right of the next line. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-xs">
         <span className={`flex min-w-0 items-center gap-1.5 whitespace-nowrap font-medium ${style.text}`}>
-          {icon} {label}<span className="hidden sm:inline"> 席位</span>
+          {SEAT_TYPES[seatType].beta ? (
+            <>
+              {label}
+              <SeatBetaBadge seatType={seatType} className="-ml-0.5" />
+            </>
+          ) : (
+            <>
+              {icon} {label}<span className="hidden sm:inline"> 席位</span>
+            </>
+          )}
         </span>
-        <span className={`shrink-0 whitespace-nowrap ${status.className}`}>{status.text}</span>
+        <span className={`ml-auto shrink-0 whitespace-nowrap ${status.className}`}>{status.text}</span>
       </div>
       <div className="mt-1 flex items-baseline gap-1">
         <span className={`text-xl font-semibold tabular-nums ${over ? 'text-red-600 dark:text-red-400' : style.text}`}>{inUse}</span>

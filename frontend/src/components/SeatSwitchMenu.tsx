@@ -6,6 +6,7 @@ import { SEAT_STYLE, SEAT_TYPE_OPTIONS, SEAT_TYPES, seatUpdateErrorMessage } fro
 import { gateMessage, gateShortHint, switchConfirmText, type SeatGate } from '../lib/seatCapacity';
 import type { SeatType, ShowToast } from '../types';
 import ConfirmDialog from './ConfirmDialog';
+import SeatBetaBadge from './BetaBadge';
 import { cn } from '../lib/utils';
 
 interface SeatSwitchOptionsProps {
@@ -48,7 +49,10 @@ export function SeatSwitchOptions({ current, gateFor, disabled, onPick, wrap }: 
             <span className="flex min-w-0 items-start gap-2">
               <span className={cn('mt-1.5 size-2 shrink-0 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
               <span className="min-w-0">
-                <span className="block">{label}</span>
+                <span className="flex items-center gap-1.5">
+                  {label}
+                  <SeatBetaBadge seatType={value} />
+                </span>
                 {hint && (
                   <span
                     className={cn(

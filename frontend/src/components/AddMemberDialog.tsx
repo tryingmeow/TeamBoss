@@ -26,6 +26,7 @@ import {
 import type { PendingInvite, SeatType, Team } from '../types';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
+import SeatBetaBadge from './BetaBadge';
 import { BUTTON, INPUT } from './ui';
 import { cn } from '../lib/utils';
 
@@ -612,7 +613,8 @@ export default function AddMemberDialog({
         {!fixedSeatType && (
           <div>
             <span className={LABEL}>席位类型</span>
-            <div className="grid grid-cols-3 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950" role="group" aria-label="席位类型">
+            {/* Equal thirds while they fit; on a phone the option carrying a Beta badge may grow to fit it. */}
+            <div className="flex gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950" role="group" aria-label="席位类型">
               {SEAT_TYPE_OPTIONS.map(({ value, label }) => (
                 <button
                   key={value}
@@ -620,7 +622,7 @@ export default function AddMemberDialog({
                   onClick={() => setSeatType(value)}
                   aria-pressed={seatType === value}
                   className={cn(
-                    'inline-flex h-8 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-1 text-sm font-medium transition-colors',
+                    'inline-flex h-8 min-w-fit flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-sm font-medium transition-colors',
                     seatType === value
                       ? cn('shadow-sm', SEAT_STYLE[value].pill)
                       : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100',
@@ -628,6 +630,7 @@ export default function AddMemberDialog({
                 >
                   <span className={cn('size-2 shrink-0 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
                   {label}
+                  <SeatBetaBadge seatType={value} />
                 </button>
               ))}
             </div>

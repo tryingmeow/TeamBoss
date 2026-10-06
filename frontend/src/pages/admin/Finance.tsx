@@ -41,6 +41,7 @@ import CostTrendChart from '../../components/CostTrendChart';
 import { InvoiceSubTable } from '../../components/InvoiceTable';
 import PageShell from '../../components/PageShell';
 import SegmentedTabs from '../../components/SegmentedTabs';
+import SeatBetaBadge from '../../components/BetaBadge';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { SEAT_STYLE } from '../../lib/seatType';
 
@@ -844,9 +845,12 @@ export default function Finance() {
             ) : null}
             {(overview?.premium_monthly_estimate_base_total ?? 0) > 0 && (
               <p>
-                另加 <span className={cn('font-medium', SEAT_STYLE.prolite.text)}>Premium 估算</span>{' '}
+                另加{' '}
+                <span className={cn('whitespace-nowrap font-medium', SEAT_STYLE.prolite.text)}>
+                  Premium <SeatBetaBadge seatType="prolite" />
+                </span>{' '}
                 <span className="whitespace-nowrap">
-                  {sameCurrency(baseCurrency, 'USD') ? '' : '≈ '}{formatMoney(overview?.premium_monthly_estimate_base_total, baseCurrency)}
+                  估算 {sameCurrency(baseCurrency, 'USD') ? '' : '≈ '}{formatMoney(overview?.premium_monthly_estimate_base_total, baseCurrency)}
                 </span>
                 <span className="block text-[11px]">
                   按每席 {formatMoney(overview?.premium_seat_price_estimate_usd ?? 125, '$')}/月估算，上游没有 Premium 单价

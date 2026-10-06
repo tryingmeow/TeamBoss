@@ -21,6 +21,7 @@ import PageLoading from '../../components/PageLoading';
 import SegmentedTabs from '../../components/SegmentedTabs';
 import Toast from '../../components/Toast';
 import Switch from '../../components/Switch';
+import SeatBetaBadge from '../../components/BetaBadge';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { formatDateSafe } from '../../lib/formatDate';
 import { cn } from '../../lib/utils';
@@ -89,8 +90,14 @@ type ToastType = 'success' | 'error';
  * 踢人规则只写一遍，卡片和确认弹窗共用——两处各写一份会各自漂移。
  * 巡逻只处理同步刚刷新成功的 Team，同步失败或已挂起的 Team 这一轮完全不碰。
  */
-function patrolRuleText(intervalMinutes: number): string {
-  return `每 ${intervalMinutes} 分钟巡逻一次，只处理未豁免的 Team：ChatGPT 席位超出时，移除新的外部加入成员（绕过 TeamBoss 加入的），最多移除超出的人数；外部加入、占用 Premium 席位的成员，不管是否超出都会移除（每个 Premium 席位都按月扣费）。`;
+function patrolRuleText(intervalMinutes: number): ReactNode {
+  return (
+    <>
+      每 {intervalMinutes} 分钟巡逻一次，只处理未豁免的 Team：ChatGPT 席位超出时，移除新的外部加入成员（绕过 TeamBoss
+      加入的），最多移除超出的人数；外部加入、占用 <span className="whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 席位的成员，不管是否超出都会移除（每个
+      Premium 席位都按月扣费）。
+    </>
+  );
 }
 
 const DIALOG_OVERLAY = 'fixed inset-0 z-50 bg-black/60 backdrop-blur-sm';

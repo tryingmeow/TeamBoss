@@ -12,12 +12,14 @@ export interface SeatTypeInfo {
   label: string;
   /** No free paid seat → inviting or switching into it makes ChatGPT add a seat and charge. */
   billed: boolean;
+  /** Not yet tested in production: wherever the type is offered or explained it wears a Beta badge. */
+  beta?: boolean;
 }
 
 export const SEAT_TYPES: Record<SeatType, SeatTypeInfo> = {
   default: { value: 'default', label: 'ChatGPT', billed: true },
   usage_based: { value: 'usage_based', label: 'Codex', billed: false },
-  prolite: { value: 'prolite', label: 'Premium', billed: true },
+  prolite: { value: 'prolite', label: 'Premium', billed: true, beta: true },
 };
 
 /** Every type an admin may pick when inviting or switching a member. */

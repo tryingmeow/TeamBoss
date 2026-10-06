@@ -15,6 +15,7 @@ import { AlertTriangle, Ban, Check, Copy, Loader2, Plus, RefreshCw, Ticket, X } 
 import PageShell from '../../components/PageShell';
 import PageLoading from '../../components/PageLoading';
 import Toast from '../../components/Toast';
+import SeatBetaBadge from '../../components/BetaBadge';
 import { BUTTON, CARD, INPUT, PILL } from '../../components/ui';
 import { CODE_SEAT_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, seatStyle } from '../../lib/seatType';
 import type { CodeSeatType } from '../../types';
@@ -534,6 +535,7 @@ export default function AccessTokens() {
                   >
                     <span className={cn('size-2 rounded-full', SEAT_STYLE[value].solid)} aria-hidden />
                     {label}
+                    <SeatBetaBadge seatType={value} />
                   </button>
                 ))}
               </div>
