@@ -304,5 +304,140 @@ class SnapshotWritersTest(_Fixture):
                 self._retire(team_id)
 
 
+
+# ═══ K2：TeamBoss 以前拉过 / 卖过席位的人重新出现，不踢、只提醒 ═══════════════════
+
+class ManagedHistoryVetoTest(_Fixture):
+    def _history_row(self, team_id, email, user_id, *, source, kicked, created_at, kicked_at,
+                     expires_at=None, kick_source="detected"):
+        conn = self._conn()
+        conn.execute(
+            """INSERT INTO member_expiry
+               (team_id, user_id, email, expires_at, auto_kick, kicked, kicked_at, kick_source,
+                first_seen_at, source, created_at)
+               VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)""",
+            (team_id, user_id, email, expires_at, kicked, kicked_at, kick_source,
+             created_at, source, created_at),
+        )
+        conn.commit()
+        conn.close()
+
+    def _redemption(self, team_id, email, *, seat_type="default", result="success", user_id=None):
+        conn = self._conn()
+        token_id = conn.execute(
+            """INSERT INTO access_tokens (token_hash, token_prefix, grant_expires_in, max_uses,
+                                          used_count, disabled, created_at, seat_type)
+               VALUES (?, 'p', '30d', 1, 1, 0, '2026-07-01', ?)""",
+            (f"hash-{team_id}-{email}-{result}", seat_type),
+        ).lastrowid
+        conn.execute(
+            """INSERT INTO access_token_uses (token_id, email, action, team_id, user_id, result, created_at)
+               VALUES (?, ?, 'invite', ?, ?, ?, '2026-07-09')""",
+            (token_id, email, team_id, user_id, result),
+        )
+        conn.commit()
+        conn.close()
+
+    def _rejoined_team(self, team_id):
+        # 付费成员（self_service，带到期）掉出过一次完整名单，记录被同步关掉；他回来时同步
+        # 给他建了一条新的 detected 行，没有到期时间，席位是 Premium。
+        member = _member("payer@example.com", "u-pay", seat_type="prolite",
+                         first_seen_at="2026-08-02T00:00:00+00:00")
+        self._history_row(team_id, "payer@example.com", "u-pay", source="self_service", kicked=1,
+                          created_at="2026-07-01T00:00:00+00:00",
+                          kicked_at="2026-08-01T00:00:00+00:00",
+                          expires_at="2026-12-01T00:00:00+00:00")
+        self._armed_team(team_id, [OWNER, KEEPER, member])
+        return member
+
+    def test_redetected_paying_member_is_not_kicked_and_alerts(self):
+        member = self._rejoined_team("team-k2")
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
+        # 候选筛选就挡住了：没有走到踢人入口，不推"处理失败"。
+        self.assertEqual(self._logs("patrol_kick"), [])
+        self.assertFalse(any("处理失败" in t for t in self.notify_calls))
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("TeamBoss 以前拉过他或他兑换过", alerts[0])
+        self.assertIn("payer", alerts[0])
+        logged = self._logs("patrol_premium_alert")
+        self.assertIn("kind=premium_detected_was_managed", logged[0]["detail"])
+
+        conn = self._conn()
+        ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-k2", member,
+                                         rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
+        conn.close()
+        self.assertFalse(ok)
+        self.assertIn("placed or sold a seat", reason)
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_every_teamboss_record_shape_blocks_the_kick(self):
+        cases = {
+            "closed_system_row": lambda t: self._history_row(
+                t, "x@example.com", "u-x", source="system", kicked=1,
+                created_at="2026-07-01T00:00:00+00:00", kicked_at="2026-08-01T00:00:00+00:00"),
+            "closed_row_matched_by_user_id_only": lambda t: self._history_row(
+                t, "old-address@example.com", "u-x", source="self_service", kicked=1,
+                created_at="2026-07-01T00:00:00+00:00", kicked_at="2026-08-01T00:00:00+00:00"),
+            "chatgpt_code_redeemed_here": lambda t: self._redemption(t, "x@example.com"),
+            "redemption_still_uncertain": lambda t: self._redemption(
+                t, "x@example.com", result="uncertain"),
+        }
+        for name, add_history in cases.items():
+            with self.subTest(case=name):
+                RecordingClient.calls = []
+                team_id = f"team-k2-{name}"
+                member = _member("x@example.com", "u-x", seat_type="prolite")
+                add_history(team_id)
+                self._armed_team(team_id, [OWNER, KEEPER, member])
+
+                self._patrol(dry_run=False, allow=[team_id])
+
+                self.assertEqual(self._calls("remove_member"), [])
+
+    def test_kick_audit_row_and_refunded_redemption_do_not_block(self):
+        # 踢人时没有记录补写的审计行（system、kicked=1、kicked_at = created_at）不是 TeamBoss
+        # 拉的人；退回的兑换（failed）没卖出席位。这两样都不挡踢人。
+        team_id = "team-k2-none"
+        member = _member("x@example.com", "u-x", seat_type="prolite")
+        self._history_row(team_id, "x@example.com", "u-x", source="system", kicked=1,
+                          created_at="2026-07-01T00:00:00+00:00",
+                          kicked_at="2026-07-01T00:00:00+00:00", kick_source="admin")
+        self._redemption(team_id, "x@example.com", result="failed")
+        self._armed_team(team_id, [OWNER, KEEPER, member])
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-x")])
+
+    def test_record_appearing_during_claim_defers_the_kick(self):
+        # claim 前查记录时还没有，claim 期间一笔兑换落进了这个 Team：claim 后复查必须拦下。
+        team_id = "team-k2-race"
+        member = _member("x@example.com", "u-x", seat_type="prolite")
+        self._armed_team(team_id, [OWNER, KEEPER, member])
+        fixture = self
+
+        @contextlib.contextmanager
+        def claim_with_redemption(*args, **kwargs):
+            fixture._redemption(team_id, "x@example.com", result="uncertain")
+            yield True
+
+        with patch.object(patrol, "member_operation_claim_sync", claim_with_redemption):
+            conn = self._conn()
+            ok, reason = patrol._patrol_kick(conn, RecordingClient(), team_id, member,
+                                             rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
+            conn.close()
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, patrol.PREMIUM_KICK_DEFERRED)
+        self.assertEqual(self._calls("remove_member"), [])
+        deferred = [l for l in self._logs("patrol_kick") if l["result"] == "skipped"]
+        self.assertIn("deferred=teamboss_record", deferred[0]["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

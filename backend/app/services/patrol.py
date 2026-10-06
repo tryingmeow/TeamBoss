@@ -45,9 +45,10 @@
   都是 ChatGPT 自动加购、按月扣费的席位。真踢仍只走 `_patrol_kick`（rule="premium_outsider"），
   除席位类型 / 超员这一关外闸门与超员踢人完全相同；单轮同样受 NON_STRICT_KICK_ABS_CAP 封顶，
   并套用严格模式的"别一次踢一片"阈值（外部 Premium 成员过多、或严格模式护栏已判这份快照
-  异常，这一轮一个都不踢）。TeamBoss 有给他开 Premium 的任何记录（含超时 / 失败的切换）不踢；
-  快照之后 TeamBoss 动过他的席位，这一轮不踢。日志沿用 patrol_kick / patrol_would_kick /
-  patrol_kick_batch_capped，detail 带 seat_type=prolite、reason=premium_outsider。
+  异常，这一轮一个都不踢）。TeamBoss 有给他开 Premium 的任何记录（含超时 / 失败的切换）、以前
+  拉过他或他在这个 Team 兑换过（记录开着关着都算）都不踢；快照开始拉取之后 TeamBoss 动过他的
+  席位，这一轮不踢。日志沿用 patrol_kick / patrol_would_kick / patrol_kick_batch_capped，
+  detail 带 seat_type=prolite、reason=premium_outsider。
 - 注册表外的类型（如 automation）任何模式下都不踢、不撤。严格模式不碰 Premium（交给上一条），
   它的"别一次踢一片"护栏仍按全部疑似陌生成员计数。
 - 没被处理的 Premium 外部成员（巡逻没开、豁免 / Codex 队、被拦下）、TeamBoss 成员被切到 Premium 但不是
@@ -749,9 +750,9 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
     - over_quota（默认，和以前逐字相同）：只踢 ChatGPT（default）席位，Team 必须未开 Codex、
       席位数有效且当前超员，目标必须落在最新的 over_by 个候选里。
     - premium_outsider：只踢 Premium（prolite）席位，不看超员；目标必须是
-      select_premium_kick_candidates 里的人，且 TeamBoss 没有给他开过 Premium 的记录
-      （_teamboss_premium_record_sync）。claim 拿到后再查一次：这次判定用的快照开始拉取之后 TeamBoss
-      动过他的席位、或刚有了 Premium 记录，返回 PREMIUM_KICK_DEFERRED，不踢。
+      select_premium_kick_candidates 里的人，且 TeamBoss 没有他的记录（开过 Premium、以前拉过他或他
+      兑换过，_premium_kick_veto_sync）。claim 拿到后再查一次：这次判定用的快照开始拉取之后 TeamBoss
+      动过他的席位、或刚有了这样的记录，返回 PREMIUM_KICK_DEFERRED，不踢。
     其余闸门两条规则完全相同：武装 + 基线 + 未豁免、Team active 且没开 Codex、成员缓存里重新定位、
     缓存与持久化来源都是 detected、非 Owner、对账屏障、member claim 后再查一次来源和到期。
     校验通过后，复用 auto_kick_job 的原语：client.remove_member -> 标记 kicked -> 记日志。
@@ -881,8 +882,9 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
             reason = "rejected: target is not a Premium outsider candidate"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
-        if _teamboss_premium_record_sync(conn, team_id, cached_email, cached_user_id):
-            reason = "rejected: TeamBoss has a Premium record for this member"
+        record_veto = _premium_kick_veto_sync(conn, team_id, cached_email, cached_user_id)
+        if record_veto:
+            reason = f"rejected: {record_veto}"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
     else:
@@ -926,17 +928,21 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
             reason = "rejected: member was authorized before destructive action"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
-        if premium_rule and (
-            _teamboss_seat_change_after_sync(conn, team_id, email, user_id, snapshot_started_at)
-            or _teamboss_premium_record_sync(conn, team_id, email, user_id)
-        ):
+        deferred_because = None
+        if premium_rule:
+            if _teamboss_seat_change_after_sync(conn, team_id, email, user_id, snapshot_started_at):
+                deferred_because = "seat_changed_after_snapshot"
+            elif _premium_kick_veto_sync(conn, team_id, email, user_id):
+                deferred_because = "teamboss_record"
+        if deferred_because:
             # 快照之后 TeamBoss 动过他的席位（切换超时、切换后刷新失败等），快照里的 prolite
-            # 不可信；或者 claim 期间刚有了 Premium 记录。这一轮不踢，下一轮按新快照判断。
+            # 不可信；或者 claim 期间刚有了 TeamBoss 的记录（Premium 记录、拉人 / 兑换记录）。
+            # 这一轮不踢，下一轮按新快照判断（有记录的那时不再是候选，进席位提醒）。
             reason = PREMIUM_KICK_DEFERRED
             _log_operation_sync(
                 team_id, "patrol_kick", email,
                 f"user_id={user_id}, seat_type={PREMIUM_SEAT_TYPE}, "
-                f"reason={KICK_RULE_PREMIUM_OUTSIDER}, deferred=seat_changed_after_snapshot",
+                f"reason={KICK_RULE_PREMIUM_OUTSIDER}, deferred={deferred_because}",
                 "skipped",
             )
             return False, reason
@@ -1344,6 +1350,7 @@ _MANAGED_SOURCES = ("system", "self_service")
 _PREMIUM_FINDING_KINDS = (
     "premium_outsider",
     "premium_detected_with_record",
+    "premium_detected_was_managed",
     "premium_unswitched",
     "unknown_seat_type",
 )
@@ -1450,6 +1457,56 @@ def _teamboss_premium_record_sync(conn: sqlite3.Connection, team_id: str, email:
     return any(is_premium for _, is_premium in _premium_code_uses_sync(conn, team_id, email))
 
 
+def _teamboss_managed_history_sync(conn: sqlite3.Connection, team_id: str, email: str, user_id: str) -> bool:
+    """TeamBoss 以前有没有把这个人拉进这个 Team、或者他在这个 Team 兑换过（Premium 踢人的否决条件）。
+
+    同步发现一个人不在完整名单里会把他的记录关掉（kicked=1）；他再出现时是一条新的 detected
+    记录、没有到期时间，光看当前记录就像外人。所以这里看这个 Team + 这个人（邮箱或 user_id）的全部
+    历史，开着关着都算：
+    - member_expiry 里 source 为 system / self_service 的行（管理员邀请、兑换、建基线时保护的现有
+      成员）。不算踢人时因为没有记录而补写的审计行（kicked=1、kicked_at = created_at）：那是 TeamBoss
+      把人移出去，不是拉进来。
+    - access_token_uses 里成功 / 待定 / 处理中的兑换（任何席位类型）。
+    读不出来按"有"处理（宁可漏踢）。
+    """
+    email = (email or "").strip().lower()
+    user_id = str(user_id or "")
+    if not email and not user_id:
+        return False
+    try:
+        managed_row = conn.execute(
+            f"""SELECT 1 FROM member_expiry
+               WHERE team_id = ?
+                 AND source IN ({", ".join("?" for _ in _MANAGED_SOURCES)})
+                 AND ((? != '' AND user_id = ?) OR (? != '' AND lower(email) = ?))
+                 AND NOT (kicked = 1 AND expires_at IS NULL
+                          AND kicked_at IS NOT NULL AND kicked_at = created_at)
+               LIMIT 1""",
+            (team_id, *_MANAGED_SOURCES, user_id, user_id, email, email),
+        ).fetchone()
+        if managed_row:
+            return True
+        redeemed_row = conn.execute(
+            """SELECT 1 FROM access_token_uses
+               WHERE team_id = ? AND result IN ('success', 'uncertain', 'pending')
+                 AND ((? != '' AND lower(email) = ?) OR (? != '' AND user_id = ?))
+               LIMIT 1""",
+            (team_id, email, email, user_id, user_id),
+        ).fetchone()
+    except sqlite3.Error:
+        return True
+    return redeemed_row is not None
+
+
+def _premium_kick_veto_sync(conn: sqlite3.Connection, team_id: str, email: str, user_id: str) -> Optional[str]:
+    """Premium 外部成员不能踢的记录原因（没有返回 None）。候选筛选、_patrol_kick 的 claim 前后都用它。"""
+    if _teamboss_premium_record_sync(conn, team_id, email, user_id):
+        return "TeamBoss has a Premium record for this member"
+    if _teamboss_managed_history_sync(conn, team_id, email, user_id):
+        return "TeamBoss placed or sold a seat to this member before"
+    return None
+
+
 def _teamboss_set_premium_sync(conn: sqlite3.Connection, team_id: str, email: str, user_id: str) -> bool:
     """TeamBoss 最近一次给这个人定席位时，定的是不是 Premium（只用于 TeamBoss 成员的提醒）。
 
@@ -1507,6 +1564,8 @@ def premium_seat_findings_sync(
       不算：前者有自己的通知或下一轮再判，后者有撤销通知。
     - premium_detected_with_record：来源是 detected，但 TeamBoss 有给他开 Premium 的记录
       （_teamboss_premium_record_sync）。数据对不上，不自动踢，交给管理员。
+    - premium_detected_was_managed：来源是 detected，但 TeamBoss 以前拉过他、或他在这个 Team 兑换过
+      （_teamboss_managed_history_sync，常见于付费成员掉出名单后又回来）。不自动踢，交给管理员。
     - premium_unswitched：TeamBoss 管理的成员 / 邀请（source=system/self_service）在 Premium 席位上，
       但 TeamBoss 最近一次给他定的席位不是 Premium（_teamboss_set_premium_sync）。
     - unknown_seat_type：注册表外的席位类型（如 automation）。TeamBoss 对这些人什么都不做（包括到期
@@ -1537,6 +1596,8 @@ def premium_seat_findings_sync(
                         continue
                     if status == "member" and _teamboss_premium_record_sync(conn, team_id, email, user_id):
                         kind = "premium_detected_with_record"
+                    elif status == "member" and _teamboss_managed_history_sync(conn, team_id, email, user_id):
+                        kind = "premium_detected_was_managed"
                     else:
                         kind = "premium_outsider"
                 elif not is_known_seat_type(seat):
@@ -1592,9 +1653,10 @@ def _premium_alert_card(
     outsider_members = [f for f in findings if f["kind"] == "premium_outsider" and f["status"] == "member"]
     outsider_invites = [f for f in findings if f["kind"] == "premium_outsider" and f["status"] == "pending"]
     with_record = [f for f in findings if f["kind"] == "premium_detected_with_record"]
+    was_managed = [f for f in findings if f["kind"] == "premium_detected_was_managed"]
     unswitched = [f for f in findings if f["kind"] == "premium_unswitched"]
     unknown = [f for f in findings if f["kind"] == "unknown_seat_type"]
-    has_premium = bool(outsider_members or outsider_invites or with_record or unswitched)
+    has_premium = bool(outsider_members or outsider_invites or with_record or was_managed or unswitched)
 
     rows = []
     if outsider_members:
@@ -1605,6 +1667,11 @@ def _premium_alert_card(
         rows.append(unhandled_reason)
     if with_record:
         rows.append("🔎 来源记录是外部加入，但 TeamBoss 给他开过 Premium，没有自动移除：" + names(with_record))
+    if was_managed:
+        rows.append(
+            "🔎 来源记录是外部加入，但 TeamBoss 以前拉过他或他兑换过（可能是老用户重新进来），没有自动移除："
+            + names(was_managed)
+        )
     if unswitched:
         rows.append("🔀 TeamBoss 成员被切到 Premium，但不是 TeamBoss 切的：" + names(unswitched))
     if unknown:
@@ -1860,9 +1927,10 @@ def run_patrol(
                             "team_size": len(members),
                         })
                         premium_outsiders = []
+                    # TeamBoss 有记录的人（开过 Premium、以前拉过他或他兑换过）不进候选，交给席位提醒。
                     premium_candidates = [
                         c for c in premium_outsiders
-                        if not _teamboss_premium_record_sync(
+                        if not _premium_kick_veto_sync(
                             conn, team_id, c.get("email") or "", c.get("id") or c.get("user_id") or ""
                         )
                     ]
