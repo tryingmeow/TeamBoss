@@ -171,7 +171,7 @@ export function kickPolicyLabel(policy: KickPolicy): string {
 /**
  * 到期时间为空时的三种含义，对应后端 `get_active_expiry_state()`：
  * - `permanent`：有到期记录、被明确设成永久（source 是 system / self_service 等）。
- * - `detected`：巡逻发现的面板外加入者，没有任何授权；巡逻自动踢人开启时可能被移出（超员或严格模式）。
+ * - `detected`：巡逻发现的面板外加入者，没有任何授权；巡逻自动踢人开启时可能被移出（超员、占用 Premium 席位或严格模式）。
  * - `unrecorded`：本地没有到期记录（面板接管前就在的人，或数据还没同步到 source）。
  * 只有 `permanent` 才能写成"永久"。
  */

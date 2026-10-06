@@ -143,6 +143,7 @@ const KICK_SOURCE: Record<string, { label: string; tone: string }> = {
   admin: { label: '手动踢出', tone: TONE.info },
   detected: { label: '检测移除', tone: TONE.warning },
   patrol: { label: '巡逻移除', tone: TONE.warning },
+  patrol_premium: { label: '巡逻移除 · Premium', tone: TONE.warning },
 };
 
 type TabValue = 'owner' | 'members' | 'logs';

@@ -91,10 +91,11 @@ const ACTION_LABELS: Record<string, string> = {
   pending_redemption_reconciliation: '核对待确认兑换',
 
   // Patrol
-  patrol_kick: '巡逻移出超员',
+  // 超员和外部 Premium 成员共用这个 action；detail 里的 reason=premium_outsider / seat_type 说明是哪一种。
+  patrol_kick: '巡逻移出',
   patrol_revoke_invite: '巡逻撤回邀请',
   patrol_strict_kick: '严格模式移出',
-  patrol_would_kick: '演练：将移出超员',
+  patrol_would_kick: '演练：将移出',
   patrol_would_revoke_invite: '演练：将撤回邀请',
   patrol_would_strict_kick: '演练：严格模式将移出',
   patrol_strict_flagged: '严格模式标记可疑成员',
@@ -300,6 +301,7 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   skipped_unrefreshed: (v) => `跳过未刷新 ${v}`,
   refresh_failures: (v) => `刷新失败 ${v}`,
   over_by: (v) => `超员 ${v}`,
+  rule: (v) => ({ premium_outsider: '外部人员占用 Premium 席位', over_quota: '超员' } as Record<string, string>)[v] ?? v,
   position: (v) => `顺位 ${v}`,
   source: (v) => `来源 ${SOURCES[v] ?? v}`,
   first_seen_at: (v) => `首次发现 ${timeLabel(v)}`,
@@ -350,6 +352,7 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
     kick: '移出后',
     overage_forbidden: '席位已满，禁止超员',
     overage_needs_confirmation: '席位已满，等你确认加购',
+    premium_outsider: '外部人员占用 Premium 席位',
   } as Record<string, string>)[v] ?? v,
   action: (v) => ({ renewed: '已续期', extended: '已延长', renewed_member: '续期成员', renewed_invite: '续期邀请' } as Record<string, string>)[v] ?? v,
   force: () => '强制同步',
