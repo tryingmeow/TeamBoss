@@ -146,15 +146,18 @@ class _Base(unittest.TestCase):
         conn.close()
 
     def _cache(self, team_id, members, pending=(), *, updated_at=None):
+        # updated_at 同时当作这份快照的 fetch_started_at（巡逻的 Premium 否决比的是它）。
+        snapshot_at = updated_at or datetime.now(timezone.utc).isoformat()
         conn = self._conn()
         conn.execute(
-            """INSERT INTO member_cache (team_id, members_json, pending_json, updated_at)
-               VALUES (?, ?, ?, ?)
+            """INSERT INTO member_cache (team_id, members_json, pending_json, updated_at,
+                                         fetch_started_at)
+               VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(team_id) DO UPDATE SET members_json = excluded.members_json,
                                                   pending_json = excluded.pending_json,
-                                                  updated_at = excluded.updated_at""",
-            (team_id, json.dumps(members), json.dumps(list(pending)),
-             updated_at or datetime.now(timezone.utc).isoformat()),
+                                                  updated_at = excluded.updated_at,
+                                                  fetch_started_at = excluded.fetch_started_at""",
+            (team_id, json.dumps(members), json.dumps(list(pending)), snapshot_at, snapshot_at),
         )
         conn.commit()
         conn.close()

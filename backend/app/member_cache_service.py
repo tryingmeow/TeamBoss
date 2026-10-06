@@ -13,6 +13,7 @@
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -22,6 +23,7 @@ from .database import get_db
 from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call
 from .services.seat_capacity import update_member_seat_usage_cache
+from .services.seat_holds import reconcile_seat_holds, reconcile_seat_holds_sync
 
 logger = logging.getLogger(__name__)
 
@@ -49,22 +51,89 @@ async def get_cached_members(team_id: str) -> Optional[dict]:
     }
 
 
-async def write_member_cache(team_id: str, members: list, pending_invites: list) -> str:
-    """将从 API 获取的成员数据写入缓存。"""
+def snapshot_fetch_started_now() -> str:
+    """一份完整快照的 fetch_started_at：在这次刷新的第一个上游列表请求（成员或邀请）发出之前取。
+
+    固定带微秒，库里的字符串按字典序比较就是按时间比较。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+# 完整快照（成员 + 待接受邀请两份名单都拉全了）的唯一写法。只允许拉取开始得更晚（或同时）的
+# 快照覆盖已有行：一次卡在半路的旧刷新晚些写回时，不能盖掉中途另一次刷新拿到的新名单（比如
+# 管理员刚把人切回 ChatGPT）。旧行 fetch_started_at 为 NULL = 不知道，按最旧处理。
+# 只改一行里成员字段的原地修改（到期时间、巡逻建基线）不走这里，也不动 fetch_started_at。
+_SNAPSHOT_UPSERT_SQL = """
+    INSERT INTO member_cache (team_id, members_json, pending_json, updated_at, fetch_started_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(team_id) DO UPDATE SET
+        members_json     = excluded.members_json,
+        pending_json     = excluded.pending_json,
+        updated_at       = excluded.updated_at,
+        fetch_started_at = excluded.fetch_started_at
+    WHERE member_cache.fetch_started_at IS NULL
+       OR excluded.fetch_started_at >= member_cache.fetch_started_at
+"""
+
+
+def _snapshot_params(team_id: str, members: list, pending_invites: list,
+                     updated_at: str, fetch_started_at: Optional[str]) -> tuple:
+    return (
+        team_id,
+        json.dumps(members, ensure_ascii=False),
+        json.dumps(pending_invites, ensure_ascii=False),
+        updated_at,
+        fetch_started_at,
+    )
+
+
+def store_member_snapshot_sync(
+    conn: sqlite3.Connection,
+    team_id: str,
+    members: list,
+    pending_invites: list,
+    fetch_started_at: str,
+    *,
+    updated_at: Optional[str] = None,
+) -> bool:
+    """同步连接写一份完整快照，再拿它给持久席位占用对账。不提交，由调用方随快照一起提交。
+
+    返回快照有没有写进缓存（库里已有一份开始得更晚的快照时为 False）。对账出错只记日志，
+    不影响刷新本身。
+    """
+    now = updated_at or datetime.now(timezone.utc).isoformat()
+    cursor = conn.execute(
+        _SNAPSHOT_UPSERT_SQL,
+        _snapshot_params(team_id, members, pending_invites, now, fetch_started_at),
+    )
+    written = cursor.rowcount > 0
+    try:
+        reconcile_seat_holds_sync(conn, team_id, members, pending_invites, fetch_started_at)
+    except Exception:
+        logger.exception("seat hold reconciliation failed for team %s", team_id)
+    return written
+
+
+async def write_member_cache(
+    team_id: str,
+    members: list,
+    pending_invites: list,
+    *,
+    fetch_started_at: Optional[str],
+) -> tuple[str, bool]:
+    """将从 API 获取的完整成员快照写入缓存，返回 (写入时间, 是否写进去了)。
+
+    库里已有一份拉取开始得更晚的快照时不覆盖（见 _SNAPSHOT_UPSERT_SQL）。
+    """
     now = datetime.now(timezone.utc).isoformat()
-    members_json = json.dumps(members, ensure_ascii=False)
-    pending_json = json.dumps(pending_invites, ensure_ascii=False)
     async with get_db() as db:
-        await db.execute("""
-            INSERT INTO member_cache (team_id, members_json, pending_json, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(team_id) DO UPDATE SET
-                members_json = excluded.members_json,
-                pending_json = excluded.pending_json,
-                updated_at   = excluded.updated_at
-        """, (team_id, members_json, pending_json, now))
+        cursor = await db.execute(
+            _SNAPSHOT_UPSERT_SQL,
+            _snapshot_params(team_id, members, pending_invites, now, fetch_started_at),
+        )
+        written = cursor.rowcount > 0
         await db.commit()
-    return now
+    return now, written
 
 
 async def update_cached_member_expiry(
@@ -299,6 +368,7 @@ async def _fetch_and_cache_members_impl(team_id: str, client: ChatGPTClient) -> 
     """
     import asyncio
 
+    fetch_started_at = snapshot_fetch_started_now()
     member_items, pending_items = await asyncio.gather(
         _fetch_all_pages(client.get_members, "members", "users"),
         _fetch_all_pages(client.get_pending_invites, "pending invites", "invites"),
@@ -321,8 +391,15 @@ async def _fetch_and_cache_members_impl(team_id: str, client: ChatGPTClient) -> 
             expiry_map[row["email"].lower()] = row_dict
 
     members, pending = _build_members_list(members_data, pending_data, expiry_map)
-    updated_at = await write_member_cache(team_id, members, pending)
-    await update_member_seat_usage_cache(team_id, members)
+    updated_at, written = await write_member_cache(
+        team_id, members, pending, fetch_started_at=fetch_started_at
+    )
+    if written:
+        await update_member_seat_usage_cache(team_id, members)
+    try:
+        await reconcile_seat_holds(team_id, members, pending, fetch_started_at)
+    except Exception:
+        logger.exception("seat hold reconciliation failed for team %s", team_id)
 
     return {
         "members": members,

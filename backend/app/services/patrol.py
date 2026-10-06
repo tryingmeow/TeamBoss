@@ -64,6 +64,7 @@ from typing import Any, Iterable, Optional
 from ..chatgpt_client import ChatGPTClient
 from ..chatgpt_limiter import run_chatgpt_call_sync
 from ..database import get_db_path
+from ..member_cache_service import snapshot_fetch_started_now, store_member_snapshot_sync
 from ..seat_types import (
     DEFAULT_SEAT_TYPE,
     PREMIUM_SEAT_TYPE,
@@ -749,7 +750,7 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
       席位数有效且当前超员，目标必须落在最新的 over_by 个候选里。
     - premium_outsider：只踢 Premium（prolite）席位，不看超员；目标必须是
       select_premium_kick_candidates 里的人，且 TeamBoss 没有给他开过 Premium 的记录
-      （_teamboss_premium_record_sync）。claim 拿到后再查一次：这次判定用的快照之后 TeamBoss
+      （_teamboss_premium_record_sync）。claim 拿到后再查一次：这次判定用的快照开始拉取之后 TeamBoss
       动过他的席位、或刚有了 Premium 记录，返回 PREMIUM_KICK_DEFERRED，不踢。
     其余闸门两条规则完全相同：武装 + 基线 + 未豁免、Team active 且没开 Codex、成员缓存里重新定位、
     缓存与持久化来源都是 detected、非 Owner、对账屏障、member claim 后再查一次来源和到期。
@@ -785,7 +786,7 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
         return False, reason
 
     cache_row = conn.execute(
-        "SELECT members_json, updated_at FROM member_cache WHERE team_id = ?", (team_id,)
+        "SELECT members_json, fetch_started_at FROM member_cache WHERE team_id = ?", (team_id,)
     ).fetchone()
     try:
         cached_members = json.loads(cache_row["members_json"]) if cache_row and cache_row["members_json"] else []
@@ -795,8 +796,9 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
         reason = "rejected: member cache is empty or invalid"
         _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
         return False, reason
-    # 这次判定用的快照时间；Premium 规则在 claim 里拿它比对 TeamBoss 之后有没有动过席位。
-    snapshot_at = cache_row["updated_at"]
+    # 这次判定用的快照是什么时候开始拉的（不是写进缓存的时间：卡在半路的刷新写得晚，名单却是
+    # 开始时的）。Premium 规则在 claim 里拿它比对 TeamBoss 之后有没有动过席位。
+    snapshot_started_at = cache_row["fetch_started_at"]
 
     # 重新从缓存定位目标，不能信任调用方传入的 source/seat_type/is_owner。
     cached_member = None
@@ -925,7 +927,7 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
         if premium_rule and (
-            _teamboss_seat_change_after_sync(conn, team_id, email, user_id, snapshot_at)
+            _teamboss_seat_change_after_sync(conn, team_id, email, user_id, snapshot_started_at)
             or _teamboss_premium_record_sync(conn, team_id, email, user_id)
         ):
             # 快照之后 TeamBoss 动过他的席位（切换超时、切换后刷新失败等），快照里的 prolite
@@ -1101,6 +1103,9 @@ def _fetch_all_api_items_sync(method, *fallback_keys: str, limit: int = 100, max
         elif short_page:
             break
         offset += limit
+    else:
+        # 翻到上限还没结束 = 名单不完整，不能当完整快照写缓存、拿去对账。
+        return None, "member/invite list exceeds the paging limit"
     return items, None
 
 
@@ -1117,6 +1122,7 @@ def _refresh_team_snapshot_sync(
     proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
     client = ChatGPTClient(team["access_token"], team_id, team["device_id"], proxy_url=proxy_url)
 
+    fetch_started_at = snapshot_fetch_started_now()
     members_items, m_err = _fetch_all_api_items_sync(client.get_members, "users")
     if m_err:
         return False, m_err, None
@@ -1169,17 +1175,8 @@ def _refresh_team_snapshot_sync(
             "status": "pending",
         })
 
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """INSERT INTO member_cache (team_id, members_json, pending_json, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(team_id) DO UPDATE SET
-               members_json = excluded.members_json,
-               pending_json = excluded.pending_json,
-               updated_at   = excluded.updated_at""",
-        (team_id, json.dumps(cached_members, ensure_ascii=False),
-         json.dumps(cached_pending, ensure_ascii=False), now),
-    )
+    # 库里已有一份开始得更晚的快照时不覆盖；调用方随后读到的就是那一份（同样是完整快照）。
+    store_member_snapshot_sync(conn, team_id, cached_members, cached_pending, fetch_started_at)
     conn.commit()
     return True, None, client
 
@@ -1473,19 +1470,20 @@ def _teamboss_set_premium_sync(conn: sqlite3.Connection, team_id: str, email: st
 
 
 def _teamboss_seat_change_after_sync(
-    conn: sqlite3.Connection, team_id: str, email: str, user_id: str, snapshot_at: Any
+    conn: sqlite3.Connection, team_id: str, email: str, user_id: str, snapshot_started_at: Any
 ) -> bool:
-    """快照（member_cache.updated_at）之后 TeamBoss 有没有动过这个人的席位（任何结果都算）。
+    """快照开始拉取（member_cache.fetch_started_at）之后 TeamBoss 有没有动过这个人的席位（任何结果都算）。
 
-    比如刚切回 ChatGPT、切换后的刷新失败，快照还写着 prolite。快照时间读不出、日志时间读不出，
-    都按"动过"处理（宁可这一轮不踢）。
+    比如刚切回 ChatGPT、切换后的刷新失败，快照还写着 prolite；或者一次刷新先读到 prolite、卡在
+    半路，管理员这时切回 ChatGPT，它才写回缓存。比的是开始时间，不是写入时间。开始时间为空
+    （旧数据）或读不出、日志时间读不出，都按"动过"处理（宁可这一轮不踢）。
     """
-    snapshot = _parse_iso_datetime(snapshot_at)
+    snapshot = _parse_iso_datetime(snapshot_started_at)
     if snapshot is None:
         return True
     for log in _teamboss_seat_logs_sync(conn, team_id, email, user_id):
         logged_at = _parse_iso_datetime(log["created_at"])
-        if logged_at is None or logged_at > snapshot:
+        if logged_at is None or logged_at >= snapshot:
             return True
     return False
 

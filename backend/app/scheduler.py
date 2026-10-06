@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call_sync
 from .database import get_db_path
+from .member_cache_service import snapshot_fetch_started_now, store_member_snapshot_sync
 from .services.invoices import refresh_invoices_if_stale_sync
 from .services.pricing import account_billing_updates, fetch_seat_pricing_sync
 from .seat_types import is_known_seat_type, normalize_seat_type
@@ -1366,6 +1367,8 @@ def data_sync_job():
                 # 快照时刻：下面这两次拉取之后写进 member_expiry 的行，不可能出现在
                 # 这份名单里。反向缺席判定必须以此为界（见 absence 分支）。
                 snapshot_taken_at = datetime.now(timezone.utc)
+                # 同一时刻也是这份快照的 fetch_started_at（写缓存时只让开始得更晚的覆盖更早的）。
+                fetch_started_at = snapshot_taken_at.isoformat(timespec="microseconds")
                 members_items, m_err = _fetch_all_api_items_sync(client.get_members, "users")
                 pending_items, p_err = _fetch_all_api_items_sync(client.get_pending_invites, "invites")
 
@@ -1566,19 +1569,16 @@ def data_sync_job():
                             "status": "pending",
                         })
 
-                    conn.execute("""
-                        INSERT INTO member_cache (team_id, members_json, pending_json, updated_at)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(team_id) DO UPDATE SET
-                            members_json = excluded.members_json,
-                            pending_json = excluded.pending_json,
-                            updated_at   = excluded.updated_at
-                    """, (team_id,
-                          json.dumps(cached_members, ensure_ascii=False),
-                          json.dumps(cached_pending, ensure_ascii=False),
-                          now))
+                    # 库里已有一份开始得更晚的快照（例如管理端刚刷新过）时不覆盖它，
+                    # 也不拿这份旧名单去改 teams 上的人数。
+                    snapshot_written = store_member_snapshot_sync(
+                        conn, team_id, cached_members, cached_pending, fetch_started_at,
+                        updated_at=now,
+                    )
 
-                    member_usage = member_seat_usage_from_members(cached_members)
+                    member_usage = (
+                        member_seat_usage_from_members(cached_members) if snapshot_written else None
+                    )
                     if member_usage is not None:
                         member_updates = []
                         member_params = []
@@ -1905,6 +1905,7 @@ def member_watch_job():
                 client = ChatGPTClient(access_token, team_id, device_id, proxy_url=proxy_url)
 
                 # 拉取最新成员列表
+                fetch_started_at = snapshot_fetch_started_now()
                 members, members_error = _fetch_all_api_items_sync(client.get_members, "users")
                 pending, pending_error = _fetch_all_api_items_sync(client.get_pending_invites, "invites")
 
@@ -2002,19 +2003,13 @@ def member_watch_job():
                             "status": "pending",
                         })
 
-                    import json as _json
-                    conn.execute("""
-                        INSERT INTO member_cache (team_id, members_json, pending_json, updated_at)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(team_id) DO UPDATE SET
-                            members_json = excluded.members_json,
-                            pending_json = excluded.pending_json,
-                            updated_at   = excluded.updated_at
-                    """, (team_id,
-                          _json.dumps(cached_members, ensure_ascii=False),
-                          _json.dumps(cached_pending, ensure_ascii=False),
-                          now_iso))
-                    member_usage = member_seat_usage_from_members(cached_members)
+                    snapshot_written = store_member_snapshot_sync(
+                        conn, team_id, cached_members, cached_pending, fetch_started_at,
+                        updated_at=now_iso,
+                    )
+                    member_usage = (
+                        member_seat_usage_from_members(cached_members) if snapshot_written else None
+                    )
                     if member_usage is not None:
                         conn.execute(
                             """UPDATE teams SET
