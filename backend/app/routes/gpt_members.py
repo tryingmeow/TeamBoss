@@ -8,10 +8,11 @@ from ..services.gpt_invites import (
     NoGptSeatAvailable,
     batch_overage_plan,
     confirmed_overage_team_ids,
-    has_overfill_target,
     invite_gpt_member_any_team,
     load_gpt_invite_candidates,
     normalize_invite_emails,
+    overfill_allowed_for_team,
+    overfill_without_asking,
     summarize_gpt_candidates,
 )
 from ..services.member_expiry import expires_in_to_datetime
@@ -30,6 +31,9 @@ class InviteGptMembersRequest(BaseModel):
     # Team 生效，即 409 的 overage_plan 里他看到的那些 team_id；没列出的不会被超员。
     allow_overage: bool = False
     overage_team_ids: list[str] = Field(default_factory=list)
+    # 他看到的 extra_seats_total：这次请求最多在 confirm Team 上超员这么多个（auto 不计）。
+    # 不传 = 0，旧前端只带 allow_overage 会被重新问，不会加购。
+    overage_seat_limit: int = Field(default=0, ge=0)
 
 
 @router.post("/invite")
@@ -41,8 +45,9 @@ async def invite_gpt_members(req: InviteGptMembersRequest):
       只剩「超员需确认」的 Team 时问一次（409，带 ``overage_plan``：加购几个、加在哪）；
       「禁止超员」的 Team 永远不超员。哪里都去不了的邮箱记为「没位置，未邀请」。
     * 确认绑定在计划上：带 ``allow_overage`` 重发时，只超员 ``overage_team_ids`` 里的
-      confirm Team。计划不成立了（那个 Team 改成禁止超员、不在了、接不住）就带新计划
-      再问一次，绝不把加购挪到管理员没看到的 Team 上。
+      confirm Team，而且最多 ``overage_seat_limit`` 个。计划不成立了（那个 Team 改成禁止
+      超员、不在了）或个数不够了（问完之后空位被别人占了），就带新计划再问一次，
+      绝不把加购挪到管理员没看到的 Team 上，也不多买他没确认的个数。
     """
     raw_emails = list(req.emails)
     if req.email:
@@ -61,18 +66,33 @@ async def invite_gpt_members(req: InviteGptMembersRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     confirmed_ids = confirmed_overage_team_ids(req.allow_overage, req.overage_team_ids)
-    # 带了确认标记、但确认过的计划已经不成立时，重新问的文案先说清楚这一点。
-    replan_note = "你确认过的超员计划已经不成立，需要重新确认。" if req.allow_overage else ""
+    seat_limit = req.overage_seat_limit if req.allow_overage else 0
+    confirm_overfills = 0  # 这次请求里已经落在 confirm Team 上的超员个数
+
+    def replan_note(teams: list[dict]) -> str:
+        """带了确认标记还要重新问时，先说清楚是哪种情况。"""
+        if not req.allow_overage:
+            return ""
+        if seat_limit <= 0:
+            return "确认里没有带上要加购几个席位，需要重新确认。"
+        if any(overfill_allowed_for_team(t, t.get("overage_policy"), confirmed_ids) for t in teams):
+            return f"需要加购的席位比你确认的 {seat_limit} 个多，需要重新确认。"
+        return "你确认过的超员计划已经不成立，需要重新确认。"
+
     candidates = await load_gpt_invite_candidates(include_full=True)
     capacity = summarize_gpt_candidates(candidates)
     free = int(capacity.get("available") or 0)
-    if len(emails) > free and not has_overfill_target(candidates, confirmed_ids):
-        plan = batch_overage_plan(candidates, len(emails) - free, exclude_team_ids=confirmed_ids)
+    absorbable = overfill_without_asking(candidates, confirmed_ids, seat_limit)
+    if absorbable is not None and len(emails) - free > absorbable:
+        plan = batch_overage_plan(candidates, len(emails) - free)
         if plan:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=batch_confirmation_detail(
-                    lead=f"{replan_note}空闲 ChatGPT 席位只有 {free} 个，要邀请 {len(emails)} 个。",
+                    lead=(
+                        f"{replan_note(candidates)}"
+                        f"空闲 ChatGPT 席位只有 {free} 个，要邀请 {len(emails)} 个。"
+                    ),
                     plan=plan,
                     capacity=capacity,
                     added=[],
@@ -90,21 +110,24 @@ async def invite_gpt_members(req: InviteGptMembersRequest):
                 expires_at,
                 allow_overage=req.allow_overage,
                 overage_team_ids=req.overage_team_ids,
+                confirm_overfill_budget=seat_limit - confirm_overfills,
                 action="invite_gpt_member",
             )
             added.append(item)
+            if item.get("overage") and item.get("policy") == "confirm":
+                confirm_overfills += 1
         except NoGptSeatAvailable as exc:
-            # 没空位、auto Team 和确认过的 Team 都接不住：还有别的 confirm Team 就带新计划
-            # 再问（已确认过却没接住的 Team 不再列入），没有就记为没位置。
+            # 没空位、auto Team 接不住、确认过的 Team 不能用或确认的个数用完：还有
+            # confirm Team 就带新计划（剩下的邮箱数）再问，没有就记为没位置。
             remaining = emails[index:]
             latest = await load_gpt_invite_candidates(include_full=True)
-            plan = batch_overage_plan(latest, len(remaining), exclude_team_ids=confirmed_ids)
+            plan = batch_overage_plan(latest, len(remaining))
             if plan:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=batch_confirmation_detail(
                         lead=(
-                            f"{replan_note}已添加 {len(added)} 个，"
+                            f"{replan_note(latest)}已添加 {len(added)} 个，"
                             f"剩余 {len(remaining)} 个没有空闲 ChatGPT 席位。"
                         ),
                         plan=plan,

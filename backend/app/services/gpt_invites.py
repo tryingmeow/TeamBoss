@@ -231,31 +231,35 @@ def overfill_allowed_for_team(team: dict[str, Any], policy: Any, confirmed_ids: 
     return proceeds_without_capacity_check(policy, team.get("id") in confirmed_ids)
 
 
-def has_overfill_target(candidates: list[dict[str, Any]], confirmed_ids: frozenset[str] = frozenset()) -> bool:
-    """有没有不用再问就能超员的 Team：「超员自动」的，或计划里已确认、现在仍是 confirm 的。"""
-    return any(
-        overfill_allowed_for_team(item, item.get("overage_policy"), confirmed_ids) for item in candidates
-    )
-
-
-def batch_overage_plan(
+def overfill_without_asking(
     candidates: list[dict[str, Any]],
-    extra_seats: int,
-    *,
-    exclude_team_ids: frozenset[str] = frozenset(),
-) -> list[dict[str, Any]]:
+    confirmed_ids: frozenset[str],
+    confirmed_seat_limit: int,
+) -> int | None:
+    """不用再问就能超员加几个席位：有「超员自动」的 Team 不限（None）；否则计划里确认过、
+    现在仍是 confirm 的 Team 最多加 ``confirmed_seat_limit`` 个；都没有就是 0。"""
+    if any(item.get("overage_policy") == "auto" for item in candidates):
+        return None
+    if any(
+        overfill_allowed_for_team(item, item.get("overage_policy"), confirmed_ids) for item in candidates
+    ):
+        return max(0, int(confirmed_seat_limit))
+    return 0
+
+
+def batch_overage_plan(candidates: list[dict[str, Any]], extra_seats: int) -> list[dict[str, Any]]:
     """要问管理员时的计划：这 ``extra_seats`` 个席位会加在哪个「超员需确认」的 Team 上。
 
     确认后的请求里，没有空位的邮箱按 ``_overfill_order`` 逐个找第一个允许超员的 Team，
     所以全部加在排第一的那个 confirm Team 上（会问的时候没有可用的 auto Team）。
-    ``exclude_team_ids`` 是这次请求里已经确认过、却没能接住的 Team：重新问时换下一个。
-    没有可选的 confirm Team 时返回空列表：不用问，剩下的邮箱没位置。
+    计划里的 Team 改成禁止超员或不在了，它就不再是 confirm 候选，重新问时自然换下一个；
+    确认的个数用完时，重新问的还是同一个 Team、只是个数是剩下的邮箱数。
+    没有 confirm Team 时返回空列表：不用问，剩下的邮箱没位置。
     """
     if extra_seats <= 0:
         return []
     confirm_teams = [
-        item for item in _overfill_order(candidates)
-        if item.get("overage_policy") == "confirm" and item.get("id") not in exclude_team_ids
+        item for item in _overfill_order(candidates) if item.get("overage_policy") == "confirm"
     ]
     if not confirm_teams:
         return []
@@ -439,6 +443,8 @@ async def _invite_to_team(
             "team_name": team.get("name") or "",
             "expires_at": expires_iso,
             "overage": not check_capacity,
+            # 落地时锁内现读的策略：批量按它数确认过的超员个数（confirm 计数，auto 不计）。
+            "policy": policy,
         }, None
 
 
@@ -543,10 +549,14 @@ async def invite_gpt_member_any_team(
     *,
     allow_overage: bool = False,
     overage_team_ids: Any = None,
+    confirm_overfill_budget: int | None = None,
     action: str = "invite_gpt_member",
 ) -> dict[str, Any]:
     """``allow_overage`` + ``overage_team_ids``：管理员确认过的计划。confirm Team 只有列在
     ``overage_team_ids`` 里才会被超员；auto Team 不用列。没列表 = 空列表。
+
+    ``confirm_overfill_budget``：这次请求里确认过的超员个数还剩几个（批量路由传入）；
+    用完（<= 0）时 confirm Team 一律不超员，只剩 auto。None = 不限个数（单独调用时）。
     """
     email = (email or "").strip().lower()
     capacity_errors: list[str] = []
@@ -592,6 +602,8 @@ async def invite_gpt_member_any_team(
     # 超员只往策略允许的 Team 去：auto 总是可以；confirm 要管理员确认过、且在他看到的
     # 计划里；forbid 永远不行。
     confirmed_ids = confirmed_overage_team_ids(allow_overage, overage_team_ids)
+    if confirm_overfill_budget is not None and confirm_overfill_budget <= 0:
+        confirmed_ids = frozenset()
     overfill_teams = [
         team for team in _overfill_order(candidates)
         if overfill_allowed_for_team(team, team.get("overage_policy"), confirmed_ids)

@@ -46,7 +46,7 @@ class _BatchHarness(TempDbMixin, unittest.TestCase):
             seats_entitled=seats, counts={"default": live, "usage_based": 0}
         )
 
-    def submit(self, emails, *, allow_overage=False, overage_team_ids=None):
+    def submit(self, emails, *, allow_overage=False, overage_team_ids=None, overage_seat_limit=None):
         for team_id in self.clients:
             for email in emails:
                 self.track_reservation(team_id, email)
@@ -68,6 +68,7 @@ class _BatchHarness(TempDbMixin, unittest.TestCase):
                         expires_in="30d",
                         allow_overage=allow_overage,
                         **({} if overage_team_ids is None else {"overage_team_ids": overage_team_ids}),
+                        **({} if overage_seat_limit is None else {"overage_seat_limit": overage_seat_limit}),
                     )
                 )
             ), None
@@ -147,19 +148,22 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertEqual(self.all_mutations(), {})
 
     def _confirm_plan(self, emails):
-        """先拿 409 的计划，再带 allow_overage + 计划里的 team_id 重发（前端确认后的做法）。"""
+        """先拿 409 的计划，返回确认重发要带的参数：计划里的 team_id 和 extra_seats_total。"""
         _result, exc = self.submit(emails)
         self.assertEqual(exc.status_code, 409)
-        return [item["team_id"] for item in exc.detail["overage_plan"]]
+        return {
+            "overage_team_ids": [item["team_id"] for item in exc.detail["overage_plan"]],
+            "overage_seat_limit": exc.detail["extra_seats_total"],
+        }
 
     def test_after_confirmation_overfills_the_planned_team_only(self):
         emails = ["a@example.com", "b@example.com"]
         planned = self._confirm_plan(emails)
 
-        result, exc = self.submit(emails, allow_overage=True, overage_team_ids=planned)
+        result, exc = self.submit(emails, allow_overage=True, **planned)
 
         self.assertIsNone(exc, getattr(exc, "detail", None))
-        self.assertEqual(planned, ["t-confirm-old"])
+        self.assertEqual(planned, {"overage_team_ids": ["t-confirm-old"], "overage_seat_limit": 2})
         self.assertEqual(self.invited("t-confirm-old"), ["a@example.com", "b@example.com"])
         self.assertEqual(self.invited("t-confirm-new"), [])
         self.assertEqual(self.invited("t-forbid"), [])
@@ -168,7 +172,9 @@ class ConfirmTeamTest(_BatchHarness):
     def test_confirmation_without_team_ids_charges_nobody(self):
         for ids in (None, []):
             with self.subTest(overage_team_ids=ids):
-                _result, exc = self.submit(["a@example.com"], allow_overage=True, overage_team_ids=ids)
+                _result, exc = self.submit(
+                    ["a@example.com"], allow_overage=True, overage_team_ids=ids, overage_seat_limit=1
+                )
 
                 self.assertEqual(exc.status_code, 409)
                 self.assertEqual(exc.detail["overage_plan"][0]["team_id"], "t-confirm-old")
@@ -180,7 +186,7 @@ class ConfirmTeamTest(_BatchHarness):
         planned = self._confirm_plan(emails)
         self.set_policy("t-confirm-old", "forbid")
 
-        _result, exc = self.submit(emails, allow_overage=True, overage_team_ids=planned)
+        _result, exc = self.submit(emails, allow_overage=True, **planned)
 
         self.assertEqual(exc.status_code, 409)
         self.assertEqual(
@@ -203,7 +209,7 @@ class ConfirmTeamTest(_BatchHarness):
             return await original(team_id)
 
         with patch.object(gpt_invites, "load_team_policy", new=_flip_after_first):
-            _result, exc = self.submit(emails, allow_overage=True, overage_team_ids=planned)
+            _result, exc = self.submit(emails, allow_overage=True, **planned)
 
         self.assertEqual(exc.status_code, 409)
         self.assertEqual([item["email"] for item in exc.detail["added"]], ["a@example.com"])
@@ -213,13 +219,36 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertEqual(self.invited("t-confirm-old"), ["a@example.com"])
         self.assertEqual(self.invited("t-confirm-new"), [])
 
+    def test_confirmation_without_seat_limit_charges_nobody(self):
+        planned = self._confirm_plan(["a@example.com"])
+
+        _result, exc = self.submit(
+            ["a@example.com"], allow_overage=True, overage_team_ids=planned["overage_team_ids"]
+        )
+
+        self.assertEqual(exc.status_code, 409, "旧前端只带 allow_overage：重新问，不加购")
+        self.assertEqual(exc.detail["extra_seats_total"], 1)
+        self.assertIn("没有带上要加购几个席位", exc.detail["message"])
+        self.assertEqual(self.all_mutations(), {})
+
+    def test_more_extra_seats_than_confirmed_upfront_asks_again_before_inviting(self):
+        planned = self._confirm_plan(["a@example.com"])  # 计划：加购 1 个
+
+        _result, exc = self.submit(["a@example.com", "b@example.com"], allow_overage=True, **planned)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["extra_seats_total"], 2)
+        self.assertEqual(exc.detail["overage_plan"][0]["team_id"], "t-confirm-old")
+        self.assertIn("比你确认的 1 个多", exc.detail["message"])
+        self.assertEqual(self.all_mutations(), {})
+
     def test_upstream_rejection_on_planned_team_does_not_overfill_an_unlisted_team(self):
         planned = self._confirm_plan(["a@example.com"])
         self.clients["t-confirm-old"].invite_result = {
             "error": "invalid email", "_mutation_status": "rejected",
         }
 
-        result, exc = self.submit(["a@example.com"], allow_overage=True, overage_team_ids=planned)
+        result, exc = self.submit(["a@example.com"], allow_overage=True, **planned)
 
         self.assertIsNone(exc, getattr(exc, "detail", None))
         self.assertEqual(self.invited("t-confirm-old"), ["a@example.com"])
@@ -239,6 +268,81 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertEqual(exc.detail["overage_plan"][0]["team_id"], "t-confirm-old")
         self.assertIn("已添加 0 个，剩余 1 个", exc.detail["message"])
         self.assertEqual(self.all_mutations(), {})
+
+
+class SeatCountBindingTest(_BatchHarness):
+    """确认绑定个数：问完之后空位被占了，确认后的请求最多加购确认过的个数，剩下的重新问。"""
+
+    def setUp(self):
+        super().setUp()
+        # t-free：缓存和现拉都有 1 个空位；t-confirm：已满、超员需确认。
+        self.team("t-free", policy="forbid", seats=2, used=1, created_at="2026-10-01")
+        self.team("t-confirm", policy="confirm", created_at="2026-10-02")
+        self.emails = ["a@example.com", "b@example.com", "c@example.com"]
+
+    def _confirm(self):
+        _result, exc = self.submit(self.emails)
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(self.all_mutations(), {})
+        return {
+            "overage_team_ids": [item["team_id"] for item in exc.detail["overage_plan"]],
+            "overage_seat_limit": exc.detail["extra_seats_total"],
+        }
+
+    def _take_free_seat_live_only(self):
+        """别人占了 t-free 的空位，但缓存还没更新：只有现拉看得到。"""
+        self.clients["t-free"].counts["default"] = 2
+
+    def test_vanished_free_seat_overfills_at_most_the_confirmed_count_then_asks(self):
+        planned = self._confirm()
+        self.assertEqual(planned, {"overage_team_ids": ["t-confirm"], "overage_seat_limit": 2})
+        self._take_free_seat_live_only()
+
+        _result, exc = self.submit(self.emails, allow_overage=True, **planned)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(self.invited("t-confirm"), ["a@example.com", "b@example.com"],
+                         "确认了 2 个就最多加购 2 个")
+        self.assertEqual(self.invited("t-free"), [])
+        detail = exc.detail
+        self.assertEqual([item["email"] for item in detail["added"]], ["a@example.com", "b@example.com"])
+        self.assertEqual(detail["remaining_emails"], ["c@example.com"])
+        self.assertEqual(
+            detail["overage_plan"], [{"team_id": "t-confirm", "team_name": "t-confirm-name", "extra_seats": 1}]
+        )
+        self.assertEqual(detail["extra_seats_total"], 1)
+        self.assertIn("比你确认的 2 个多", detail["message"])
+
+        # 管理员再确认这 1 个：剩下的邮箱加在同一个 Team 上，不再问。
+        result, exc = self.submit(
+            detail["remaining_emails"], allow_overage=True,
+            overage_team_ids=["t-confirm"], overage_seat_limit=detail["extra_seats_total"],
+        )
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(self.invited("t-confirm"), self.emails)
+
+    def test_matching_count_needs_no_second_ask(self):
+        planned = self._confirm()
+
+        result, exc = self.submit(self.emails, allow_overage=True, **planned)
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(self.invited("t-free"), ["a@example.com"])
+        self.assertEqual(self.invited("t-confirm"), ["b@example.com", "c@example.com"])
+        self.assertEqual(result["failed"], [])
+        self.assertEqual([item["policy"] for item in result["added"]], ["forbid", "confirm", "confirm"])
+
+    def test_auto_overfills_do_not_count_against_the_limit(self):
+        self.team("t-auto", policy="auto", created_at="2026-10-03")
+        self._take_free_seat_live_only()
+
+        result, exc = self.submit(
+            self.emails, allow_overage=True, overage_team_ids=["t-confirm"], overage_seat_limit=0
+        )
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(self.invited("t-auto"), self.emails)
+        self.assertEqual(self.invited("t-confirm"), [])
 
 
 class ForbidOnlyTest(_BatchHarness):
