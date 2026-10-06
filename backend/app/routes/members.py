@@ -21,14 +21,25 @@ from ..services.member_expiry import (
     record_uncertain_invite,
     upsert_member_expiry,
 )
+from ..seat_types import (
+    CODEX_SEAT_TYPE,
+    DEFAULT_SEAT_TYPE,
+    is_billed_seat_type,
+    is_known_seat_type,
+    normalize_seat_type,
+    seat_type_label,
+)
 from ..services.open_redemptions import find_open_redemption, open_redemption_detail
-from ..services.seat_capacity import (
-    SeatCapacityFetchError,
-    fetch_live_chatgpt_seat_capacity,
-    update_capacity_cache,
+from ..services.overage_policy import (
+    OPERATION_INVITE,
+    OPERATION_SEAT_SWITCH,
+    SeatCheck,
+    check_billed_seat,
+    load_team_policy,
+    refuse,
 )
 from ..services.team_locks import member_operation_claim, team_invite_lock
-from ..services.team_locks import reserve_default_seat, reserved_default_seats
+from ..services.team_locks import reserve_default_seat, reserve_seat
 from ..services.team_clients import (
     get_team_client,
     is_team_auth_rejected,
@@ -283,43 +294,41 @@ async def _ensure_default_seat_available(
     *,
     email: str = "",
     allow_overage: bool = False,
-) -> None:
-    if allow_overage:
+    seat_type: str = DEFAULT_SEAT_TYPE,
+    operation: str = OPERATION_INVITE,
+    log_action: str = "invite_member",
+) -> SeatCheck:
+    """加一个计费席位（ChatGPT 或 Premium）之前按 Team 的超员策略把关。
+
+    名字沿用旧的：测试和调用方都按这个名字替换它，现在它管所有计费类型，不只 default。
+    规则见 services/overage_policy.py；必须在 team_invite_lock 与成员操作占用之内、
+    发上游写请求之前调用。不放行时记一条 skipped 日志并抛 409（禁止超员 /
+    需要确认）；放行时返回判断结果，调用方把 policy / overage 写进成功日志。
+    """
+    team = await load_team_policy(team_id)
+    check = await check_billed_seat(
+        client, team, seat_type, email=email, allow_overage=allow_overage
+    )
+    if not check.allowed:
+        await refuse(check, operation=operation, action=log_action, email=email or None)
+    return check
+
+
+def _seat_check_log_suffix(check) -> str:
+    """成功日志里追加的 policy / overage（没做检查时为空）。"""
+    if isinstance(check, SeatCheck):
+        return f", policy={check.policy}, overage={check.overage}"
+    return ""
+
+
+async def _reserve_billed_seat(team_id: str, email: str, seat_type: str) -> None:
+    """邀请 / 切换成功但刷新后的名单还没反映出来时，先占住这个类型的一个席位。"""
+    if not email or not is_billed_seat_type(seat_type):
         return
-
-    try:
-        capacity, subscription, seat_counts, _pending = await fetch_live_chatgpt_seat_capacity(client)
-    except SeatCapacityFetchError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    await update_capacity_cache(team_id, subscription, seat_counts)
-    reserved = await reserved_default_seats(team_id, exclude_email=email)
-    available_after_reservations = capacity.available - reserved
-
-    if available_after_reservations <= 0:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "require_overage_confirmation",
-                "message": (
-                    "ChatGPT 席位不足，需要确认超额添加: "
-                    f"active_chatgpt={capacity.active_chatgpt}/{capacity.seats_entitled}, "
-                    f"total_in_use={capacity.seats_in_use_total}, "
-                    f"codex={capacity.codex_count}, "
-                    f"pending_default={capacity.pending_default}, "
-                    f"reserved_default={reserved}"
-                ),
-                "capacity": {
-                    "seats_entitled": capacity.seats_entitled,
-                    "seats_in_use_total": capacity.seats_in_use_total,
-                    "codex_count": capacity.codex_count,
-                    "active_chatgpt": capacity.active_chatgpt,
-                    "pending_default": capacity.pending_default,
-                    "reserved_default": reserved,
-                    "available": max(0, available_after_reservations),
-                },
-            },
-        )
+    if seat_type == DEFAULT_SEAT_TYPE:
+        await reserve_default_seat(team_id, email)
+    else:
+        await reserve_seat(team_id, email, seat_type)
 
 
 @router.get("/members")
@@ -377,16 +386,18 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
     # 正式成员 409、待接受邀请按重发处理、拉不到名单失败关闭，见函数注释。
     pending_invite = await _pending_invite_or_refuse_member(team_id, client, req.email)
     resend = pending_invite is not None
-    seat_type = req.seat_type or "default"
-    # 同类席位的待接受邀请已经计入 pending_default、占着那个席位，重发不新增席位，
-    # 不该再让管理员确认超额。席位类型不同时上游怎么处理不确定，照常检查。
-    same_seat_resend = resend and (pending_invite.get("seat_type") or "default") == seat_type
-    if seat_type == "default" and not same_seat_resend:
-        await _ensure_default_seat_available(
+    seat_type = normalize_seat_type(req.seat_type)
+    # 同类席位的待接受邀请已经计入该类型的待接受数、占着那个席位，重发不新增席位，
+    # 不该再按超员策略拦。席位类型不同时上游怎么处理不确定，照常检查。
+    same_seat_resend = resend and normalize_seat_type(pending_invite.get("seat_type")) == seat_type
+    seat_check = None
+    if is_billed_seat_type(seat_type) and not same_seat_resend:
+        seat_check = await _ensure_default_seat_available(
             client,
             team_id,
             email=req.email,
             allow_overage=req.allow_overage,
+            seat_type=seat_type,
         )
 
     result = await run_chatgpt_call(client.invite_member, req.email, req.seat_type)
@@ -446,19 +457,19 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
         "invite_member",
         req.email,
         f"seat_type={req.seat_type}, expires_in={expires_in}, allow_overage={req.allow_overage}, "
-        f"resend={resend}, stored_expires_at={stored_detail}",
+        f"resend={resend}, stored_expires_at={stored_detail}{_seat_check_log_suffix(seat_check)}",
         "success",
     )
     snapshot = await _refresh_members_after_mutation(team_id, "invite", email=req.email)
-    if (req.seat_type or "default") == "default" and not _snapshot_contains_email(snapshot, req.email):
-        await reserve_default_seat(team_id, req.email)
+    if not _snapshot_contains_email(snapshot, req.email):
+        await _reserve_billed_seat(team_id, req.email, seat_type)
 
     await notify_member_event(
         "后台拉人",
         team_id,
         email=req.email,
         source="admin",
-        detail=f"{'重发待接受的邀请, ' if resend else ''}seat_type={req.seat_type}, 有效期：{expiry_display}",
+        detail=f"{'重发待接受的邀请, ' if resend else ''}席位：{seat_type_label(seat_type)}, 有效期：{expiry_display}",
     )
 
     return {
@@ -502,26 +513,135 @@ async def remove_member(team_id: str, user_id: str):
     return {"status": "ok"}
 
 
+_SEAT_MEMBER_BUSY_DETAIL = "该成员的状态正在变更（邀请、续期、到期处理或巡逻进行中），未切换席位，请稍后重试"
+_SEAT_LOOKUP_FAILED_DETAIL = "无法确认该成员当前的席位（成员列表拉取失败），未切换席位，请稍后重试"
+
+
+def _member_user_id(member: dict) -> str:
+    return (member.get("id") or member.get("user_id") or "").strip()
+
+
+async def _live_member_or_refuse(team_id: str, client, user_id: str) -> dict:
+    """现拉名单里 ``user_id`` 对应的那一个成员。拉不到 502（失败关闭），不在 404。"""
+    try:
+        snapshot = await fetch_and_cache_members(team_id, client)
+    except Exception as exc:
+        if is_auth_error(exc) and await is_team_auth_rejected(team_id):
+            raise team_auth_rejected_error() from exc
+        await log_operation(
+            team_id, "change_seat", None, f"user_id={user_id}, pre_switch_lookup", "failed", str(exc)
+        )
+        raise HTTPException(status_code=502, detail=_SEAT_LOOKUP_FAILED_DETAIL) from exc
+    matches = [m for m in (snapshot or {}).get("members", []) if _member_user_id(m) == user_id]
+    if len(matches) != 1:
+        raise HTTPException(status_code=404, detail="该成员已不在此 Team，请刷新后重试")
+    return matches[0]
+
+
 @router.patch("/members/{user_id}/seat")
 async def change_seat(team_id: str, user_id: str, req: ChangeSeatRequest):
-    client = await get_team_client(team_id)
-    target_email = await _cached_email_for_user(team_id, user_id)
-    result = await run_chatgpt_call(client.change_seat_type, user_id, req.seat_type)
+    """切换成员的席位类型。切到计费类型（ChatGPT / Premium）按超员策略把关，切到 Codex 不查。
+
+    和邀请共用 team_invite_lock，再占住这个成员（与邀请、续期、巡逻同一份占用），
+    然后现拉名单拿他当前的席位：不认识的类型一律不动；与目标相同直接返回。
+    上游 change_seat_type 是唯一的写操作，只在检查通过之后发。
+    """
+    user_id = (user_id or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="成员 ID 缺失")
+    target = normalize_seat_type(req.seat_type)
+
+    async with team_invite_lock(team_id):
+        client = await get_team_client(team_id)
+        # 占用按邮箱区分（邀请、续期、巡逻都按邮箱占），先从缓存拿邮箱，缓存里没有再现拉一次。
+        email = await _cached_email_for_user(team_id, user_id)
+        if not email:
+            member = await _live_member_or_refuse(team_id, client, user_id)
+            email = (member.get("email") or "").strip().lower()
+
+        async with member_operation_claim(
+            team_id,
+            email=email,
+            user_id=user_id,
+            operation="admin_change_seat",
+        ) as acquired:
+            if not acquired:
+                await log_operation(
+                    team_id,
+                    "change_seat",
+                    email or None,
+                    f"user_id={user_id}, seat_type={target}, member operation in progress",
+                    "skipped",
+                    _SEAT_MEMBER_BUSY_DETAIL,
+                )
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=_SEAT_MEMBER_BUSY_DETAIL)
+            return await _change_seat_claimed(team_id, user_id, email, target, req, client)
+
+
+async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: str, req: ChangeSeatRequest, client):
+    """``change_seat`` 在 team_invite_lock 与成员操作占用之内的部分。"""
+    member = await _live_member_or_refuse(team_id, client, user_id)
+    live_email = (member.get("email") or "").strip().lower()
+    if email and live_email and live_email != email:
+        raise HTTPException(status_code=409, detail="成员信息已变化，请刷新后重试")
+    email = live_email or email
+    current = normalize_seat_type(member.get("seat_type"))
+    base_detail = f"user_id={user_id}, seat_type={target}, from_seat_type={current}, allow_overage={req.allow_overage}"
+
+    if not is_known_seat_type(current):
+        message = f"该成员当前是 {seat_type_label(current)} 席位，TeamBoss 不认识这个类型，不会改动它。"
+        await log_operation(team_id, "change_seat", email or None, base_detail, "skipped", message)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "seat_type_unknown", "message": message, "seat_type": current},
+        )
+    if current == target:
+        return {"status": "ok", "result": None, "unchanged": True}
+
+    seat_check = None
+    if is_billed_seat_type(target):
+        seat_check = await _ensure_default_seat_available(
+            client,
+            team_id,
+            email=email,
+            allow_overage=req.allow_overage,
+            seat_type=target,
+            operation=OPERATION_SEAT_SWITCH,
+            log_action="change_seat",
+        )
+    elif target != CODEX_SEAT_TYPE:
+        # 请求模型只收注册表里的类型，走不到这里；万一走到，不认识的类型一律不动。
+        raise HTTPException(status_code=422, detail=f"不支持的席位类型：{seat_type_label(target)}")
+    # 切到 Codex 会空出一个计费席位，不会加购，不查。
+
+    result = await run_chatgpt_call(client.change_seat_type, user_id, target)
+    policy_detail = f", policy={seat_check.policy}" if isinstance(seat_check, SeatCheck) else ""
 
     error = _chatgpt_error(result)
     if error:
         await log_operation(
             team_id,
             "change_seat",
-            target_email,
-            f"user_id={user_id}, seat_type={req.seat_type}",
+            email or None,
+            f"{base_detail}{policy_detail}",
             "failed",
             error,
         )
         raise HTTPException(status_code=502, detail=error)
 
-    await log_operation(team_id, "change_seat", target_email, f"user_id={user_id}, seat_type={req.seat_type}", "success")
-    await _refresh_members_after_mutation(team_id, "")
+    await log_operation(
+        team_id,
+        "change_seat",
+        email or None,
+        f"{base_detail}{_seat_check_log_suffix(seat_check)}",
+        "success",
+    )
+    snapshot = await _refresh_members_after_mutation(team_id, "")
+    refreshed = [
+        m for m in (snapshot or {}).get("members", []) if _member_user_id(m) == user_id
+    ]
+    if not (refreshed and normalize_seat_type(refreshed[0].get("seat_type")) == target):
+        await _reserve_billed_seat(team_id, email, target)
 
     return {"status": "ok", "result": result}
 
