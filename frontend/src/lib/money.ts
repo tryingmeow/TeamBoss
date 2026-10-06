@@ -28,3 +28,22 @@ export function formatMoney(value: number | string | null | undefined, unit: str
   if (/^[A-Za-z]{3}$/.test(symbol)) return `${sign}${body} ${symbol.toUpperCase()}`;
   return `${sign}${symbol}${body}`;
 }
+
+/** Currency codes compare case-insensitively; a missing code never matches. */
+export function sameCurrency(a: string | null | undefined, b: string | null | undefined): boolean {
+  return Boolean(a && b && a.trim().toUpperCase() === b.trim().toUpperCase());
+}
+
+/**
+ * A Team's own unit for an amount in `currency`: its symbol when the amount is in its billing
+ * currency ("$30 × 25 席", "$675"), else the code. Converted amounts use the base currency code
+ * ("≈ 233.33 USD"), like the totals and the trend chart.
+ */
+export function teamUnit(
+  team: { billing_currency?: string | null; billing_symbol?: string | null } | undefined,
+  currency: string | null | undefined,
+): string {
+  const symbol = team?.billing_symbol?.trim();
+  if (symbol && (!currency || sameCurrency(currency, team?.billing_currency))) return symbol;
+  return currency || team?.billing_currency || '';
+}

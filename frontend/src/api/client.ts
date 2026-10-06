@@ -1056,9 +1056,52 @@ export async function getFinanceTrends(days: number = 90): Promise<FinanceTrends
   return request<FinanceTrends>(`/api/finance/trends?days=${days}`);
 }
 
-export async function getFinanceInvoices(teamId: string): Promise<{ team_id: string; invoices: FinanceInvoiceRow[] }> {
-  return request<{ team_id: string; invoices: FinanceInvoiceRow[] }>(
-    `/api/finance/invoices/${encodeURIComponent(teamId)}`,
+/** Paid amounts kept per currency; `base` is their sum in the base currency, null when any can't be converted. */
+export interface FinancePaidAmounts {
+  amounts: Array<{ currency: string; amount: number }>;
+  base: number | null;
+}
+
+/** Spend over all of a Team's synced invoices. Only `status: paid` amounts are summed. */
+export interface FinanceInvoiceSummary {
+  base_currency: string;
+  invoice_count: number;
+  paid_count: number;
+  paid_total: FinancePaidAmounts;
+  paid_last_30_days: FinancePaidAmounts;
+  /** Newest invoice that is not void/draft; paid → amount paid, otherwise amount due. */
+  latest_invoice: {
+    invoice_id: string;
+    status: string | null;
+    currency: string | null;
+    display_amount: number | null;
+    display_amount_base: number | null;
+    period_start: string | null;
+    period_end: string | null;
+    hosted_invoice_url: string | null;
+  } | null;
+}
+
+export interface FinanceInvoicesResponse {
+  team_id: string;
+  invoices: FinanceInvoiceRow[];
+  summary: FinanceInvoiceSummary;
+}
+
+/**
+ * The newest `limit` invoices (default 6) plus a spend summary over all of them.
+ * `refresh: false` reads only what is synced: no upstream fetch when the Team has no invoices yet.
+ */
+export async function getFinanceInvoices(
+  teamId: string,
+  options: { limit?: number; refresh?: boolean } = {},
+): Promise<FinanceInvoicesResponse> {
+  const search = new URLSearchParams();
+  if (options.limit !== undefined) search.set('limit', String(options.limit));
+  if (options.refresh === false) search.set('refresh', 'false');
+  const query = search.toString();
+  return request<FinanceInvoicesResponse>(
+    `/api/finance/invoices/${encodeURIComponent(teamId)}${query ? `?${query}` : ''}`,
   );
 }
 

@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect, type FormEvent, type ReactNode } from 'react';
-import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check, Gem, Ban } from 'lucide-react';
+import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check, Gem, Ban, Receipt } from 'lucide-react';
 import type { MembersData, SeatType, ShowToast, Team, TeamWorkspaceSettings } from '../types';
 import MemberPanel from './MemberPanel';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import AddMemberDialog from './AddMemberDialog';
 import TeamSettingsDialog from './TeamSettingsDialog';
+import TeamBillingDialog from './TeamBillingDialog';
 import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
 import { billedSeatSummary, premiumSeatUsage, teamPendingCounts } from '../lib/seatCapacity';
@@ -227,6 +228,7 @@ export default function TeamCard({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [billingOpen, setBillingOpen] = useState(false);
   const [defaultSeatInfoOpen, setDefaultSeatInfoOpen] = useState(false);
   const [remarkOpen, setRemarkOpen] = useState(false);
   const [remarkDraft, setRemarkDraft] = useState(team.remark ?? '');
@@ -833,6 +835,18 @@ export default function TeamCard({
                 ) : (
                   <span className="font-normal text-gray-400 dark:text-ink-500">未绑定</span>
                 )}
+                {/* 没有付款卡时，只有已经同步到账单才放入口。 */}
+                {(team.card_last4 || (team.invoice_count ?? 0) > 0) && (
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setBillingOpen(true); }}
+                    aria-label="查看账单"
+                    title="查看账单"
+                    className="-my-0.5 shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-200"
+                  >
+                    <Receipt size={14} />
+                  </button>
+                )}
               </dd>
             </div>
           </dl>
@@ -963,6 +977,8 @@ export default function TeamCard({
           {remarkError && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{remarkError}</p>}
         </form>
       </DialogFrame>
+
+      <TeamBillingDialog open={billingOpen} onOpenChange={setBillingOpen} team={team} />
 
       <AddMemberDialog
         open={addMemberOpen}

@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from ..database import get_db, log_operation
@@ -404,17 +404,116 @@ async def get_overview():
 
 _TEAM_INVOICES_SQL = """
     SELECT invoice_id, number, status, currency, amount_due, amount_paid,
-           period_start, period_end, description, hosted_invoice_url
+           period_start, period_end, description, hosted_invoice_url, created_at
     FROM invoices
     WHERE team_id = ?
     ORDER BY COALESCE(period_end, created_at) DESC, created_at DESC
-    LIMIT 6
 """
+
+_INVOICE_PUBLIC_FIELDS = (
+    "invoice_id", "number", "status", "currency", "amount_due", "amount_paid",
+    "period_start", "period_end", "description", "hosted_invoice_url",
+)
+
+# 「近 30 天实付」的窗口。
+RECENT_PAID_DAYS = 30
+
+
+def _invoice_charged_at(row: dict) -> Optional[datetime]:
+    """发票出单时间（Stripe created）；老数据没有就用账期开始。"""
+    for key in ("created_at", "period_start"):
+        value = row.get(key)
+        if not value:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _paid_amounts(totals: dict[str, float], base_currency: str, rates: dict) -> dict:
+    """{币种: 金额} → 原币列表 + 基准币合计（有任一币种换算不了就是 None）。"""
+    amounts = [
+        {"currency": currency, "amount": round(amount, 2)}
+        for currency, amount in sorted(totals.items())
+    ]
+    converted = [convert(amount, currency, base_currency, rates) for currency, amount in totals.items()]
+    base = (
+        round(sum(converted), 2)
+        if converted and all(value is not None for value in converted)
+        else None
+    )
+    return {"amounts": amounts, "base": base}
+
+
+def team_invoice_summary(
+    rows: list[dict], base_currency: str, rates: dict, *, now: Optional[datetime] = None
+) -> dict:
+    """一个 Team 全部发票（新的在前）的花费汇总。只把已支付（status=paid）的实付金额加进合计；
+    作废、草稿、未支付的发票照常列出，但不计入。金额按原币种分开加，基准币只是换算展示。"""
+    current = now or datetime.now(timezone.utc)
+    recent_since = current - timedelta(days=RECENT_PAID_DAYS)
+    paid_total: dict[str, float] = {}
+    paid_recent: dict[str, float] = {}
+    paid_count = 0
+    for row in rows:
+        currency = (row.get("currency") or "").upper()
+        amount = row.get("amount_paid")
+        if (row.get("status") or "").lower() != "paid" or not currency or amount is None:
+            continue
+        paid_count += 1
+        paid_total[currency] = paid_total.get(currency, 0.0) + float(amount)
+        charged_at = _invoice_charged_at(row)
+        if charged_at is not None and charged_at >= recent_since:
+            paid_recent[currency] = paid_recent.get(currency, 0.0) + float(amount)
+
+    # 最新一期：和财务总览「上期实付」同一个口径（void / draft 不算），金额已支付用实付、否则用应付。
+    latest = None
+    latest_row = next(
+        (row for row in rows if (row.get("status") or "").lower() not in ("void", "draft")),
+        None,
+    )
+    if latest_row is not None:
+        _, display_amount, _ = classify_latest_invoice(latest_row, None, "")
+        currency = (latest_row.get("currency") or "").upper()
+        latest = {
+            "invoice_id": latest_row.get("invoice_id"),
+            "status": latest_row.get("status"),
+            "currency": currency or None,
+            "display_amount": display_amount,
+            "display_amount_base": (
+                convert(display_amount, currency, base_currency, rates)
+                if display_amount is not None and currency
+                else None
+            ),
+            "period_start": latest_row.get("period_start"),
+            "period_end": latest_row.get("period_end"),
+            "hosted_invoice_url": latest_row.get("hosted_invoice_url"),
+        }
+
+    return {
+        "base_currency": base_currency,
+        "invoice_count": len(rows),
+        "paid_count": paid_count,
+        "paid_total": _paid_amounts(paid_total, base_currency, rates),
+        "paid_last_30_days": _paid_amounts(paid_recent, base_currency, rates),
+        "latest_invoice": latest,
+    }
 
 
 @router.get("/invoices/{team_id}")
-async def get_team_invoices(team_id: str):
-    """最近 6 期发票，给明细行展开的对账子表用。金额保持原币种。"""
+async def get_team_invoices(
+    team_id: str,
+    limit: int = Query(6, ge=1, le=100),
+    refresh: bool = Query(True),
+):
+    """最近 ``limit`` 期发票（默认 6 期，财务页明细行展开的对账子表用），金额保持原币种；
+    ``summary`` 按这个 Team 的全部发票汇总花费（Team 卡片的账单弹窗用）。
+
+    ``refresh=false``：库里没有发票时也不去上游现拉，只读本地已同步的数据。
+    """
     async with get_db() as db:
         cursor = await db.execute("SELECT id FROM teams WHERE id = ?", (team_id,))
         team = await cursor.fetchone()
@@ -423,7 +522,7 @@ async def get_team_invoices(team_id: str):
         cursor = await db.execute(_TEAM_INVOICES_SQL, (team_id,))
         rows = await cursor.fetchall()
 
-    if not rows:
+    if not rows and refresh:
         # 库里一条都没有就现场拉一次。这是用户主动触发的入口，force=True 绕过
         # 24 小时节流：定时轮次会因为上一次失败而退避，用户点开的时候必须还能
         # 立刻重试。失败不报错，照常返回空列表，界面显示「暂无账单数据」。
@@ -435,7 +534,15 @@ async def get_team_invoices(team_id: str):
             cursor = await db.execute(_TEAM_INVOICES_SQL, (team_id,))
             rows = await cursor.fetchall()
 
-    return {"team_id": team_id, "invoices": [dict(row) for row in rows]}
+    all_rows = [dict(row) for row in rows]
+    fx_config = await get_fx_config()
+    return {
+        "team_id": team_id,
+        "invoices": [
+            {key: row.get(key) for key in _INVOICE_PUBLIC_FIELDS} for row in all_rows[:limit]
+        ],
+        "summary": team_invoice_summary(all_rows, fx_config["base_currency"], fx_config["rates"]),
+    }
 
 
 @router.get("/trends")

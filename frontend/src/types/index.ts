@@ -56,6 +56,8 @@ export interface Team {
   pending_invite_counts?: Record<string, number>;
   /** 只在续费前 3 天内、计费席位还有空闲时才有；其余情况（含数据不全）为 null。 */
   renewal_idle_seats?: RenewalIdleSeats | null;
+  /** 本地已同步的发票条数。没有付款卡时，有发票才放「查看账单」入口。 */
+  invoice_count?: number;
 }
 
 /** 注册表里的席位类型（正本：lib/seatType.ts 与后端 app/seat_types.py）。 */

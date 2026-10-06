@@ -63,7 +63,8 @@ export const financeRoutes: DemoRoute[] = [
     pattern: '/api/finance/invoices/:teamId',
     handler: (ctx) => {
       const record = findTeam(ctx.db, ctx.params.teamId);
-      return record ? ok(invoicesFor(record)) : fail(404, 'Team not found');
+      const limit = Number(ctx.query.get('limit') ?? 6);
+      return record ? ok(invoicesFor(ctx.db, record, Number.isFinite(limit) ? limit : 6)) : fail(404, 'Team not found');
     },
   },
   { method: 'PATCH', pattern: '/api/finance/settings', handler: patchFinanceSettings },

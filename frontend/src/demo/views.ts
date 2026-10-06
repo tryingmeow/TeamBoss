@@ -7,7 +7,10 @@ import type { Member, MembersData, PendingInvite, RenewalIdleSeatLine, RenewalId
 import type {
   FinanceAlert,
   FinanceDailyTotal,
+  FinanceInvoiceSummary,
+  FinanceInvoicesResponse,
   FinanceLatestInvoice,
+  FinancePaidAmounts,
   FinanceOverview,
   FinanceTeamItem,
   FinanceTimelineItem,
@@ -84,6 +87,7 @@ export function teamView(record: DemoTeam, sortedEmails = false): Team {
     seat_type_counts: { ...record.team.seat_type_counts },
     pending_invite_counts: pendingInviteCounts(record),
     renewal_idle_seats: renewalIdleSeats(record),
+    invoice_count: record.invoices.length,
   };
   team.cached_member_emails = sortedEmails ? [...record.team.cached_member_emails].sort() : [...record.team.cached_member_emails];
   return team;
@@ -827,6 +831,58 @@ export function financeTrends(db: DemoDb, daysParam: number): FinanceTrends {
   return { days, base_currency: base, rows, daily_total_base: daily };
 }
 
-export function invoicesFor(record: DemoTeam) {
-  return { team_id: record.team.id, invoices: record.invoices.map((row) => ({ ...row })) };
+function paidAmounts(totals: Map<string, number>, base: string): FinancePaidAmounts {
+  const amounts = [...totals.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([currency, amount]) => ({ currency, amount: round2(amount) }));
+  const converted = amounts.map((item) => convert(item.amount, item.currency, base));
+  const known = converted.length > 0 && converted.every((value) => value !== null);
+  return { amounts, base: known ? round2(converted.reduce<number>((sum, value) => sum + (value ?? 0), 0)) : null };
+}
+
+/**
+ * Mirrors backend routes/finance.team_invoice_summary: only `paid` invoices are summed, per currency;
+ * the demo rows carry no created_at, so the period start stands in for the charge date.
+ */
+function invoiceSummary(record: DemoTeam, base: string): FinanceInvoiceSummary {
+  const recentSince = Date.now() - 30 * DAY;
+  const total = new Map<string, number>();
+  const recent = new Map<string, number>();
+  let paidCount = 0;
+  record.invoices.forEach((row) => {
+    const currency = (row.currency || '').toUpperCase();
+    if ((row.status || '').toLowerCase() !== 'paid' || !currency || row.amount_paid === null) return;
+    paidCount += 1;
+    total.set(currency, (total.get(currency) ?? 0) + row.amount_paid);
+    const chargedAt = row.period_start ? Date.parse(row.period_start) : NaN;
+    if (!Number.isNaN(chargedAt) && chargedAt >= recentSince) {
+      recent.set(currency, (recent.get(currency) ?? 0) + row.amount_paid);
+    }
+  });
+  const latest = latestInvoice(record, base);
+  return {
+    base_currency: base,
+    invoice_count: record.invoices.length,
+    paid_count: paidCount,
+    paid_total: paidAmounts(total, base),
+    paid_last_30_days: paidAmounts(recent, base),
+    latest_invoice: latest && {
+      invoice_id: latest.invoice_id,
+      status: latest.status,
+      currency: latest.currency,
+      display_amount: latest.display_amount,
+      display_amount_base: latest.display_amount_base,
+      period_start: latest.period_start,
+      period_end: latest.period_end,
+      hosted_invoice_url: latest.hosted_invoice_url,
+    },
+  };
+}
+
+export function invoicesFor(db: DemoDb, record: DemoTeam, limit = 6): FinanceInvoicesResponse {
+  return {
+    team_id: record.team.id,
+    invoices: record.invoices.slice(0, Math.max(1, Math.min(100, limit))).map((row) => ({ ...row })),
+    summary: invoiceSummary(record, db.finance.base_currency),
+  };
 }

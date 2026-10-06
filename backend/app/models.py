@@ -72,6 +72,8 @@ class TeamResponse(BaseModel):
     # 续费前 3 天内、计费席位还有没人用的：每个计费类型的明细（services/renewal_reminders.py）。
     # 其余情况（不在窗口、没有空闲、数据不全）都是 None。
     renewal_idle_seats: Optional["RenewalIdleSeatsResponse"] = None
+    # 本地已同步的发票条数（Team 卡片据此决定没有付款卡时要不要放「查看账单」入口）。
+    invoice_count: int = 0
 
 
 class RenewalIdleSeatLine(BaseModel):

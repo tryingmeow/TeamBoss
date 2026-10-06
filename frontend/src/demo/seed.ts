@@ -134,11 +134,12 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // Sync failing for 3 days, scheduler suspended it → "同步已暂停". Expired member not yet removed.
+    // No card on file but invoices synced → 付款卡 「未绑定」 still offers 查看账单.
     n: 8, slug: 'lyra', name: 'Lyra', remark: null, status: 'active',
     entitled: 5, gptMembers: 5, codexMembers: 0, invites: [],
     codexEnabled: false, defaultSeat: 'default',
     currency: 'USD', symbol: '$', period: 'monthly', price: 30,
-    balance: '0', card: { brand: 'visa', last4: '0000' },
+    balance: '0', card: null,
     renewsInDays: 14, periodDays: 30, willRenew: true, proxyId: null, createdDaysAgo: 210,
     sync: { failingSinceHoursAgo: 74, suspendedHoursAgo: 50, partialFailures: ['subscription', 'balance'] },
     invoice: 'match', forcedExpiries: [-(1 * DAY + 4 * HOUR)],

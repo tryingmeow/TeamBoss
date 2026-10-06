@@ -1,4 +1,5 @@
-import { Fragment, useState, useEffect, useMemo, type FormEvent, type ReactNode } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef, type FormEvent, type ReactNode } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   fetchTeams,
   getFinanceOverview,
@@ -19,7 +20,6 @@ import {
   ChevronDown,
   Clock,
   CreditCard,
-  ExternalLink,
   KeyRound,
   Loader2,
   Mail,
@@ -33,11 +33,12 @@ import {
 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
-import { differenceInCalendarDays, format, parseISO } from 'date-fns';
+import { differenceInCalendarDays, parseISO } from 'date-fns';
 import { formatDateSafe, formatBeijingDateTime } from '../../lib/formatDate';
-import { formatAmount, formatMoney } from '../../lib/money';
+import { formatMoney, sameCurrency, teamUnit } from '../../lib/money';
 import { cn } from '../../lib/utils';
 import CostTrendChart from '../../components/CostTrendChart';
+import { InvoiceSubTable } from '../../components/InvoiceTable';
 import PageShell from '../../components/PageShell';
 import SegmentedTabs from '../../components/SegmentedTabs';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
@@ -136,13 +137,6 @@ const SUBSCRIPTION_STATUS: Record<FinanceTeamItem['subscription_status'], { labe
   stale: { label: '数据未同步', tone: TONE.neutral },
 };
 
-const INVOICE_STATUS_LABEL: Record<string, string> = {
-  paid: '已支付',
-  void: '已作废',
-  draft: '草稿',
-  uncollectible: '无法收款',
-};
-
 function formatCardBrand(brand: string | null | undefined) {
   return brand?.trim() ? brand.trim().toUpperCase() : 'UNKNOWN';
 }
@@ -151,24 +145,6 @@ function formatCardBrand(brand: string | null | undefined) {
 function cardLabel(item: Pick<FinanceCardLike, 'card_brand' | 'card_last4'>) {
   const brand = item.card_brand?.trim().toUpperCase();
   return `${brand ? `${brand} ` : ''}•••• ${item.card_last4 || ''}`.trim();
-}
-
-function sameCurrency(a: string | null | undefined, b: string | null | undefined) {
-  return Boolean(a && b && a.trim().toUpperCase() === b.trim().toUpperCase());
-}
-
-/**
- * A Team's own unit for an amount in `currency`: its symbol when the amount is in its billing
- * currency ("$30 × 25 席", "$675"), else the code. Converted amounts use the base currency code
- * ("≈ 233.33 USD"), like the totals and the trend chart.
- */
-function teamUnit(
-  team: Pick<FinanceTeamItem, 'billing_currency' | 'billing_symbol'> | undefined,
-  currency: string | null | undefined,
-): string {
-  const symbol = team?.billing_symbol?.trim();
-  if (symbol && (!currency || sameCurrency(currency, team?.billing_currency))) return symbol;
-  return currency || team?.billing_currency || '';
 }
 
 function compareTimelineItems(a: FinanceTimelineItem, b: FinanceTimelineItem) {
@@ -310,93 +286,6 @@ function LatestInvoiceCell({
         )
       )}
     </div>
-  );
-}
-
-function invoiceStatusCell(status: string | null) {
-  if (status === 'open') return <span className={cn(PILL, TONE.warning)}>未支付</span>;
-  const label = (status && INVOICE_STATUS_LABEL[status]) || status || '—';
-  return <span className="text-gray-500 dark:text-ink-400">{label}</span>;
-}
-
-function formatInvoicePeriod(row: FinanceInvoiceRow) {
-  if (!row.period_start && !row.period_end) return '—';
-  const fmt = (value: string | null) => (value ? format(parseISO(value), 'MM-dd') : '?');
-  return `${fmt(row.period_start)} ~ ${fmt(row.period_end)}`;
-}
-
-// 展开的对账子表：金额保持原币种，和 Stripe 发票页逐行核对用。
-function InvoiceSubTable({ state }: { state: FinanceInvoiceRow[] | 'loading' | 'error' | undefined }) {
-  if (state === undefined || state === 'loading') {
-    return (
-      <div className="flex items-center gap-2 py-1 text-xs text-gray-500 dark:text-ink-400">
-        <Loader2 className="size-3.5 animate-spin" />
-        加载账单…
-      </div>
-    );
-  }
-  if (state === 'error') {
-    return <div className="py-1 text-xs text-red-600 dark:text-red-400">账单加载失败</div>;
-  }
-  if (state.length === 0) {
-    return <div className="py-1 text-xs text-gray-500 dark:text-ink-400">这个 Team 还没有同步到账单</div>;
-  }
-
-  const headerCurrency = state[0].currency || '';
-  const unit = headerCurrency ? `（${headerCurrency.toUpperCase()}）` : '';
-  return (
-    <table className="w-full text-xs">
-      <thead className="text-gray-500 dark:text-ink-400">
-        <tr>
-          <th className="whitespace-nowrap py-1.5 pr-3 text-left font-medium">账期</th>
-          <th className="whitespace-nowrap py-1.5 pr-3 text-left font-medium">状态</th>
-          <th className="whitespace-nowrap py-1.5 pr-3 text-right font-medium">应付{unit}</th>
-          <th className="whitespace-nowrap py-1.5 pr-3 text-right font-medium">实付{unit}</th>
-          <th className="py-1.5 pr-3 text-left font-medium">说明</th>
-          <th className="py-1.5 text-right font-medium" />
-        </tr>
-      </thead>
-      <tbody className="divide-y divide-gray-200/70 dark:divide-ink-800">
-        {state.map(row => {
-          const amount = (value: number | null) => {
-            if (value === null) return '—';
-            return row.currency && row.currency !== headerCurrency ? formatMoney(value, row.currency) : formatAmount(value);
-          };
-          return (
-            <tr key={row.invoice_id} className={row.status === 'void' ? 'opacity-60' : ''}>
-              <td className="whitespace-nowrap py-1.5 pr-3 tabular-nums text-gray-700 dark:text-ink-300" title={row.number || undefined}>
-                {formatInvoicePeriod(row)}
-              </td>
-              <td className="whitespace-nowrap py-1.5 pr-3">{invoiceStatusCell(row.status)}</td>
-              <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums text-gray-700 dark:text-ink-300">
-                {amount(row.amount_due)}
-              </td>
-              <td className="whitespace-nowrap py-1.5 pr-3 text-right tabular-nums text-gray-700 dark:text-ink-300">
-                {amount(row.amount_paid)}
-              </td>
-              <td className="max-w-[18rem] truncate py-1.5 pr-3 text-gray-500 dark:text-ink-400" title={row.description || undefined}>
-                {row.description || '—'}
-              </td>
-              <td className="py-1.5 text-right">
-                {row.hosted_invoice_url && (
-                  <a
-                    href={row.hosted_invoice_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    onClick={event => event.stopPropagation()}
-                    className="inline-flex rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-200"
-                    title="在 Stripe 查看发票"
-                    aria-label="在 Stripe 查看发票"
-                  >
-                    <ExternalLink className="size-3.5" />
-                  </a>
-                )}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
   );
 }
 
@@ -733,6 +622,27 @@ export default function Finance() {
         .catch(() => setInvoicesByTeam(prev => ({ ...prev, [teamId]: 'error' })));
     }
   };
+
+  // ?team=<id>（Team 卡片账单弹窗的「在财务页查看」）：切到「Team 明细」、展开这个 Team 的账单并滚过去。只认一次。
+  const [searchParams] = useSearchParams();
+  const deepLinkTeamId = searchParams.get('team');
+  const deepLinkHandled = useRef(false);
+  const pendingScrollTeamId = useRef<string | null>(null);
+  useEffect(() => {
+    // handleToggleInvoices / expandedTeamId are read once, when the overview first arrives.
+    if (deepLinkHandled.current || !deepLinkTeamId || !overview) return;
+    deepLinkHandled.current = true;
+    if (!overview.teams.some(team => team.team_id === deepLinkTeamId)) return;
+    pendingScrollTeamId.current = deepLinkTeamId;
+    setActiveBillingTab('details');
+    if (expandedTeamId !== deepLinkTeamId) handleToggleInvoices(deepLinkTeamId);
+  }, [deepLinkTeamId, overview]);
+  useEffect(() => {
+    const target = pendingScrollTeamId.current;
+    if (!target || activeBillingTab !== 'details' || expandedTeamId !== target) return;
+    pendingScrollTeamId.current = null;
+    document.getElementById(`finance-team-${target}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [activeBillingTab, expandedTeamId]);
 
   // Calculate 30-day renewal count
   const renewalCountNext30 = overview
@@ -1141,6 +1051,7 @@ export default function Finance() {
                       return (
                         <Fragment key={team.team_id}>
                         <tr
+                          id={`finance-team-${team.team_id}`}
                           onClick={() => handleToggleInvoices(team.team_id)}
                           aria-expanded={expandedTeamId === team.team_id}
                           className={cn(

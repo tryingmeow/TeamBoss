@@ -92,15 +92,33 @@ def _read_pending_json(team_id):
     return row[0] if row else None
 
 
-_READ_PENDING_FROM_DB = object()
+def _read_invoice_count(team_id) -> int:
+    """单个 Team 本地已同步的发票条数（只读本地库）。列表接口走批量查询，不经过这里。"""
+    try:
+        conn = sqlite3.connect(get_db_path())
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM invoices WHERE team_id = ?", (team_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+    return int(row[0] or 0) if row else 0
 
 
-def _team_row_to_response(row, pending_json=_READ_PENDING_FROM_DB) -> dict:
+_READ_FROM_DB = object()
+
+
+def _team_row_to_response(row, pending_json=_READ_FROM_DB, invoice_count=_READ_FROM_DB) -> dict:
     """``pending_json`` = 这个 Team 的 member_cache.pending_json 原值，没有缓存行传 None；
-    不传就现读一次。"""
+    ``invoice_count`` = 本地发票条数。不传的就现读一次。"""
     d = dict(row)
-    if pending_json is _READ_PENDING_FROM_DB:
+    if pending_json is _READ_FROM_DB:
         pending_json = _read_pending_json(d.get("id"))
+    d["invoice_count"] = (
+        _read_invoice_count(d.get("id")) if invoice_count is _READ_FROM_DB else invoice_count
+    )
     d["pending_invite_counts"] = pending_invite_counts_from_json(pending_json)
     idle_seats = renewal_idle_seats(d, pending_json)
     d["renewal_idle_seats"] = idle_seats.as_dict() if idle_seats is not None else None
@@ -201,9 +219,13 @@ async def list_teams():
             pass
         email_cache[c["team_id"]] = list(emails)
 
+    async with get_db() as db:
+        cursor = await db.execute("SELECT team_id, COUNT(*) AS n FROM invoices GROUP BY team_id")
+        invoice_counts = {row["team_id"]: int(row["n"] or 0) for row in await cursor.fetchall()}
+
     result = []
     for r in rows:
-        team = _team_row_to_response(r, pending_raw.get(r["id"]))
+        team = _team_row_to_response(r, pending_raw.get(r["id"]), invoice_counts.get(r["id"], 0))
         team["cached_member_emails"] = email_cache.get(r["id"], [])
         result.append(team)
     return result
