@@ -94,7 +94,8 @@ export const SEAT_STYLE: Record<SeatType, SeatStyle> = {
   },
 };
 
-const UNKNOWN_SEAT_STYLE: SeatStyle = {
+/** Gray: seat types outside the registry. */
+export const UNKNOWN_SEAT_STYLE: SeatStyle = {
   pill: 'bg-gray-100 text-gray-600 ring-1 ring-inset ring-gray-500/20 dark:bg-ink-800 dark:text-ink-300 dark:ring-ink-600/50',
   surface: 'border border-gray-200 bg-gray-50 dark:border-ink-800 dark:bg-ink-850',
   text: 'text-gray-600 dark:text-ink-300',

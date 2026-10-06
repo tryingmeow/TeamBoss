@@ -15,7 +15,7 @@ import { AlertTriangle, Ban, Check, Copy, Loader2, Plus, RefreshCw, Ticket, X } 
 import PageShell from '../../components/PageShell';
 import PageLoading from '../../components/PageLoading';
 import Toast from '../../components/Toast';
-import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
+import { BUTTON, CARD, INPUT, PILL } from '../../components/ui';
 import { CODE_SEAT_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, seatStyle } from '../../lib/seatType';
 import type { CodeSeatType } from '../../types';
 import { cn } from '../../lib/utils';
@@ -45,12 +45,26 @@ function formatDate(dateStr: string | null): string {
 const STATUSES = ['未使用', '已使用', '已过期', '已停用'] as const;
 type TokenStatus = (typeof STATUSES)[number];
 
-const STATUS_TONE: Record<TokenStatus, string> = {
-  未使用: TONE.success,
-  已使用: TONE.info,
-  已过期: TONE.neutral,
-  已停用: TONE.neutral,
+/**
+ * Status is a dot + word, never a filled chip: the filled chip next to it is the code's seat
+ * type (ChatGPT blue / Premium pink), and the two must not look alike.
+ */
+const STATUS_DOT: Record<TokenStatus, string> = {
+  未使用: 'bg-emerald-500',
+  已使用: 'bg-gray-500 dark:bg-ink-400',
+  已过期: 'bg-amber-500',
+  已停用: 'bg-gray-300 dark:bg-ink-600',
 };
+
+function StatusLabel({ status, count }: { status: TokenStatus; count?: number }) {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-gray-700 dark:text-ink-200">
+      <span className={cn('size-2 rounded-full', STATUS_DOT[status])} aria-hidden />
+      {status}
+      {count !== undefined && <span className="tabular-nums text-gray-500 dark:text-ink-400">{count}</span>}
+    </span>
+  );
+}
 
 function tokenStatus(token: AccessTokenListItem): TokenStatus {
   if (token.disabled) return '已停用';
@@ -353,9 +367,7 @@ export default function AccessTokens() {
           </h2>
           <div className="flex flex-wrap gap-1.5">
             {statusCounts.map(({ status, count }) => (
-              <span key={status} className={cn(PILL, STATUS_TONE[status])}>
-                {status} <span className="tabular-nums">{count}</span>
-              </span>
+              <StatusLabel key={status} status={status} count={count} />
             ))}
           </div>
         </div>
@@ -371,7 +383,7 @@ export default function AccessTokens() {
                       {token.token_prefix}…
                     </code>
                     <SeatPill seatType={token.seat_type} />
-                    <span className={cn(PILL, STATUS_TONE[status])}>{status}</span>
+                    <StatusLabel status={status} />
                   </div>
                   {disableButton(token)}
                 </div>
@@ -430,7 +442,7 @@ export default function AccessTokens() {
                       {durationLabel(token.grant_expires_in)}
                     </td>
                     <td className="px-4 py-2.5">
-                      <span className={cn(PILL, STATUS_TONE[status])}>{status}</span>
+                      <StatusLabel status={status} />
                     </td>
                     <td className="max-w-[16rem] px-4 py-2.5 text-gray-700 dark:text-ink-200">
                       {token.note ? (

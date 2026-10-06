@@ -41,6 +41,7 @@ import SystemLogs from './SystemLogs';
 import {
   SEAT_STYLE,
   SEAT_TYPE_OPTIONS,
+  UNKNOWN_SEAT_STYLE,
   formatSeatTypeLabel,
   parseSeatType,
   seatStyle,
@@ -108,7 +109,8 @@ interface AdminMemberRow {
 
 type SortOrder = 'asc' | 'desc';
 type MemberStatus = 'joined' | 'pending' | 'kicked';
-type SeatFilter = 'all' | SeatType;
+/** `other` = seat types outside the registry (其他（raw）). */
+type SeatFilter = 'all' | SeatType | 'other';
 type ToastType = 'success' | 'error';
 type ShowToast = (text: string, type?: ToastType) => void;
 /** `row` = desktop table cell, `card` = stacked phone/tablet card with larger touch targets. */
@@ -132,7 +134,7 @@ const DEFAULT_MEMBER_STATUS_FILTERS = new Set<MemberStatus>(['joined', 'pending'
 
 const JOIN_SOURCE: Record<string, { label: string; tone: string }> = {
   system: { label: '系统邀请', tone: TONE.neutral },
-  detected: { label: '手动拉入', tone: TONE.warning },
+  detected: { label: '外部加入', tone: TONE.warning },
   self_service: { label: '自助加入', tone: TONE.info },
 };
 
@@ -622,9 +624,10 @@ function SeatTypeCell({
   // 不认识的席位类型只显示：TeamBoss 不会切换它。
   const canEdit = editable && context && current !== null;
   return (
-    <div className="flex items-center gap-1">
-      <span className={cn(PILL, seatStyle(seatType).pill)}>
-        {formatSeatTypeLabel(seatType)}
+    <div className="flex min-w-0 items-center gap-1 pr-2">
+      {/* 窄列里放不下「其他（automation）」：截断并给完整名称，不压到旁边一列。 */}
+      <span className={cn(PILL, seatStyle(seatType).pill, 'min-w-0 max-w-full shrink')} title={formatSeatTypeLabel(seatType)}>
+        <span className="truncate">{formatSeatTypeLabel(seatType)}</span>
       </span>
       {canEdit && (
         <Popover.Root open={open} onOpenChange={setOpen}>
@@ -1251,7 +1254,8 @@ function MemberList({
         return (member.email || '').trim().toLowerCase() === focusEmail;
       }
       if (!statusFilters.has(member.status)) return false;
-      if (seatFilter !== 'all' && parseSeatType(member.seat_type) !== seatFilter) {
+      const memberSeat = parseSeatType(member.seat_type) ?? 'other';
+      if (seatFilter !== 'all' && memberSeat !== seatFilter) {
         return false;
       }
       return matchesSearch(member, search, ['email', 'name', 'team_name', 'owner_email', 'system_display_name']);
@@ -1601,6 +1605,7 @@ export default function UserManagement() {
         label,
         dotClass: SEAT_STYLE[value].solid,
       })),
+      { value: 'other', label: '其他', dotClass: UNKNOWN_SEAT_STYLE.solid },
     ],
     []
   );

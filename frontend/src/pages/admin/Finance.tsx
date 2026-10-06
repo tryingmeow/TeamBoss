@@ -1,5 +1,6 @@
 import { Fragment, useState, useEffect, useMemo, type FormEvent, type ReactNode } from 'react';
 import {
+  fetchTeams,
   getFinanceOverview,
   getFinanceInvoices,
   updateFinanceSettings,
@@ -42,15 +43,23 @@ import SegmentedTabs from '../../components/SegmentedTabs';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { SEAT_STYLE } from '../../lib/seatType';
 
-/** Premium seats have no upstream price; the backend estimates them. Always labelled 估算. */
+/**
+ * Premium seats have no upstream price; the backend estimates them in USD. Always labelled 估算.
+ * Written in the same unit as the row's ChatGPT fee: the Team's own symbol for a USD Team
+ * ("$375" next to "$240"), the base currency otherwise ("≈" only when actually converted).
+ */
 function premiumEstimateText(
-  team: { premium_monthly_estimate_base?: number | null; premium_monthly_estimate_usd?: number },
+  team: Pick<FinanceTeamItem, 'billing_currency' | 'premium_monthly_estimate_base' | 'premium_monthly_estimate_usd'>,
   baseCurrency: string,
+  teamSymbol: string,
 ): string {
+  const usd = team.premium_monthly_estimate_usd ?? 0;
+  if (sameCurrency(team.billing_currency, 'USD')) return formatMoney(usd, teamSymbol);
+  if (sameCurrency(baseCurrency, 'USD')) return formatMoney(usd, 'USD');
   if (typeof team.premium_monthly_estimate_base === 'number') {
     return `≈ ${formatMoney(team.premium_monthly_estimate_base, baseCurrency)}`;
   }
-  return formatMoney(team.premium_monthly_estimate_usd ?? 0, 'USD');
+  return formatMoney(usd, 'USD');
 }
 
 const BASE_CURRENCIES = ['USD', 'CNY', 'EUR', 'GBP', 'JPY', 'THB', 'SGD', 'HKD'];
@@ -638,9 +647,16 @@ export default function Finance() {
   const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null);
   const [exactTimeTeamId, setExactTimeTeamId] = useState<string | null>(null);
   const [invoicesByTeam, setInvoicesByTeam] = useState<Record<string, FinanceInvoiceRow[] | 'loading' | 'error'>>({});
+  // Premium 在用人数不在财务接口里：从 Team 列表的缓存计数取。拿不到时只显示已付。
+  const [premiumInUse, setPremiumInUse] = useState<Map<string, number> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    fetchTeams()
+      .then((teams) => {
+        if (!cancelled) setPremiumInUse(new Map(teams.map((team) => [team.id, Number(team.seat_type_counts?.prolite) || 0])));
+      })
+      .catch(() => {});
 
     setOverviewLoading(true);
     getFinanceOverview()
@@ -891,8 +907,10 @@ export default function Finance() {
             {(overview?.premium_monthly_estimate_base_total ?? 0) > 0 && (
               <p>
                 另加 <span className={cn('font-medium', SEAT_STYLE.prolite.text)}>Premium 估算</span>{' '}
-                <span className="whitespace-nowrap">≈ {formatMoney(overview?.premium_monthly_estimate_base_total, baseCurrency)}</span>
-                <span className="block text-[11px] text-gray-400 dark:text-ink-500">
+                <span className="whitespace-nowrap">
+                  {sameCurrency(baseCurrency, 'USD') ? '' : '≈ '}{formatMoney(overview?.premium_monthly_estimate_base_total, baseCurrency)}
+                </span>
+                <span className="block text-[11px]">
                   按每席 {formatMoney(overview?.premium_seat_price_estimate_usd ?? 125, '$')}/月估算，上游没有 Premium 单价
                 </span>
               </p>
@@ -1140,10 +1158,19 @@ export default function Finance() {
                               <span className="tabular-nums text-gray-400 dark:text-ink-500">/{chatgptBilled}</span>
                             </div>
                             {premiumPaid > 0 && (
-                              <div className="mt-0.5 whitespace-nowrap">
+                              <div className="mt-0.5 whitespace-nowrap" title="Premium 在用 / 已付">
                                 <span className={cn('text-xs font-medium', SEAT_STYLE.prolite.text)}>Premium </span>
-                                <span className="text-xs text-gray-500 dark:text-ink-400">已付 </span>
-                                <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{premiumPaid}</span>
+                                {premiumInUse?.has(team.team_id) ? (
+                                  <>
+                                    <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{premiumInUse.get(team.team_id)}</span>
+                                    <span className="tabular-nums text-gray-500 dark:text-ink-400">/{premiumPaid}</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="text-xs text-gray-500 dark:text-ink-400">已付 </span>
+                                    <span className="font-medium tabular-nums text-gray-900 dark:text-gray-100">{premiumPaid}</span>
+                                  </>
+                                )}
                               </div>
                             )}
                             <span className={cn(PILL, 'mt-1', team.is_codex_enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral)}>
@@ -1198,7 +1225,7 @@ export default function Finance() {
                             {premiumPaid > 0 && (
                               <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums">
                                 <span className={SEAT_STYLE.prolite.text}>+ Premium 估算</span>{' '}
-                                <span className="text-gray-700 dark:text-ink-200">{premiumEstimateText(team, overview.base_currency)}</span>
+                                <span className="text-gray-700 dark:text-ink-200">{premiumEstimateText(team, overview.base_currency, sym)}</span>
                               </div>
                             )}
                           </td>

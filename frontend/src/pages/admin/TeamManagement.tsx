@@ -353,7 +353,8 @@ export default function TeamManagement() {
                   <>
                     {(finance?.premium_monthly_estimate_base_total ?? 0) > 0 && (
                       <span className="block">
-                        另加 <span className={SEAT_STYLE.prolite.text}>Premium 估算</span> ≈ {formatMoney(finance?.premium_monthly_estimate_base_total, baseCurrency)}
+                        另加 <span className={SEAT_STYLE.prolite.text}>Premium 估算</span>{' '}
+                        {baseCurrency.toUpperCase() === 'USD' ? '' : '≈ '}{formatMoney(finance?.premium_monthly_estimate_base_total, baseCurrency)}
                       </span>
                     )}
                     {finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常 Team` : '只计入活跃且自动续费的 Team'}
