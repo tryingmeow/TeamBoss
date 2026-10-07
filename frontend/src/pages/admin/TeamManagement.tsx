@@ -48,11 +48,49 @@ interface ExpiringMember extends DashboardMember {
   daysUntil: number;
 }
 
+const STAT_TONES = {
+  emerald: {
+    iconBg: 'bg-emerald-50 text-emerald-600 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-400 dark:ring-emerald-400/20',
+    borderHover: 'hover:border-emerald-300 dark:hover:border-emerald-500/40',
+  },
+  blue: {
+    iconBg: 'bg-blue-50 text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-500/15 dark:text-blue-400 dark:ring-blue-400/20',
+    borderHover: 'hover:border-blue-300 dark:hover:border-blue-500/40',
+  },
+  purple: {
+    iconBg: 'bg-purple-50 text-purple-600 ring-1 ring-inset ring-purple-500/20 dark:bg-purple-500/15 dark:text-purple-400 dark:ring-purple-400/20',
+    borderHover: 'hover:border-purple-300 dark:hover:border-purple-500/40',
+  },
+  sky: {
+    iconBg: 'bg-sky-50 text-sky-600 ring-1 ring-inset ring-sky-500/20 dark:bg-sky-500/15 dark:text-sky-400 dark:ring-sky-400/20',
+    borderHover: 'hover:border-sky-300 dark:hover:border-sky-500/40',
+  },
+  indigo: {
+    iconBg: 'bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-500/20 dark:bg-indigo-500/15 dark:text-indigo-400 dark:ring-indigo-400/20',
+    borderHover: 'hover:border-indigo-300 dark:hover:border-indigo-500/40',
+  },
+  amber: {
+    iconBg: 'bg-amber-50 text-amber-600 ring-1 ring-inset ring-amber-500/20 dark:bg-amber-500/15 dark:text-amber-400 dark:ring-amber-400/20',
+    borderHover: 'hover:border-amber-300 dark:hover:border-amber-500/40',
+  },
+  rose: {
+    iconBg: 'bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-500/20 dark:bg-rose-500/15 dark:text-rose-400 dark:ring-rose-400/20',
+    borderHover: 'hover:border-rose-300 dark:hover:border-rose-500/40',
+  },
+  orange: {
+    iconBg: 'bg-orange-50 text-orange-600 ring-1 ring-inset ring-orange-500/20 dark:bg-orange-500/15 dark:text-orange-400 dark:ring-orange-400/20',
+    borderHover: 'hover:border-orange-300 dark:hover:border-orange-500/40',
+  },
+} as const;
+
+type StatToneKey = keyof typeof STAT_TONES;
+
 function StatCard({
   title,
   value,
   detail,
   icon: Icon,
+  toneKey = 'blue',
   seat,
   children,
 }: {
@@ -60,22 +98,35 @@ function StatCard({
   value: ReactNode;
   detail: ReactNode;
   icon: typeof Shield;
+  toneKey?: StatToneKey;
   /** Tiles about one seat type wear that seat's color (same as the Team cards). */
   seat?: SeatType;
   children?: ReactNode;
 }) {
-  const tone = seat ? SEAT_STYLE[seat] : null;
+  const resolvedToneKey: StatToneKey = seat
+    ? seat === 'default'
+      ? 'blue'
+      : seat === 'usage_based'
+        ? 'purple'
+        : 'rose'
+    : toneKey;
+  const tone = STAT_TONES[resolvedToneKey];
+
   return (
-    <div className={cn(CARD, 'flex min-w-0 flex-col p-4 sm:p-5', tone?.surface)}>
-      <div className="flex items-center justify-between gap-2">
-        <p className={cn('truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400', tone?.text)}>{title}</p>
-        <Icon className={cn('size-4 shrink-0 text-gray-400 dark:text-ink-500', tone?.text)} />
+    <div className={cn(CARD, 'group relative flex min-w-0 flex-col justify-between p-4 transition-all duration-200 hover:shadow-sm sm:p-5', tone.borderHover)}>
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{title}</p>
+          <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', tone.iconBg)}>
+            <Icon className="size-4 sm:size-4.5" />
+          </div>
+        </div>
+        <p className="mt-2.5 break-words text-xl font-bold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50">
+          {value}
+        </p>
+        {children}
       </div>
-      <p className={cn('mt-2 break-words text-lg font-semibold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50', tone?.text)}>
-        {value}
-      </p>
-      {children}
-      <p className="mt-1 text-xs leading-snug text-gray-500 dark:text-ink-400">{detail}</p>
+      <p className="mt-2 text-xs leading-snug text-gray-500 dark:text-ink-400">{detail}</p>
     </div>
   );
 }
@@ -121,20 +172,33 @@ function SectionHeader({
   count,
   description,
   to,
+  icon: Icon,
+  iconBg,
+  iconColor,
 }: {
   title: string;
   count: number;
   description: string;
   to: string;
+  icon?: typeof Shield;
+  iconBg?: string;
+  iconColor?: string;
 }) {
   return (
     <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-4 py-4 sm:px-5 dark:border-ink-800">
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">{title}</h2>
-          <span className={cn(PILL, TONE.neutral, 'tabular-nums')}>{count}</span>
+      <div className="flex items-start gap-3 min-w-0">
+        {Icon && (
+          <div className={cn('flex size-9 shrink-0 items-center justify-center rounded-lg mt-0.5', iconBg)}>
+            <Icon className={cn('size-4.5', iconColor)} />
+          </div>
+        )}
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-semibold text-gray-900 dark:text-gray-50">{title}</h2>
+            <span className={cn(PILL, TONE.neutral, 'tabular-nums')}>{count}</span>
+          </div>
+          <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">{description}</p>
         </div>
-        <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">{description}</p>
       </div>
       <Link
         to={to}
@@ -321,6 +385,7 @@ export default function TeamManagement() {
                 value={`${data.active_team} / ${data.total_team}`}
                 detail={`${data.total_team - data.active_team} 个非活跃 Team`}
                 icon={Server}
+                toneKey="emerald"
               />
               <StatCard
                 title="ChatGPT 席位"
@@ -345,6 +410,7 @@ export default function TeamManagement() {
                 value={data.free_team_count}
                 detail={`待接受邀请 ${data.pending_gpt_invites}`}
                 icon={Shield}
+                toneKey="sky"
               />
               <StatCard
                 title="月预计支出"
@@ -361,24 +427,28 @@ export default function TeamManagement() {
                   </>
                 )}
                 icon={Wallet}
+                toneKey="indigo"
               />
               <StatCard
                 title="闲置席位折算"
                 value={finance ? `约 ${formatMoney(idleCost, baseCurrency)}` : '—'}
                 detail={`${data.free_gpt_seats} 个空闲席位按月费分摊`}
                 icon={CreditCard}
+                toneKey="amber"
               />
               <StatCard
                 title="近期续费 Team"
                 value={upcomingRenewals.length}
                 detail={<>7 天内预计支出 <span className="whitespace-nowrap">{formatMoney(renewalAmountNext7, baseCurrency)}</span></>}
                 icon={CalendarClock}
+                toneKey="rose"
               />
               <StatCard
                 title="近期到期成员"
                 value={upcomingMembers.length}
                 detail={`${WINDOW_DAYS} 天内到期，含已过期`}
                 icon={UserRound}
+                toneKey="orange"
               />
             </div>
 
@@ -389,6 +459,9 @@ export default function TeamManagement() {
                   count={upcomingRenewals.length}
                   description={`${WINDOW_DAYS} 天内自动续费的 Team（含已过续费日），7 天内预计支出 ${formatMoney(renewalAmountNext7, baseCurrency)}`}
                   to="/admin/finance"
+                  icon={CalendarClock}
+                  iconBg={STAT_TONES.rose.iconBg}
+                  iconColor="text-rose-600 dark:text-rose-400"
                 />
                 <div className="max-h-[36rem] flex-1 divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
                   {upcomingRenewals.length === 0 ? (
@@ -445,6 +518,9 @@ export default function TeamManagement() {
                   count={upcomingMembers.length}
                   description={`${WINDOW_DAYS} 天内到期（含已过期）的成员，最近的在前`}
                   to="/admin/users"
+                  icon={UserRound}
+                  iconBg={STAT_TONES.orange.iconBg}
+                  iconColor="text-orange-600 dark:text-orange-400"
                 />
                 <div className="max-h-[36rem] flex-1 divide-y divide-gray-100 overflow-y-auto dark:divide-ink-800">
                   {upcomingMembers.length === 0 ? (
