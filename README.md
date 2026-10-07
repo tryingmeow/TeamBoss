@@ -75,7 +75,7 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
   <img alt="兑换码页面：兑换码列表，每行显示兑换码前缀、席位类型、授予时长、状态（未使用 / 已使用 / 已过期 / 已停用）、备注、兑换截止和兑换时间" src="docs/images/access-tokens.png">
 </picture>
 
-巡逻自动踢人：默认关闭，可以先「演练空跑」算一遍会踢几个人（具体名单记在操作日志里）；开启前会把当前成员一次性豁免。
+巡逻自动踢人：默认关闭，可以先「演练空跑」算一遍会踢谁（名单直接列在按钮下面）；开启前会把当前成员一次性豁免。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/patrol-dark.png">
