@@ -16,6 +16,7 @@ import {
 import {
   AlertTriangle,
   BadgePercent,
+  CalendarClock,
   Check,
   ChevronDown,
   Clock,
@@ -177,32 +178,69 @@ function timelineDaysBadgeClass(daysUntil: number) {
   return TONE.neutral;
 }
 
+const STAT_TONES = {
+  indigo: {
+    iconBg: 'bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-500/20 dark:bg-indigo-500/15 dark:text-indigo-400 dark:ring-indigo-400/20',
+    borderHover: 'hover:border-indigo-300 dark:hover:border-indigo-500/40',
+  },
+  emerald: {
+    iconBg: 'bg-emerald-50 text-emerald-600 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-400 dark:ring-emerald-400/20',
+    borderHover: 'hover:border-emerald-300 dark:hover:border-emerald-500/40',
+  },
+  rose: {
+    iconBg: 'bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-500/20 dark:bg-rose-500/15 dark:text-rose-400 dark:ring-rose-400/20',
+    borderHover: 'hover:border-rose-300 dark:hover:border-rose-500/40',
+  },
+  amber: {
+    iconBg: 'bg-amber-50 text-amber-600 ring-1 ring-inset ring-amber-500/20 dark:bg-amber-500/15 dark:text-amber-400 dark:ring-amber-400/20',
+    borderHover: 'hover:border-amber-300 dark:hover:border-amber-500/40',
+  },
+  red: {
+    iconBg: 'bg-red-50 text-red-600 ring-1 ring-inset ring-red-500/20 dark:bg-red-500/15 dark:text-red-400 dark:ring-red-400/20',
+    borderHover: 'hover:border-red-300 dark:hover:border-red-500/40',
+  },
+} as const;
+
+type StatToneKey = keyof typeof STAT_TONES;
+
 function StatCard({
   label,
   loading,
   value,
   valueClassName,
+  icon: Icon,
+  toneKey = 'indigo',
   children,
 }: {
   label: string;
   loading: boolean;
   value: ReactNode;
   valueClassName?: string;
+  icon?: LucideIcon;
+  toneKey?: StatToneKey;
   children?: ReactNode;
 }) {
+  const tone = STAT_TONES[toneKey];
   return (
-    <div className={cn(CARD, 'min-w-0 p-4 sm:p-5')}>
-      <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{label}</p>
-      {loading ? (
-        <div className="mt-2 h-8 animate-pulse rounded bg-gray-100 dark:bg-ink-800" />
-      ) : (
-        <>
-          <p className={cn('mt-2 break-words text-lg font-semibold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50', valueClassName)}>
+    <div className={cn(CARD, 'group relative flex min-w-0 flex-col justify-between p-4 transition-all duration-200 hover:shadow-sm sm:p-5', tone?.borderHover)}>
+      <div>
+        <div className="flex items-center justify-between gap-2">
+          <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{label}</p>
+          {Icon && (
+            <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', tone?.iconBg)}>
+              <Icon className="size-4 sm:size-4.5" />
+            </div>
+          )}
+        </div>
+        {loading ? (
+          <div className="mt-2.5 h-8 animate-pulse rounded bg-gray-100 dark:bg-ink-800" />
+        ) : (
+          <p className={cn('mt-2.5 break-words text-xl font-bold tabular-nums tracking-tight text-gray-900 sm:text-2xl dark:text-gray-50', valueClassName)}>
             {value}
           </p>
-          {children && <div className="mt-1 space-y-0.5 text-xs leading-snug text-gray-500 dark:text-ink-400">{children}</div>}
-        </>
-      )}
+        )}
+      </div>
+      {!loading && children && <div className="mt-2 space-y-0.5 text-xs leading-snug text-gray-500 dark:text-ink-400">{children}</div>}
     </div>
   );
 }
@@ -830,7 +868,13 @@ export default function Finance() {
         )}
 
         <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
-          <StatCard label="月预计支出" loading={overviewLoading} value={formatMoney(overview?.monthly_total_base ?? 0, baseCurrency)}>
+          <StatCard
+            label="月预计支出"
+            loading={overviewLoading}
+            value={formatMoney(overview?.monthly_total_base ?? 0, baseCurrency)}
+            icon={Wallet}
+            toneKey="indigo"
+          >
             {/* 紧跟总额：说的是这个数没算进哪些 Team。 */}
             {overview?.excluded_teams_count ? (
               <p>
@@ -865,18 +909,28 @@ export default function Finance() {
             label="折扣共省"
             loading={overviewLoading}
             value={formatMoney(overview?.discount_total_base ?? 0, baseCurrency)}
-            valueClassName="text-sky-600 dark:text-sky-400"
+            valueClassName="text-emerald-600 dark:text-emerald-400"
+            icon={BadgePercent}
+            toneKey="emerald"
           >
             <p>每月折扣合计</p>
           </StatCard>
-          <StatCard label="30 天内续费" loading={overviewLoading} value={renewalCountNext30}>
+          <StatCard
+            label="30 天内续费"
+            loading={overviewLoading}
+            value={renewalCountNext30}
+            icon={CalendarClock}
+            toneKey="rose"
+          >
             <p>将自动续费的 Team</p>
           </StatCard>
           <StatCard
             label="预警"
             loading={overviewLoading}
             value={alertCount}
-            valueClassName={alertCount > 0 ? 'text-red-600 dark:text-red-400' : undefined}
+            valueClassName={alertCount > 0 ? 'text-amber-600 dark:text-amber-400' : undefined}
+            icon={AlertTriangle}
+            toneKey={alertCount > 0 ? 'amber' : 'emerald'}
           >
             <p>{alertCount > 0 ? '详情见下方' : '暂无需要处理的问题'}</p>
           </StatCard>
