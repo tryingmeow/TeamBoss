@@ -180,24 +180,29 @@ function timelineDaysBadgeClass(daysUntil: number) {
 
 const STAT_TONES = {
   indigo: {
-    iconBg: 'bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-500/20 dark:bg-indigo-500/15 dark:text-indigo-400 dark:ring-indigo-400/20',
-    borderHover: 'hover:border-indigo-300 dark:hover:border-indigo-500/40',
+    iconBg: 'bg-indigo-100/80 text-indigo-700 ring-1 ring-inset ring-indigo-500/25 dark:bg-indigo-500/20 dark:text-indigo-300 dark:ring-indigo-400/30',
+    surface: 'border-indigo-200/80 bg-gradient-to-b from-indigo-50/60 to-white dark:border-indigo-500/25 dark:from-indigo-500/[0.08] dark:to-ink-900',
+    borderHover: 'hover:border-indigo-400/80 dark:hover:border-indigo-400/50',
   },
   emerald: {
-    iconBg: 'bg-emerald-50 text-emerald-600 ring-1 ring-inset ring-emerald-500/20 dark:bg-emerald-500/15 dark:text-emerald-400 dark:ring-emerald-400/20',
-    borderHover: 'hover:border-emerald-300 dark:hover:border-emerald-500/40',
+    iconBg: 'bg-emerald-100/80 text-emerald-700 ring-1 ring-inset ring-emerald-500/25 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/30',
+    surface: 'border-emerald-200/80 bg-gradient-to-b from-emerald-50/60 to-white dark:border-emerald-500/25 dark:from-emerald-500/[0.08] dark:to-ink-900',
+    borderHover: 'hover:border-emerald-400/80 dark:hover:border-emerald-400/50',
   },
   rose: {
-    iconBg: 'bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-500/20 dark:bg-rose-500/15 dark:text-rose-400 dark:ring-rose-400/20',
-    borderHover: 'hover:border-rose-300 dark:hover:border-rose-500/40',
+    iconBg: 'bg-rose-100/80 text-rose-700 ring-1 ring-inset ring-rose-500/25 dark:bg-rose-500/20 dark:text-rose-300 dark:ring-rose-400/30',
+    surface: 'border-rose-200/80 bg-gradient-to-b from-rose-50/60 to-white dark:border-rose-500/25 dark:from-rose-500/[0.08] dark:to-ink-900',
+    borderHover: 'hover:border-rose-400/80 dark:hover:border-rose-400/50',
   },
   amber: {
-    iconBg: 'bg-amber-50 text-amber-600 ring-1 ring-inset ring-amber-500/20 dark:bg-amber-500/15 dark:text-amber-400 dark:ring-amber-400/20',
-    borderHover: 'hover:border-amber-300 dark:hover:border-amber-500/40',
+    iconBg: 'bg-amber-100/80 text-amber-700 ring-1 ring-inset ring-amber-500/25 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30',
+    surface: 'border-amber-200/80 bg-gradient-to-b from-amber-50/60 to-white dark:border-amber-500/25 dark:from-amber-500/[0.08] dark:to-ink-900',
+    borderHover: 'hover:border-amber-400/80 dark:hover:border-amber-400/50',
   },
   red: {
-    iconBg: 'bg-red-50 text-red-600 ring-1 ring-inset ring-red-500/20 dark:bg-red-500/15 dark:text-red-400 dark:ring-red-400/20',
-    borderHover: 'hover:border-red-300 dark:hover:border-red-500/40',
+    iconBg: 'bg-red-100/80 text-red-700 ring-1 ring-inset ring-red-500/25 dark:bg-red-500/20 dark:text-red-300 dark:ring-red-400/30',
+    surface: 'border-red-200/80 bg-gradient-to-b from-red-50/60 to-white dark:border-red-500/25 dark:from-red-500/[0.08] dark:to-ink-900',
+    borderHover: 'hover:border-red-400/80 dark:hover:border-red-400/50',
   },
 } as const;
 
@@ -222,7 +227,7 @@ function StatCard({
 }) {
   const tone = STAT_TONES[toneKey];
   return (
-    <div className={cn(CARD, 'group relative flex min-w-0 flex-col justify-between p-4 transition-all duration-200 hover:shadow-sm sm:p-5', tone?.borderHover)}>
+    <div className={cn(CARD, 'group relative flex min-w-0 flex-col justify-between p-4 transition-all duration-200 hover:shadow-md sm:p-5', tone?.surface, tone?.borderHover)}>
       <div>
         <div className="flex items-center justify-between gap-2">
           <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{label}</p>
