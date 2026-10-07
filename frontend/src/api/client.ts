@@ -614,6 +614,8 @@ export interface UsageTeamItem {
   seats_in_use: number;
   inuse_gpt: number;
   inuse_codex: number;
+  inuse_premium?: number;
+  premium_seats_paid?: number;
   pending_gpt_invites: number;
   free_gpt_seats: number;
   card_last4: string | null;
@@ -627,6 +629,7 @@ export interface UsageData {
   active_team: number;
   inuse_gpt: number;
   inuse_codex: number;
+  inuse_premium?: number;
   pending_gpt_invites: number;
   total_gpt_seats: number;
   free_gpt_seats: number;

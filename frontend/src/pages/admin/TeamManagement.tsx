@@ -6,6 +6,7 @@ import {
   CalendarClock,
   Clock,
   CreditCard,
+  Crown,
   Loader2,
   RefreshCw,
   Server,
@@ -89,6 +90,11 @@ const STAT_TONES = {
     surface: 'border-orange-200/80 bg-gradient-to-b from-orange-50/60 to-white dark:border-orange-500/25 dark:from-orange-500/[0.08] dark:to-ink-900',
     borderHover: 'hover:border-orange-400/80 dark:hover:border-orange-400/50',
   },
+  pink: {
+    iconBg: 'bg-pink-100/80 text-pink-700 ring-1 ring-inset ring-pink-500/25 dark:bg-pink-500/20 dark:text-pink-300 dark:ring-pink-400/30',
+    surface: 'border-pink-200/80 bg-gradient-to-b from-pink-50/60 to-white dark:border-pink-500/25 dark:from-pink-500/[0.08] dark:to-ink-900',
+    borderHover: 'hover:border-pink-400/80 dark:hover:border-pink-400/50',
+  },
 } as const;
 
 type StatToneKey = keyof typeof STAT_TONES;
@@ -102,7 +108,7 @@ function StatCard({
   seat,
   children,
 }: {
-  title: string;
+  title: ReactNode;
   value: ReactNode;
   detail: ReactNode;
   icon: typeof Shield;
@@ -116,7 +122,7 @@ function StatCard({
       ? 'blue'
       : seat === 'usage_based'
         ? 'purple'
-        : 'rose'
+        : 'pink'
     : toneKey;
   const tone = STAT_TONES[resolvedToneKey];
 
@@ -302,9 +308,27 @@ export default function TeamManagement() {
     fetchUsage();
   }, []);
 
+  const [seatView, setSeatView] = useState<'default' | 'prolite'>('default');
+
   const seatUtilization = data && data.total_gpt_seats > 0
     ? Math.round((data.inuse_gpt / data.total_gpt_seats) * 100)
     : 0;
+
+  const totalPremiumPaid = useMemo(() => {
+    if (!data) return 0;
+    return data.teams.reduce((sum, team) => sum + (team.status === 'active' ? (team.premium_seats_paid ?? 0) : 0), 0);
+  }, [data]);
+
+  const inusePremium = useMemo(() => {
+    if (!data) return 0;
+    if (typeof data.inuse_premium === 'number') return data.inuse_premium;
+    return data.teams.reduce((sum, team) => sum + (team.status === 'active' ? (team.inuse_premium ?? 0) : 0), 0);
+  }, [data]);
+
+  const freePremiumSeats = Math.max(0, totalPremiumPaid - inusePremium);
+  const premiumUtilization = totalPremiumPaid > 0
+    ? Math.round((inusePremium / totalPremiumPaid) * 100)
+    : (inusePremium > 0 ? 100 : 0);
 
   const renewalItems = useMemo(() => {
     if (!finance) return [];
@@ -396,14 +420,59 @@ export default function TeamManagement() {
                 toneKey="emerald"
               />
               <StatCard
-                title="ChatGPT 席位"
-                value={`${seatUtilization}%`}
-                detail={`已用 ${data.inuse_gpt} / ${data.total_gpt_seats} · 剩余 ${data.free_gpt_seats}`}
-                icon={Users}
-                seat="default"
+                title={(
+                  <div className="flex items-center gap-1 rounded-md bg-gray-100/90 p-0.5 dark:bg-ink-800/90">
+                    <button
+                      type="button"
+                      onClick={() => setSeatView('default')}
+                      className={cn(
+                        'rounded px-1.5 py-0.5 text-xs font-medium transition-all',
+                        seatView === 'default'
+                          ? 'bg-blue-600 text-white shadow-xs'
+                          : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100'
+                      )}
+                    >
+                      ChatGPT
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSeatView('prolite')}
+                      className={cn(
+                        'inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-xs font-medium transition-all',
+                        seatView === 'prolite'
+                          ? 'bg-pink-600 text-white shadow-xs'
+                          : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100'
+                      )}
+                    >
+                      Premium
+                      <span className="text-[10px] opacity-80">Beta</span>
+                    </button>
+                  </div>
+                )}
+                value={seatView === 'default'
+                  ? `${seatUtilization}%`
+                  : totalPremiumPaid > 0
+                    ? `${premiumUtilization}%`
+                    : inusePremium
+                }
+                detail={seatView === 'default'
+                  ? `已用 ${data.inuse_gpt} / ${data.total_gpt_seats} · 剩余 ${data.free_gpt_seats}`
+                  : totalPremiumPaid > 0
+                    ? `已用 ${inusePremium} / ${totalPremiumPaid} · 剩余 ${freePremiumSeats}`
+                    : `使用中 ${inusePremium} · 预付席位 0`
+                }
+                icon={seatView === 'default' ? Users : Crown}
+                seat={seatView}
               >
-                <div className={cn('mt-2 h-1.5 overflow-hidden rounded-full', SEAT_STYLE.default.track)}>
-                  <div className={cn('h-full rounded-full', SEAT_STYLE.default.solid)} style={{ width: `${Math.min(seatUtilization, 100)}%` }} />
+                <div className={cn('mt-2 h-1.5 overflow-hidden rounded-full', SEAT_STYLE[seatView].track)}>
+                  <div
+                    className={cn('h-full rounded-full transition-all duration-300', SEAT_STYLE[seatView].solid)}
+                    style={{
+                      width: seatView === 'default'
+                        ? `${Math.min(seatUtilization, 100)}%`
+                        : `${totalPremiumPaid > 0 ? Math.min(premiumUtilization, 100) : (inusePremium > 0 ? 100 : 0)}%`
+                    }}
+                  />
                 </div>
               </StatCard>
               <StatCard
