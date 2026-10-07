@@ -902,6 +902,7 @@ export default function TeamCard({
                 settling={settling}
                 isCodexEnabled={team.is_codex_enabled}
                 onRefresh={startMemberSettle}
+                onForceRefresh={() => void handleForceRefresh()}
                 onRemarkSaved={handleRemarkSaved}
                 showToast={showToast}
               />

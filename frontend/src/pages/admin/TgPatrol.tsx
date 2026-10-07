@@ -1,8 +1,9 @@
-import { type ReactNode, useState, useEffect, useRef } from 'react';
+import { type KeyboardEvent, type ReactNode, useState, useEffect, useRef } from 'react';
 import {
   fetchPatrolStatus,
   updatePatrolSettings,
   runPatrol,
+  refreshTeamForPatrol,
   activatePatrol,
   fetchTgConfig,
   updateTgConfig,
@@ -13,8 +14,10 @@ import {
   createTgCode,
   deleteTgCode,
   sendTgSummary,
+  type PatrolRunResult,
+  type PatrolRunSource,
 } from '../../api/client';
-import { AlertTriangle, Copy, Plus, Send, ShieldCheck, Trash2 } from 'lucide-react';
+import { AlertTriangle, Copy, Loader2, Plus, Send, ShieldCheck, Trash2, X } from 'lucide-react';
 import * as Dialog from '@radix-ui/react-dialog';
 import PageShell from '../../components/PageShell';
 import PageLoading from '../../components/PageLoading';
@@ -23,7 +26,10 @@ import Toast from '../../components/Toast';
 import Switch from '../../components/Switch';
 import SeatBetaBadge from '../../components/BetaBadge';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
-import { formatDateSafe } from '../../lib/formatDate';
+import { formatBeijingDateTime, formatDateSafe } from '../../lib/formatDate';
+import { formatDataFreshness } from '../../lib/dataAge';
+import { errorText, runPool } from '../../lib/pool';
+import { useNow } from '../../hooks/useNow';
 import { cn } from '../../lib/utils';
 
 interface ToastMessage {
@@ -120,8 +126,21 @@ function SectionHeader({ title, description, aside }: { title: string; descripti
   );
 }
 
-/** One setting: label + explanation on the left, its control on the right (wraps below on narrow screens). */
-function SettingRow({ title, description, control }: { title: ReactNode; description: ReactNode; control: ReactNode }) {
+/**
+ * One setting: label + explanation on the left, its control on the right (wraps below on narrow screens).
+ * `children` render full width under both.
+ */
+function SettingRow({
+  title,
+  description,
+  control,
+  children,
+}: {
+  title: ReactNode;
+  description: ReactNode;
+  control: ReactNode;
+  children?: ReactNode;
+}) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 py-4 first:pt-0 last:pb-0">
       <div className="min-w-0 flex-1 basis-64">
@@ -129,6 +148,222 @@ function SettingRow({ title, description, control }: { title: ReactNode; descrip
         <div className={cn('mt-1 text-sm leading-6', MUTED)}>{description}</div>
       </div>
       {control}
+      {children && <div className="w-full min-w-0">{children}</div>}
+    </div>
+  );
+}
+
+// ── 演练空跑：数据来源切换 + 结果 ──
+
+const DRY_RUN_SOURCES: { value: PatrolRunSource; label: string }[] = [
+  { value: 'cache', label: '缓存（秒出）' },
+  { value: 'live', label: '实时刷新' },
+];
+
+/** Small radio-style switch; arrow keys move the choice like a native radio group. */
+function DryRunSourceToggle({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: PatrolRunSource;
+  onChange: (value: PatrolRunSource) => void;
+  disabled?: boolean;
+}) {
+  const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
+    if (!step) return;
+    event.preventDefault();
+    const next = (index + step + DRY_RUN_SOURCES.length) % DRY_RUN_SOURCES.length;
+    onChange(DRY_RUN_SOURCES[next].value);
+    buttonsRef.current[next]?.focus();
+  };
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label="演练用的数据"
+      aria-disabled={disabled || undefined}
+      className={cn('inline-flex shrink-0 rounded-lg bg-gray-100 p-0.5 dark:bg-ink-800/70', disabled && 'opacity-60')}
+    >
+      {DRY_RUN_SOURCES.map((option, index) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            ref={(el) => {
+              buttonsRef.current[index] = el;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            tabIndex={active ? 0 : -1}
+            disabled={disabled}
+            onClick={() => onChange(option.value)}
+            onKeyDown={(event) => handleKeyDown(event, index)}
+            className={cn(
+              'inline-flex min-h-7 items-center whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 disabled:cursor-not-allowed',
+              active
+                ? 'bg-white text-gray-900 shadow-sm dark:bg-ink-900 dark:text-gray-50'
+                : 'text-gray-500 hover:text-gray-900 dark:text-ink-400 dark:hover:text-gray-100'
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+type DryRunPhase = { kind: 'refresh'; done: number; total: number } | { kind: 'preview' };
+
+interface DryRunReport {
+  mode: PatrolRunSource;
+  /** null when no Team could be refreshed, so nothing was previewed. */
+  result: PatrolRunResult | null;
+  refreshFailures: Array<{ team_id: string; name: string; reason: string }>;
+}
+
+const WOULD_ACTIONS = new Set(['would_kick', 'would_strict_kick', 'would_revoke_invite']);
+
+/** 「演练完成：N 人会被踢」，有没预览的 Team 时一并说出来，免得把"少看了几个 Team"当成"没人会被踢"。 */
+function dryRunToast(result: PatrolRunResult, refreshFailures: number): string {
+  const kicks = result.would_kick + (result.strict_would_kick ?? 0);
+  const baselinePending = new Set(
+    result.events.filter((event) => event.action === 'baseline_pending').map((event) => event.team_id),
+  ).size;
+  const skipped = refreshFailures + (result.no_cache_teams?.length ?? 0) + baselinePending;
+  return `演练完成：${kicks} 人会被踢${skipped > 0 ? `（${skipped} 个 Team 未预览）` : ''}`;
+}
+
+function DryRunSummary({
+  report,
+  teamNames,
+  onDismiss,
+}: {
+  report: DryRunReport;
+  teamNames: Map<string, string>;
+  onDismiss: () => void;
+}) {
+  const now = useNow(30_000);
+  const { result } = report;
+  const nameOf = (teamId: string, fallback?: string) => fallback || teamNames.get(teamId) || `${teamId.slice(0, 8)}…`;
+
+  const freshness = result ? formatDataFreshness(result.as_of, now) : null;
+  const modeText = report.mode === 'cache' ? '用缓存数据' : result ? '已实时刷新' : '实时刷新';
+
+  let summary = '';
+  if (result) {
+    const kicks = result.would_kick + (result.strict_would_kick ?? 0);
+    const revokes = result.invites_would_revoke ?? 0;
+    const parts = [kicks > 0 ? `会踢 ${kicks} 人` : '没有会被踢的人'];
+    if (revokes > 0) parts.push(`会撤销 ${revokes} 个邀请`);
+    summary = (result.team_count !== undefined ? `预览了 ${result.team_count} 个 Team：` : '') + parts.join('，');
+  }
+
+  // 按 Team 归组会被处理的人，同一个邮箱只列一次。
+  const byTeam = new Map<string, { name: string; items: Array<{ key: string; text: string }> }>();
+  result?.events.forEach((event) => {
+    if (!WOULD_ACTIONS.has(event.action) || !event.email) return;
+    const group = byTeam.get(event.team_id) ?? { name: nameOf(event.team_id, event.team_name), items: [] };
+    const isInvite = event.action === 'would_revoke_invite';
+    const key = `${isInvite ? 'invite' : 'member'}:${event.email}`;
+    if (!group.items.some((item) => item.key === key)) {
+      const text = isInvite
+        ? `邀请 ${event.email}`
+        : event.rule === 'premium_outsider'
+          ? `${event.email}（Premium）`
+          : event.email;
+      group.items.push({ key, text });
+    }
+    byTeam.set(event.team_id, group);
+  });
+
+  const notPreviewed: Array<{ key: string; name: string; reason: string }> = [];
+  result?.no_cache_teams?.forEach((team) => {
+    notPreviewed.push({ key: `nocache:${team.team_id}`, name: nameOf(team.team_id, team.name), reason: '没有缓存数据' });
+  });
+  report.refreshFailures.forEach((failure) => {
+    const reason = failure.reason.startsWith('刷新失败') ? failure.reason : `刷新失败：${failure.reason}`;
+    notPreviewed.push({ key: `refresh:${failure.team_id}`, name: failure.name, reason });
+  });
+  result?.skipped_teams?.forEach((entry) => {
+    const sep = entry.indexOf(':');
+    const teamId = sep >= 0 ? entry.slice(0, sep).trim() : entry;
+    const reason = sep >= 0 ? entry.slice(sep + 1).trim() : '';
+    notPreviewed.push({ key: `skipped:${entry}`, name: nameOf(teamId), reason: reason ? `刷新失败：${reason}` : '刷新失败' });
+  });
+  const baselineSeen = new Set<string>();
+  result?.events.forEach((event) => {
+    if (event.action !== 'baseline_pending' || baselineSeen.has(event.team_id)) return;
+    baselineSeen.add(event.team_id);
+    notPreviewed.push({
+      key: `baseline:${event.team_id}`,
+      name: nameOf(event.team_id, event.team_name),
+      reason: '首次巡逻只保护现有成员，这次不预览',
+    });
+  });
+
+  return (
+    <div className="relative rounded-lg bg-gray-50 px-3 py-2.5 pr-10 text-xs leading-5 text-gray-600 dark:bg-ink-950/40 dark:text-ink-300">
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="关闭演练结果"
+        title="关闭"
+        className="absolute right-1.5 top-1.5 inline-flex size-7 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-200/70 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-gray-200"
+      >
+        <X className="size-3.5" />
+      </button>
+
+      <div className={MUTED}>
+        {freshness ? (
+          <>
+            <span title={formatBeijingDateTime(result?.as_of)}>{freshness}</span> · {modeText}
+          </>
+        ) : (
+          modeText
+        )}
+      </div>
+
+      {result ? (
+        <p className="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">{summary}</p>
+      ) : (
+        <p className="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">没有可预览的 Team</p>
+      )}
+
+      {byTeam.size > 0 && (
+        <ul className="mt-1.5 space-y-0.5">
+          {Array.from(byTeam.entries()).map(([teamId, group]) => (
+            <li key={teamId} className="min-w-0 break-words">
+              <span className="font-medium text-gray-800 dark:text-ink-200">{group.name}</span>：
+              {group.items.map((item, i) => (
+                <span key={item.key}>
+                  {i > 0 && '、'}
+                  <span className="break-all">{item.text}</span>
+                </span>
+              ))}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {notPreviewed.length > 0 && (
+        <div className="mt-2">
+          <div className="font-medium text-amber-700 dark:text-amber-300">未预览 {notPreviewed.length} 个 Team</div>
+          <ul className="mt-0.5 space-y-0.5">
+            {notPreviewed.map((item) => (
+              <li key={item.key} className="min-w-0 break-all">
+                <span className="text-gray-800 dark:text-ink-200">{item.name}</span>：{item.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -147,7 +382,9 @@ function Toasts({ toasts }: { toasts: ToastMessage[] }) {
 function PatrolSection() {
   const [status, setStatus] = useState<PatrolStatus | null>(null);
   const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
+  const [dryRunPhase, setDryRunPhase] = useState<DryRunPhase | null>(null);
+  const [dryRunSource, setDryRunSource] = useState<PatrolRunSource>('cache');
+  const [dryRunReport, setDryRunReport] = useState<DryRunReport | null>(null);
   const [activating, setActivating] = useState(false);
   const [showKickConfirm, setShowKickConfirm] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -222,17 +459,63 @@ function PatrolSection() {
     }
   };
 
-  const handleRunDryRun = async () => {
+  /** Reload without the full-section loading state; on failure keep what is on screen. */
+  const reloadStatusQuietly = async () => {
     try {
-      setRunning(true);
-      const result = await runPatrol({ dry_run: true });
-      showToast(`演练完成：${result.would_kick} 人会被踢`);
-      await loadStatus();
+      const data = await fetchPatrolStatus();
+      setStatus(data);
+      setSelectedTeams(new Set(data.exempt_team_ids));
     } catch (err) {
       console.error(err);
-      showToast('演练失败', 'error');
+    }
+  };
+
+  const handleRunDryRun = async () => {
+    if (!status || dryRunPhase) return;
+    const mode = dryRunSource;
+    try {
+      if (mode === 'cache') {
+        setDryRunPhase({ kind: 'preview' });
+        const result = await runPatrol({ dry_run: true, source: 'cache' });
+        setDryRunReport({ mode, result, refreshFailures: [] });
+        showToast(dryRunToast(result, 0));
+        return;
+      }
+
+      // 实时：先逐个刷新，只预览刷新成功的 Team；刷新失败的一律不预览。
+      const teams = status.teams.map(({ team_id, name }) => ({ team_id, name }));
+      setDryRunPhase({ kind: 'refresh', done: 0, total: teams.length });
+      const settled = await runPool(
+        teams,
+        3,
+        (team) => refreshTeamForPatrol(team.team_id),
+        (done, total) => setDryRunPhase({ kind: 'refresh', done, total }),
+      );
+      const okIds: string[] = [];
+      const refreshFailures: DryRunReport['refreshFailures'] = [];
+      settled.forEach((outcome, i) => {
+        if (outcome.status === 'fulfilled') okIds.push(teams[i].team_id);
+        else refreshFailures.push({ ...teams[i], reason: errorText(outcome.reason, '刷新失败') });
+      });
+      if (okIds.length === 0) {
+        setDryRunReport({ mode, result: null, refreshFailures });
+        showToast(
+          teams.length === 0 ? '演练失败：没有可巡逻的 Team' : `演练失败：${teams.length} 个 Team 都刷新失败`,
+          'error',
+        );
+        return;
+      }
+      setDryRunPhase({ kind: 'preview' });
+      const result = await runPatrol({ dry_run: true, source: 'cache', team_ids: okIds });
+      setDryRunReport({ mode, result, refreshFailures });
+      showToast(dryRunToast(result, refreshFailures.length));
+    } catch (err) {
+      console.error(err);
+      showToast(`演练失败：${errorText(err)}`, 'error');
     } finally {
-      setRunning(false);
+      setDryRunPhase(null);
+      // 实时刷新改了缓存，顺手把下面的席位数更新掉。
+      if (mode === 'live') void reloadStatusQuietly();
     }
   };
 
@@ -322,13 +605,31 @@ function PatrolSection() {
           />
           <SettingRow
             title="演练空跑"
-            description="按当前规则预览会被踢的人数，不会真正踢人。"
+            description="按当前规则预览会被踢的人，不会真正踢人。「缓存」用上次同步的数据，秒出；「实时刷新」先逐个刷新各 Team，较慢。"
             control={
-              <button onClick={handleRunDryRun} disabled={running} className={BUTTON.secondary}>
-                {running ? '运行中…' : '演练空跑'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <DryRunSourceToggle value={dryRunSource} onChange={setDryRunSource} disabled={!!dryRunPhase} />
+                <button onClick={handleRunDryRun} disabled={!!dryRunPhase} className={cn(BUTTON.secondary, 'tabular-nums')}>
+                  {dryRunPhase && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                  {!dryRunPhase
+                    ? '演练空跑'
+                    : dryRunPhase.kind === 'refresh'
+                      ? `正在刷新 ${dryRunPhase.done}/${dryRunPhase.total}`
+                      : dryRunSource === 'live'
+                        ? '生成预览…'
+                        : '运行中…'}
+                </button>
+              </div>
             }
-          />
+          >
+            {dryRunReport && (
+              <DryRunSummary
+                report={dryRunReport}
+                teamNames={new Map(status.teams.map((t) => [t.team_id, t.name]))}
+                onDismiss={() => setDryRunReport(null)}
+              />
+            )}
+          </SettingRow>
         </div>
       </section>
 

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import {
   fetchOwners,
   fetchTeams,
+  syncTeam,
   fetchAllMembers,
   extendMemberExpiry,
   updateMemberExpiry,
@@ -18,9 +19,11 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Loader2,
   MessageCircle,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   UserX,
   Zap,
@@ -36,6 +39,7 @@ import Toast from '../../components/Toast';
 import { BUTTON, CARD, INPUT, PILL, TONE } from '../../components/ui';
 import { useKickPolicy } from '../../hooks/useKickPolicy';
 import { NO_EXPIRY_LABEL, noExpiryKind, type KickPolicy } from '../../lib/expiry';
+import { errorText, runPool } from '../../lib/pool';
 import { cn } from '../../lib/utils';
 import SystemLogs from './SystemLogs';
 import {
@@ -827,10 +831,13 @@ function TeamName({ name, children }: { name: string; children?: ReactNode }) {
 function OwnerList({
   search,
   sortOrder,
+  reloadSignal,
   showToast,
 }: {
   search: string;
   sortOrder: SortOrder;
+  /** Bumped by the page after a bulk refresh; reloads the list. */
+  reloadSignal: number;
   showToast: ShowToast;
 }) {
   const [owners, setOwners] = useState<OwnerRow[]>([]);
@@ -858,7 +865,7 @@ function OwnerList({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [refreshTrigger]);
+  }, [refreshTrigger, reloadSignal]);
 
   const handleUpdateDisplayName = async (email: string, systemDisplayName: string | null) => {
     await updateUserDisplayName(email, systemDisplayName);
@@ -1146,12 +1153,15 @@ function MemberList({
   sortOrder,
   seatFilter,
   statusFilters,
+  reloadSignal,
   showToast,
 }: {
   search: string;
   sortOrder: SortOrder;
   seatFilter: SeatFilter;
   statusFilters: Set<MemberStatus>;
+  /** Bumped by the page after a bulk refresh; reloads the list. */
+  reloadSignal: number;
   showToast: ShowToast;
 }) {
   const extensionRequestIds = useRef(new ExpiryExtensionRequestIds());
@@ -1216,7 +1226,7 @@ function MemberList({
   useEffect(() => {
     fetchMembers();
     return () => { latestLoad.current += 1; };
-  }, [refreshTrigger]);
+  }, [refreshTrigger, reloadSignal]);
 
   useEffect(() => () => {
     if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
@@ -1587,6 +1597,8 @@ export default function UserManagement() {
   );
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const [refreshProgress, setRefreshProgress] = useState<{ done: number; total: number } | null>(null);
+  const [reloadSignal, setReloadSignal] = useState(0);
 
   useEffect(() => () => {
     toastTimersRef.current.forEach((timer) => clearTimeout(timer));
@@ -1601,6 +1613,43 @@ export default function UserManagement() {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
     }, 3500);
     toastTimersRef.current.add(timer);
+  };
+
+  // 实时刷新所有在用的 Team（同时最多 3 个），然后重载列表。
+  const handleRefreshAll = async () => {
+    if (refreshProgress) return;
+    setRefreshProgress({ done: 0, total: 0 });
+    try {
+      const teams = (await fetchTeams()).filter((team) => team.status === 'active');
+      if (teams.length === 0) {
+        showToast('没有可刷新的 Team', 'error');
+        return;
+      }
+      setRefreshProgress({ done: 0, total: teams.length });
+      const settled = await runPool(
+        teams,
+        3,
+        (team) => syncTeam(team.id, true),
+        (done, total) => setRefreshProgress({ done, total }),
+      );
+      const failures = settled.flatMap((outcome, i) =>
+        outcome.status === 'rejected'
+          ? [{ name: teams[i].name || teams[i].id.slice(0, 8), reason: errorText(outcome.reason, '刷新失败') }]
+          : [],
+      );
+      if (failures.length === 0) {
+        showToast(`已刷新 ${teams.length} 个 Team`);
+      } else {
+        const clip = (text: string) => (text.length > 40 ? `${text.slice(0, 40)}…` : text);
+        const listed = failures.slice(0, 3).map((f) => `${f.name}（${clip(f.reason)}）`).join('、');
+        showToast(`${failures.length} 个 Team 刷新失败：${listed}${failures.length > 3 ? ' 等' : ''}`, 'error');
+      }
+      setReloadSignal((v) => v + 1);
+    } catch (err) {
+      showToast(`刷新失败：${errorText(err)}`, 'error');
+    } finally {
+      setRefreshProgress(null);
+    }
   };
 
   const seatFilterOptions = useMemo(
@@ -1658,16 +1707,38 @@ export default function UserManagement() {
             />
           </>
         ) : null}
+
+        {activeTab !== 'logs' && (
+          <button
+            type="button"
+            onClick={() => void handleRefreshAll()}
+            disabled={refreshProgress !== null}
+            title="逐个实时刷新所有 Team 的成员数据"
+            className={cn(BUTTON.secondary, 'h-9 gap-1.5 px-3 py-0 font-normal tabular-nums md:ml-auto')}
+          >
+            {refreshProgress ? (
+              <Loader2 className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <RefreshCw className="size-3.5 text-gray-400 dark:text-ink-500" aria-hidden />
+            )}
+            {refreshProgress
+              ? refreshProgress.total > 0
+                ? `刷新中 ${refreshProgress.done}/${refreshProgress.total}`
+                : '刷新中…'
+              : '全部实时刷新'}
+          </button>
+        )}
       </div>
 
       {activeTab === 'owner' ? (
-        <OwnerList search={search} sortOrder={ownerSortOrder} showToast={showToast} />
+        <OwnerList search={search} sortOrder={ownerSortOrder} reloadSignal={reloadSignal} showToast={showToast} />
       ) : activeTab === 'members' ? (
         <MemberList
           search={search}
           sortOrder={memberSortOrder}
           seatFilter={seatFilter}
           statusFilters={statusFilters}
+          reloadSignal={reloadSignal}
           showToast={showToast}
         />
       ) : (

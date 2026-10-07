@@ -9,6 +9,9 @@ import { revokeInvite } from '../api/client';
 import { formatSeatTypeLabel, seatStyle } from '../lib/seatType';
 import { pendingCountsByType, type TeamCapacityFields } from '../lib/seatCapacity';
 import { formatAppLocalFull } from '../lib/expiry';
+import { formatDataFreshness } from '../lib/dataAge';
+import { formatBeijingDateTime } from '../lib/formatDate';
+import { useNow } from '../hooks/useNow';
 import { PILL, TONE } from './ui';
 import { cn } from '../lib/utils';
 
@@ -21,11 +24,14 @@ interface MemberPanelProps {
   settling?: boolean;
   isCodexEnabled?: boolean;
   onRefresh: () => void;
+  /** Full live refresh of this Team; shows a 「刷新」 text button in the header when given. */
+  onForceRefresh?: () => void;
   onRemarkSaved: (email: string, remark: string | null) => void;
   showToast: ShowToast;
 }
 
-export default function MemberPanel({ teamId, team, data, loading, settling, isCodexEnabled, onRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
+export default function MemberPanel({ teamId, team, data, loading, settling, isCodexEnabled, onRefresh, onForceRefresh, onRemarkSaved, showToast }: MemberPanelProps) {
+  const now = useNow(30_000);
   const [revoking, setRevoking] = useState<string | null>(null);
   const pendingByType = useMemo(() => pendingCountsByType(data?.pending_invites), [data]);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
@@ -56,20 +62,41 @@ export default function MemberPanel({ teamId, team, data, loading, settling, isC
   if (!data) return null;
 
   const empty = data.members.length === 0 && data.pending_invites.length === 0;
+  const freshness = formatDataFreshness(data.cached_at, now);
 
   return (
     <div className="pt-1">
-      <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-gray-500 dark:text-ink-400">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2 text-xs text-gray-500 dark:text-ink-400">
         <span className="whitespace-nowrap">
           成员 {data.members.length}
           {data.pending_invites.length > 0 && ` · 待接受 ${data.pending_invites.length}`}
         </span>
-        {settling && (
-          <span className="flex items-center gap-1.5 whitespace-nowrap text-blue-600 dark:text-blue-400">
-            <Loader2 size={12} className="animate-spin" />
-            同步中…
-          </span>
-        )}
+        <span className="ml-auto flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
+          {settling && (
+            <span className="flex items-center gap-1.5 whitespace-nowrap text-blue-600 dark:text-blue-400">
+              <Loader2 size={12} className="animate-spin" />
+              同步中…
+            </span>
+          )}
+          {freshness && (
+            <span className="whitespace-nowrap" title={formatBeijingDateTime(data.cached_at)}>
+              {freshness}
+            </span>
+          )}
+          {onForceRefresh && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onForceRefresh();
+              }}
+              title="实时刷新这个 Team"
+              className="-my-1 whitespace-nowrap rounded-md px-1.5 py-1 font-medium text-blue-600 transition-colors hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50 dark:text-blue-400 dark:hover:bg-blue-500/10 dark:hover:text-blue-300"
+            >
+              刷新
+            </button>
+          )}
+        </span>
       </div>
 
       {empty ? (

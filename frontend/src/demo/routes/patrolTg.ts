@@ -45,16 +45,25 @@ function unrefreshed(db: DemoDb): string[] {
 
 function runPatrol(ctx: DemoContext): DemoResponse {
   const { db } = ctx;
-  const requestedDry = bodyObject(ctx).dry_run !== false;
+  const body = bodyObject(ctx);
+  const fromCache = body.source === 'cache';
+  const requestedDry = body.dry_run !== false;
+  if (fromCache && !requestedDry) return fail(400, '缓存数据只能用来空跑预览，真踢必须实时刷新');
+  if (!fromCache && body.team_ids != null) return fail(400, '只预览部分 Team 仅支持缓存预览');
   const dryRun = requestedDry || !db.patrol.kick_enabled || !db.patrol.baseline_at;
-  const skipped = unrefreshed(db);
+  // Live mode leaves Teams it could not refresh alone; cache mode previews them from their last snapshot.
+  const skipped = fromCache ? [] : unrefreshed(db);
   const skippedIds = new Set(skipped.map((s) => s.split(':')[0]));
+  const only = fromCache && Array.isArray(body.team_ids) ? new Set(body.team_ids.map(String)) : null;
+  const previewed = patrolStatus(db).teams.filter(
+    (status) => !skippedIds.has(status.team_id) && (!only || only.has(status.team_id)),
+  );
   const events: Array<Record<string, unknown>> = [];
   let kicked = 0;
   let wouldKick = 0;
 
-  patrolStatus(db).teams.forEach((status) => {
-    if (status.risk !== 'over' || skippedIds.has(status.team_id)) return;
+  previewed.forEach((status) => {
+    if (status.risk !== 'over') return;
     const record = findTeam(db, status.team_id);
     if (!record) return;
     if (db.patrol.exempt_team_ids.includes(status.team_id)) {
@@ -70,7 +79,10 @@ function runPatrol(ctx: DemoContext): DemoResponse {
       if (dryRun) {
         wouldKick += 1;
         events.push({ ...base, action: 'would_kick', result: 'dryrun' });
-        appendLog(db, { team_id: status.team_id, action: 'patrol_would_kick', target_email: cand.email, detail: reason, result: 'dryrun', trigger_type: 'patrol' });
+        // A cache preview is read-only: no logs.
+        if (!fromCache) {
+          appendLog(db, { team_id: status.team_id, action: 'patrol_would_kick', target_email: cand.email, detail: reason, result: 'dryrun', trigger_type: 'patrol' });
+        }
         return;
       }
       const member = record.members.find((m) => m.id === cand.user_id);
@@ -96,11 +108,17 @@ function runPatrol(ctx: DemoContext): DemoResponse {
     });
   });
 
-  appendLog(db, {
-    action: 'patrol_manual_run',
-    detail: `patrolled=${patrolStatus(db).teams.length - skipped.length}, skipped_unrefreshed=${skipped.length}`,
-    error_message: skipped.join('; ') || null,
-  });
+  if (!fromCache) {
+    appendLog(db, {
+      action: 'patrol_manual_run',
+      detail: `patrolled=${previewed.length}, skipped_unrefreshed=${skipped.length}`,
+      error_message: skipped.join('; ') || null,
+    });
+  }
+  const cacheTimes = previewed
+    .map((status) => findTeam(db, status.team_id)?.cacheUpdatedAt)
+    .filter((at): at is string => Boolean(at))
+    .sort();
   return ok({
     events,
     kicked,
@@ -110,7 +128,21 @@ function runPatrol(ctx: DemoContext): DemoResponse {
     strict_kicked: 0,
     strict_would_kick: 0,
     skipped_teams: skipped,
+    source: fromCache ? 'cache' : 'live',
+    as_of: fromCache ? (cacheTimes[0] ?? null) : null,
+    no_cache_teams: [],
+    team_count: previewed.length,
   });
+}
+
+/** Live-refreshes one Team's patrol inputs; the panel's "实时刷新" dry run calls this per Team. */
+function refreshForPatrol(ctx: DemoContext): DemoResponse {
+  const record = findTeam(ctx.db, ctx.params.teamId);
+  if (!record || record.team.status !== 'active') return fail(404, 'Team 不存在或未启用');
+  if (record.team.auth_state === 'rejected') return fail(502, '刷新失败：登录已失效，请重新导入');
+  if (record.team.sync_suspended_at) return fail(502, '刷新失败：HTTP 502 Bad Gateway');
+  record.cacheUpdatedAt = isoAt(Date.now());
+  return ok({ team_id: record.team.id, status: 'ok', cached_at: record.cacheUpdatedAt });
 }
 
 function activatePatrol(ctx: DemoContext): DemoResponse {
@@ -271,6 +303,7 @@ export const patrolTgRoutes: DemoRoute[] = [
   { method: 'GET', pattern: '/api/patrol/status', handler: (ctx) => ok(patrolStatus(ctx.db)) },
   { method: 'PATCH', pattern: '/api/patrol/settings', handler: patchPatrolSettings },
   { method: 'POST', pattern: '/api/patrol/run', handler: runPatrol },
+  { method: 'POST', pattern: '/api/patrol/refresh/:teamId', handler: refreshForPatrol },
   { method: 'POST', pattern: '/api/patrol/activate', handler: activatePatrol },
   { method: 'GET', pattern: '/api/tg/config', handler: (ctx) => ok({ ...ctx.db.tg.config }) },
   { method: 'PATCH', pattern: '/api/tg/config', handler: patchTgConfig },

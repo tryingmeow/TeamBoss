@@ -1159,10 +1159,44 @@ export interface PatrolStatusResponse {
   }>;
 }
 
+/** live = refresh every active Team upstream first; cache = preview from stored caches only (dry run only). */
+export type PatrolRunSource = 'live' | 'cache';
+
+export interface PatrolRunEvent {
+  team_id: string;
+  team_name?: string;
+  /** would_kick / would_revoke_invite / would_strict_kick / baseline_pending / exempt_skip / … */
+  action: string;
+  email?: string;
+  rule?: string;
+  over_by?: number;
+  [key: string]: unknown;
+}
+
 export interface PatrolRunResult {
-  events: unknown[];
+  events: PatrolRunEvent[];
   kicked: number;
   would_kick: number;
+  // Optional below: an older backend omits some of them.
+  invites_revoked?: number;
+  invites_would_revoke?: number;
+  strict_kicked?: number;
+  strict_would_kick?: number;
+  /** Live mode refresh failures, "team_id: reason". */
+  skipped_teams?: string[];
+  source?: PatrolRunSource;
+  /** Cache mode: time of the oldest member cache among the previewed Teams. */
+  as_of?: string | null;
+  /** Cache mode: Teams with no usable cache, not previewed. */
+  no_cache_teams?: Array<{ team_id: string; name: string }>;
+  /** How many Teams were actually previewed / patrolled. */
+  team_count?: number;
+}
+
+export interface PatrolRefreshResult {
+  team_id: string;
+  status: 'ok';
+  cached_at: string | null;
 }
 
 export interface PatrolActivationResult {
@@ -1187,10 +1221,22 @@ export async function updatePatrolSettings(body: {
   });
 }
 
-export async function runPatrol(body: { dry_run?: boolean }): Promise<PatrolRunResult> {
+export async function runPatrol(body: {
+  dry_run?: boolean;
+  source?: PatrolRunSource;
+  /** Cache mode only: limit the preview to these Teams. */
+  team_ids?: string[];
+}): Promise<PatrolRunResult> {
   return request<PatrolRunResult>('/api/patrol/run', {
     method: 'POST',
     body: JSON.stringify(body),
+  });
+}
+
+/** Live-refreshes one Team's patrol inputs (members, invites, seat capacity), as the live patrol does per Team. */
+export async function refreshTeamForPatrol(teamId: string): Promise<PatrolRefreshResult> {
+  return request<PatrolRefreshResult>(`/api/patrol/refresh/${encodeURIComponent(teamId)}`, {
+    method: 'POST',
   });
 }
 
