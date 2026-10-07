@@ -77,6 +77,7 @@ import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from ..chatgpt_client import ChatGPTClient
@@ -114,10 +115,19 @@ class PatrolActivationError(RuntimeError):
 
 # ── 基础 DB 原语（镜像 scheduler.py 的写法，自包含，短连接） ─────────────────
 
-def _get_sync_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(get_db_path())
+def _get_sync_db(*, read_only: bool = False) -> sqlite3.Connection:
+    if read_only:
+        # 只读打开：预览轮次里任何经这个连接的写库都会直接报错，而不是悄悄改了状态。
+        conn = sqlite3.connect(Path(get_db_path()).resolve().as_uri() + "?mode=ro", uri=True)
+    else:
+        conn = sqlite3.connect(get_db_path())
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _muted(*_args, **_kwargs) -> int:
+    """预览轮次的通知 / 日志出口：什么都不做。"""
+    return 0
 
 
 def _log_operation_sync(team_id, action, target_email=None, detail=None,
@@ -2066,6 +2076,7 @@ def run_patrol(
     allow_team_ids: Iterable[str],
     *,
     skip_over_quota_team_ids: Iterable[str] = (),
+    preview: bool = False,
 ) -> dict:
     """跑一轮巡逻。返回 {"events": [...], "kicked": int, "would_kick": int, ...}。
 
@@ -2088,7 +2099,17 @@ def run_patrol(
     留下的值。超员踢人是唯一拿它当分母的一段，这些 team 只跳过这一段；撤陌生邀请、
     严格模式不看席位数，照常执行。调用方把一个 team 放进白名单却漏放进这里，等于拿
     未确认的旧席位数判超员，所以两者必须在同一处决定（scheduler 的白名单判定）。
+
+    ``preview``：只读预览（面板「演练空跑」的缓存模式，白名单里是没有现场刷新过的缓存）。
+    只允许和 dry_run 一起用；本轮不发 Telegram、不写操作日志、不动告警限频状态，也不给
+    Team 建基线（要建基线的 Team 只报一条 baseline_pending）。选人逻辑和空跑完全相同。
     """
+    if preview and not dry_run:
+        raise ValueError("preview 只能空跑：缓存数据不能用来真踢")
+    # 预览把本轮的通知和日志都静音；不是预览时就是模块里的这两个出口（调用时才取）。
+    notify = _muted if preview else notify_admins_sync
+    log_op = _muted if preview else _log_operation_sync
+
     events: list[dict] = []
     kicked = 0
     would_kick = 0
@@ -2101,7 +2122,7 @@ def run_patrol(
     skip_over_quota_ids = {str(x) for x in (skip_over_quota_team_ids or ())}
 
     try:
-        conn = _get_sync_db()
+        conn = _get_sync_db(read_only=preview)
         settings = _read_patrol_settings(conn)
         kick_enabled = settings.get("patrol_kick_enabled") == "1"
         exempt_ids = set(parse_exempt_team_ids(settings.get("patrol_exempt_team_ids")))
@@ -2109,7 +2130,7 @@ def run_patrol(
 
         # 三重总闸：显式 dry-run、真踢开关关闭、或尚未完成现有成员保护，任一成立都只空跑。
         baseline_ready = bool((settings.get("patrol_baseline_at") or "").strip())
-        effective_dry_run = bool(dry_run) or not kick_enabled or not baseline_ready
+        effective_dry_run = bool(dry_run) or preview or not kick_enabled or not baseline_ready
 
         teams = conn.execute(
             "SELECT id, name, is_codex_enabled, seats_entitled, access_token, device_id, proxy_id, "
@@ -2139,6 +2160,10 @@ def run_patrol(
             # （包括 token_expired 恢复、重新导入后的重建），不是管理员确认：只有从未
             # 建过基线的 Team 才保护现有成员，见 _protect_team_snapshot_sync。
             if kick_enabled and baseline_ready and team_id not in initialized_team_ids:
+                if preview:
+                    # 预览不建基线（那是写库，而且要基于现场刷新的名单）；建基线的这一轮本来也不处理候选。
+                    events.append({"team_id": team_id, "team_name": name, "action": "baseline_pending"})
+                    continue
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     grandfathered, backfilled, detected_kept = _protect_team_snapshot_sync(
@@ -2149,7 +2174,7 @@ def run_patrol(
                     )
                     conn.commit()
                     initialized_team_ids.add(str(team_id))
-                    _log_operation_sync(
+                    log_op(
                         team_id,
                         "patrol_team_initialize",
                         None,
@@ -2159,7 +2184,7 @@ def run_patrol(
                     )
                 except Exception as exc:
                     conn.rollback()
-                    _log_operation_sync(
+                    log_op(
                         team_id,
                         "patrol_team_initialize",
                         None,
@@ -2220,7 +2245,7 @@ def run_patrol(
                             f"🚨 外部成员数量异常（{outsider_count} / 团队共 {len(members)} 人），"
                             "怀疑数据异常，本轮 Premium 成员一个都没移除，请人工核查"
                         )
-                        _log_operation_sync(
+                        log_op(
                             team_id, "patrol_kick_batch_capped", None,
                             f"reason=premium_outsider, batch_guard=outsiders, "
                             f"outsiders={outsider_count}, candidates={len(premium_outsiders)}, "
@@ -2243,7 +2268,7 @@ def run_patrol(
                     ]
                     premium_selected = premium_candidates[:NON_STRICT_KICK_ABS_CAP]
                     if len(premium_candidates) > NON_STRICT_KICK_ABS_CAP:
-                        _log_operation_sync(
+                        log_op(
                             team_id, "patrol_kick_batch_capped", None,
                             f"reason=premium_outsider candidates={len(premium_candidates)} "
                             f"capped_to={NON_STRICT_KICK_ABS_CAP}",
@@ -2261,7 +2286,7 @@ def run_patrol(
                         )
                         if effective_dry_run:
                             # 空跑只记日志、计数；Telegram 走下面限频的席位提醒，不每轮推一条。
-                            _log_operation_sync(team_id, "patrol_would_kick", email, reason, "dryrun")
+                            log_op(team_id, "patrol_would_kick", email, reason, "dryrun")
                             would_kick += 1
                             round_kicks_used += 1
                             events.append({
@@ -2298,20 +2323,21 @@ def run_patrol(
                             "reason": reason, "error": err,
                         })
                     if premium_kicked_emails:
-                        notify_admins_sync(detail_card(f"🚨 巡逻移除 Premium 外部成员 · {name}", [
+                        notify(detail_card(f"🚨 巡逻移除 Premium 外部成员 · {name}", [
                             _PREMIUM_KICK_BASIS,
                             "✅ 已移除：" + "、".join(premium_kicked_emails),
                         ]))
             except Exception as exc:
-                _log_operation_sync(
+                log_op(
                     team_id, "patrol_kick", None, "reason=premium_outsider", "failed", str(exc),
                 )
             # 移除失败（上游 403 这类每轮都会重复）的卡片按 team-health 规则限频；每次失败的 patrol_kick
             # 日志在 _patrol_kick 里照写。本轮没有失败就静默关掉上一份。
             try:
-                _report_premium_kick_failures_sync(team_id, name, premium_failures)
+                if not preview:
+                    _report_premium_kick_failures_sync(team_id, name, premium_failures)
             except Exception as exc:
-                _log_operation_sync(
+                log_op(
                     team_id, "patrol_kick", None, "reason=premium_outsider, alert=kick_failed",
                     "failed", str(exc),
                 )
@@ -2357,7 +2383,7 @@ def run_patrol(
                     unhandled_reason = "⏸️ 巡逻自动踢人没开，外部 Premium 成员不会被自动移除"
                 else:
                     unhandled_reason = "⚠️ 本轮没能自动移除（被安全规则拦下或接口失败），请人工确认"
-                premium_outcome = _report_premium_seat_findings_sync(
+                premium_outcome = None if preview else _report_premium_seat_findings_sync(
                     team_id, name, premium_findings, unhandled_reason=unhandled_reason
                 )
                 if premium_outcome and premium_outcome.get("notified"):
@@ -2366,7 +2392,7 @@ def run_patrol(
                         "count": len(premium_findings),
                     })
             except Exception as exc:
-                _log_operation_sync(team_id, "patrol_premium_alert", None, None, "failed", str(exc))
+                log_op(team_id, "patrol_premium_alert", None, None, "failed", str(exc))
 
             # ── 陌生 pending invite 自动撤销：跟随"监控中"状态，不看超员/codex ──
             # "监控中" = 已武装（全局 + 该 team 均已完成基线保护）+ 该 team 未豁免 + active。
@@ -2380,7 +2406,7 @@ def run_patrol(
                             "📨 陌生邀请：" + "、".join(c.get("email") or "?" for c in invite_candidates),
                             "🛡️ 处理状态：Team 已豁免，未自动处理",
                         ]
-                        notify_admins_sync(detail_card(f"🛡️ 巡逻发现陌生邀请 · {name}", rows))
+                        notify(detail_card(f"🛡️ 巡逻发现陌生邀请 · {name}", rows))
                         events.append({
                             "team_id": team_id, "team_name": name, "action": "exempt_skip_invite",
                             "count": len(invite_candidates),
@@ -2396,7 +2422,7 @@ def run_patrol(
                                 f"source={inv.get('source')} first_seen_at={inv.get('first_seen_at')}"
                             )
                             if effective_dry_run:
-                                _log_operation_sync(team_id, "patrol_would_revoke_invite", inv_email, reason, "dryrun")
+                                log_op(team_id, "patrol_would_revoke_invite", inv_email, reason, "dryrun")
                                 would_revoke_emails.append(inv_email)
                                 invites_would_revoke += 1
                                 events.append({
@@ -2423,7 +2449,7 @@ def run_patrol(
                             })
 
                         if effective_dry_run and would_revoke_emails:
-                            notify_admins_sync(detail_card(
+                            notify(detail_card(
                                 f"🧪 巡逻空跑 · 陌生邀请 · {name}",
                                 ["🧪 空跑候选：" + "、".join(would_revoke_emails)],
                             ))
@@ -2433,7 +2459,7 @@ def run_patrol(
                                 rows.append("✅ 已撤销：" + "、".join(revoked_emails))
                             if failed_invite_emails:
                                 rows.append("⚠️ 撤销失败：" + "、".join(failed_invite_emails))
-                            notify_admins_sync(detail_card(f"🚫 巡逻自动撤销陌生邀请 · {name}", rows))
+                            notify(detail_card(f"🚫 巡逻自动撤销陌生邀请 · {name}", rows))
 
             # ── 严格模式：所有 team（含 Codex）+ 非系统拉入的人 + 不看超员 ────────
             # 独立危险开关，默认关闭；必须先有该 team 的基线快照才生效。
@@ -2446,7 +2472,7 @@ def run_patrol(
 
                 if strict_candidates and is_exempt:
                     emails = [c.get("email") or "?" for c in strict_candidates]
-                    notify_admins_sync(detail_card(
+                    notify(detail_card(
                         f"🛡️ 严格模式发现疑似陌生成员 · {name}",
                         [f"👤 成员：{'、'.join(emails)}", "🛡️ 处理状态：Team 已豁免，未自动处理"],
                     ))
@@ -2457,14 +2483,14 @@ def run_patrol(
                 elif strict_candidates and strict_kick_batch_guard_exceeded(len(strict_outsiders), team_size):
                     # "别一次踢一片"：数量异常多，很可能是数据 half-broken 导致的误判，
                     # 宁可漏踢也不能误清一个队——只报警，不做任何自动处理。
-                    notify_admins_sync(detail_card(
+                    notify(detail_card(
                         f"🚨 严格模式异常：陌生成员数量过多 · {name}",
                         [
                             f"👥 疑似陌生成员：{len(strict_outsiders)} / 团队共 {team_size} 人",
                             "🛑 数量超过安全阈值，怀疑是数据异常，已跳过自动处理，请人工核查",
                         ],
                     ))
-                    _log_operation_sync(
+                    log_op(
                         team_id, "patrol_strict_batch_guard", None,
                         f"count={len(strict_outsiders)} team_size={team_size}", "failed",
                     )
@@ -2491,7 +2517,7 @@ def run_patrol(
                             ready_at = _strict_kick_ready_at(cand.get("first_seen_at"), mode, delay_hours)
                             ready_at_txt = ready_at.isoformat() if ready_at else "未知（缺少 first_seen_at，将不会自动处理）"
                             rows.append(f"👤 {cand_email}：预计 {ready_at_txt} 起可处理")
-                            _log_operation_sync(
+                            log_op(
                                 team_id, "patrol_strict_flagged", cand_email,
                                 f"first_seen_at={cand.get('first_seen_at')}", "flagged",
                             )
@@ -2501,14 +2527,14 @@ def run_patrol(
                             })
                         rows.append("🔎 判定依据：非系统邀请、无到期记录、非 Owner")
                         rows.append("💡 如为误判，请尽快豁免该 Team 或人工处理")
-                        notify_admins_sync(detail_card(f"🕒 严格模式检测到疑似陌生成员 · {name}", rows))
+                        notify(detail_card(f"🕒 严格模式检测到疑似陌生成员 · {name}", rows))
 
                     if ready_candidates:
                         if effective_dry_run:
                             would_emails = []
                             for cand in ready_candidates:
                                 cand_email = (cand.get("email") or "").strip().lower()
-                                _log_operation_sync(
+                                log_op(
                                     team_id, "patrol_would_strict_kick", cand_email,
                                     f"first_seen_at={cand.get('first_seen_at')}", "dryrun",
                                 )
@@ -2518,7 +2544,7 @@ def run_patrol(
                                     "team_id": team_id, "team_name": name, "email": cand_email,
                                     "action": "would_strict_kick", "result": "dryrun",
                                 })
-                            notify_admins_sync(detail_card(
+                            notify(detail_card(
                                 f"🧪 严格模式空跑候选 · {name}",
                                 ["🧪 空跑候选：" + "、".join(would_emails)],
                             ))
@@ -2526,11 +2552,11 @@ def run_patrol(
                             # 动手之前必须对该 team 强制实时刷新一次，不能拿旧缓存去踢人。
                             refresh_ok, refresh_err, strict_client = _refresh_team_snapshot_sync(conn, team)
                             if not refresh_ok:
-                                notify_admins_sync(detail_card(
+                                notify(detail_card(
                                     f"⚠️ 严格模式实时刷新失败 · {name}",
                                     [f"❌ 错误：{refresh_err}", "🛑 本轮跳过该 Team 的严格模式处理"],
                                 ))
-                                _log_operation_sync(
+                                log_op(
                                     team_id, "patrol_strict_refresh_failed", None, None, "failed", refresh_err,
                                 )
                                 events.append({
@@ -2554,14 +2580,14 @@ def run_patrol(
                                 ]
                                 # 刷新后复核一次批量护栏——刷新可能暴露出更严重的数据异常。
                                 if strict_kick_batch_guard_exceeded(len(fresh_outsiders), len(fresh_members)):
-                                    notify_admins_sync(detail_card(
+                                    notify(detail_card(
                                         f"🚨 严格模式异常（刷新后复核）· {name}",
                                         [
                                             f"👥 疑似陌生成员：{len(fresh_outsiders)} / 团队共 {len(fresh_members)} 人",
                                             "🛑 数量超过安全阈值，已跳过自动处理，请人工核查",
                                         ],
                                     ))
-                                    _log_operation_sync(
+                                    log_op(
                                         team_id, "patrol_strict_batch_guard", None,
                                         f"post_refresh count={len(fresh_outsiders)} team_size={len(fresh_members)}",
                                         "failed",
@@ -2592,14 +2618,14 @@ def run_patrol(
                                             rows.append("✅ 已移除：" + "、".join(kicked_emails))
                                         if failed_strict_emails:
                                             rows.append("⚠️ 处理失败：" + "、".join(failed_strict_emails))
-                                        notify_admins_sync(detail_card(f"🔴 严格模式已处理疑似陌生成员 · {name}", rows))
+                                        notify(detail_card(f"🔴 严格模式已处理疑似陌生成员 · {name}", rows))
 
             # ── 超员踢人：唯一依赖 seats_entitled 的一段 ──────────────────────
             # 席位数未知时 over_by 无从计算；按 0 算会把所有 detected 成员都当成超员候选。
             # 本轮跳过该 Team 的超员处理（真踢和空跑都不出候选），只记一条日志；上面的
             # 撤陌生邀请和严格模式不看席位数，照常执行。Codex 开的 Team 本来就不做超员踢人。
             if seats_entitled is None and not codex_enabled:
-                _log_operation_sync(
+                log_op(
                     team_id, "patrol_skip_invalid_entitlement", None,
                     f"seats_entitled={repr(team['seats_entitled'])[:64]}", "skipped",
                 )
@@ -2610,7 +2636,7 @@ def run_patrol(
                 continue
             # 库里的值合法但本轮没经上游确认（见 skip_over_quota_team_ids）：同样只跳过超员。
             if str(team_id) in skip_over_quota_ids and not codex_enabled:
-                _log_operation_sync(
+                log_op(
                     team_id, "patrol_skip_unconfirmed_entitlement", None,
                     f"stored seats_entitled={repr(team['seats_entitled'])[:64]} not confirmed this round",
                     "skipped",
@@ -2649,7 +2675,7 @@ def run_patrol(
                 )
                 if round_kicks_used:
                     capped_detail += f" premium_kicks={round_kicks_used}"
-                _log_operation_sync(
+                log_op(
                     team_id, "patrol_kick_batch_capped", None, capped_detail, "capped",
                 )
                 selected = selected[:over_quota_cap]
@@ -2668,7 +2694,7 @@ def run_patrol(
                 ]
                 if insufficient_note:
                     rows.append(f"👤 人工核查：{insufficient_note}")
-                notify_admins_sync(detail_card(f"⚠️ 巡逻发现超员 · {name}", rows))
+                notify(detail_card(f"⚠️ 巡逻发现超员 · {name}", rows))
                 events.append({
                     "team_id": team_id,
                     "team_name": name,
@@ -2696,7 +2722,7 @@ def run_patrol(
                 )
 
                 if effective_dry_run:
-                    _log_operation_sync(team_id, "patrol_would_kick", email, reason, "dryrun")
+                    log_op(team_id, "patrol_would_kick", email, reason, "dryrun")
                     would_kick_emails.append(email)
                     would_kick += 1
                     events.append({
@@ -2738,12 +2764,15 @@ def run_patrol(
                 )
             if insufficient_note:
                 rows.append(f"👤 人工核查：{insufficient_note}")
-            notify_admins_sync(detail_card(f"🚨 巡逻发现超员 · {name}", rows))
+            notify(detail_card(f"🚨 巡逻发现超员 · {name}", rows))
 
         conn.close()
         conn = None
     except Exception as e:
         _log_operation_sync(None, "patrol_job_error", None, None, "failed", str(e))
+        if preview:
+            # 预览半路出错时别交回一份残缺的"没人会被踢"，让调用方看到失败。
+            raise
     finally:
         if conn is not None:
             try:

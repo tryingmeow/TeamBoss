@@ -1,7 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -34,6 +34,16 @@ class PatrolSettingsUpdate(BaseModel):
 
 class PatrolRunRequest(BaseModel):
     dry_run: bool = True
+    # live：先现场刷新每个 active Team，只巡逻刷新成功的（真跑只能走这条）。
+    # cache：不调上游，拿库里已存的成员 / 席位缓存出一份只读的空跑预览。
+    source: Literal["live", "cache"] = "live"
+    # 只预览这些 Team（只给 cache 用）：面板先逐个现场刷新，再只拿刷新成功的出预览。
+    team_ids: Optional[list[str]] = None
+
+
+# 现场刷新时同时刷新的 Team 数。每个 Team 内部仍是成员 → 席位 → 写缓存的顺序；
+# 上游请求总并发另有 chatgpt_limiter 的全局上限管着。
+PATROL_REFRESH_CONCURRENCY = 3
 
 
 def _now_iso() -> str:
@@ -185,6 +195,105 @@ async def update_patrol_settings(req: PatrolSettingsUpdate):
 
 # ── POST /api/patrol/run ────────────────────────────────────────────────
 
+def _parse_time(value) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _error_text(exc: BaseException) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, dict):
+        detail = detail.get("message") or detail.get("detail")
+    return str(detail or exc)
+
+
+async def _refresh_patrol_inputs(team_id: str) -> None:
+    """现场刷新一个 Team 巡逻执行链路的三项输入（成员/邀请名单、订阅、席位数），任何一步失败都抛。"""
+    client = await get_team_client(team_id)
+    await fetch_and_cache_members(team_id, client)
+    capacity, subscription, seat_counts, _pending = (
+        await fetch_live_chatgpt_seat_capacity(client)
+    )
+    await update_capacity_cache(team_id, subscription, seat_counts)
+
+
+async def _refresh_teams_for_patrol(
+    team_ids: list[str], concurrency: int
+) -> tuple[list[str], list[str]]:
+    """逐个 Team 现场刷新，同时最多 ``concurrency`` 个。返回 (刷新成功的, 失败说明)，都按传入顺序。
+
+    每个 Team 只由一个协程刷新一次，全部结束后才返回，所以并发不改变"谁进白名单"：
+    仍然只有三项输入全部刷新成功的 Team。
+    """
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def refresh_one(team_id: str) -> Optional[str]:
+        async with semaphore:
+            try:
+                await _refresh_patrol_inputs(team_id)
+            except Exception as exc:
+                return f"{team_id}: {exc}"
+        return None
+
+    outcomes = await asyncio.gather(*(refresh_one(team_id) for team_id in team_ids))
+    refreshed = [team_id for team_id, error in zip(team_ids, outcomes) if error is None]
+    failures = [error for error in outcomes if error is not None]
+    return refreshed, failures
+
+
+async def _usable_cache_times(team_ids: list[str]) -> dict[str, str]:
+    """有可用成员缓存（非空名单）的 Team → 这份缓存的时间。和 run_patrol 的冷启动守卫同一个判断。"""
+    if not team_ids:
+        return {}
+    placeholders = ",".join("?" for _ in team_ids)
+    async with get_db() as db:
+        cursor = await db.execute(
+            f"SELECT team_id, members_json, updated_at FROM member_cache WHERE team_id IN ({placeholders})",
+            team_ids,
+        )
+        rows = await cursor.fetchall()
+    usable: dict[str, str] = {}
+    for row in rows:
+        try:
+            members = json.loads(row["members_json"] or "[]")
+        except Exception:
+            continue
+        if isinstance(members, list) and members:
+            usable[row["team_id"]] = row["updated_at"] or ""
+    return usable
+
+
+async def _run_cached_preview(team_rows: list, team_ids: Optional[list[str]]) -> dict:
+    """缓存空跑预览：不调上游，只读。没有可用缓存的 Team 单独列出来，不拿别的数据去猜。"""
+    if team_ids is not None:
+        wanted = {str(team_id) for team_id in team_ids}
+        team_rows = [row for row in team_rows if row["id"] in wanted]
+    ids = [row["id"] for row in team_rows]
+    cache_times = await _usable_cache_times(ids)
+    allow_team_ids = [team_id for team_id in ids if team_id in cache_times]
+    no_cache_teams = [
+        {"team_id": row["id"], "name": row["name"] or row["id"]}
+        for row in team_rows
+        if row["id"] not in cache_times
+    ]
+
+    try:
+        result = await asyncio.to_thread(run_patrol, True, allow_team_ids, preview=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"预览失败：{exc}") from exc
+    # 同一批里最旧的那份缓存，就是这份预览能保证的"数据截至"；有一份读不出时间就不报（未知）。
+    times = [_parse_time(cache_times[team_id]) for team_id in allow_team_ids]
+    result["as_of"] = min(times).isoformat() if times and None not in times else None
+    result["no_cache_teams"] = no_cache_teams
+    result["skipped_teams"] = []
+    result["team_count"] = len(allow_team_ids)
+    result["source"] = "cache"
+    return result
+
+
 @router.post("/run")
 async def trigger_patrol_run(req: PatrolRunRequest):
     """手动触发一轮巡逻。
@@ -195,26 +304,27 @@ async def trigger_patrol_run(req: PatrolRunRequest):
     的 team 这一轮不碰——手动按钮同样不允许拿着一份从没刷新过的冻结缓存去判超员、
     挑人。和 ``/activate`` 的"全部刷新成功才动手"是同一条原则，只是这里退化成按
     team 生效，不整体拒绝。
+
+    ``source="cache"`` 是例外，而且只给空跑：直接拿已存缓存出预览，不刷新、不发通知、
+    不写库。真跑带 cache 一律拒绝。
     """
+    if req.source == "cache" and not req.dry_run:
+        raise HTTPException(status_code=400, detail="缓存数据只能用来空跑预览，真踢必须实时刷新")
+    if req.team_ids is not None and req.source != "cache":
+        raise HTTPException(status_code=400, detail="只预览部分 Team 仅支持缓存预览")
+
     async with get_db() as db:
-        cursor = await db.execute("SELECT id FROM teams WHERE status = 'active'")
+        cursor = await db.execute("SELECT id, name FROM teams WHERE status = 'active'")
         team_rows = await cursor.fetchall()
 
-    allow_team_ids: list[str] = []
-    refresh_failures: list[str] = []
-    for row in team_rows:
-        team_id = row["id"]
-        try:
-            client = await get_team_client(team_id)
-            await fetch_and_cache_members(team_id, client)
-            capacity, subscription, seat_counts, _pending = (
-                await fetch_live_chatgpt_seat_capacity(client)
-            )
-            await update_capacity_cache(team_id, subscription, seat_counts)
-        except Exception as exc:
-            refresh_failures.append(f"{team_id}: {exc}")
-            continue
-        allow_team_ids.append(team_id)
+    if req.source == "cache":
+        return await _run_cached_preview(team_rows, req.team_ids)
+
+    # 空跑可以几个 Team 一起刷新；真跑保持一个一个来，和以前完全一样。
+    concurrency = PATROL_REFRESH_CONCURRENCY if req.dry_run else 1
+    allow_team_ids, refresh_failures = await _refresh_teams_for_patrol(
+        [row["id"] for row in team_rows], concurrency
+    )
 
     if refresh_failures:
         await log_operation(
@@ -230,7 +340,31 @@ async def trigger_patrol_run(req: PatrolRunRequest):
     # 丢进线程池跑，不阻塞事件循环。与 tg_notify.notify_admins 的做法一致。
     result = await asyncio.to_thread(run_patrol, req.dry_run, allow_team_ids)
     result["skipped_teams"] = refresh_failures
+    result["team_count"] = len(allow_team_ids)
+    result["source"] = "live"
     return result
+
+
+# ── POST /api/patrol/refresh/{team_id} ──────────────────────────────────
+
+@router.post("/refresh/{team_id}")
+async def refresh_team_for_patrol(team_id: str):
+    """现场刷新一个 active Team 的巡逻输入，和 /run 实时模式对每个 Team 做的是同一件事。
+
+    面板的实时演练用它逐个刷新（能显示进度），再只拿刷新成功的 Team 出缓存预览。
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT id FROM teams WHERE id = ? AND status = 'active'", (team_id,)
+        )
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Team 不存在或未启用")
+    try:
+        await _refresh_patrol_inputs(team_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"刷新失败：{_error_text(exc)}") from exc
+    cache_times = await _usable_cache_times([team_id])
+    return {"team_id": team_id, "status": "ok", "cached_at": cache_times.get(team_id)}
 
 
 # ── POST /api/patrol/activate ───────────────────────────────────────────
