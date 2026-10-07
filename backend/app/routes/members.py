@@ -177,6 +177,8 @@ _OPEN_REDEMPTION_LOG_ACTIONS = {
     "invite": "invite_member",
     "set_expiry": "set_expiry",
     "extend_expiry": "extend_expiry",
+    "remove_member": "remove_member",
+    "revoke_invite": "revoke_invite",
 }
 
 
@@ -207,8 +209,7 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
       语义加在管理员这次的记录之上，与"管理员先邀请、客户后兑换"的串行顺序结果
       相同：两笔都是真实授予，不是同一笔被记两次。
 
-    续期在成员操作占用之内调用（兑换的续期分支拿同一个占用）；设置到期本来就不持锁，
-    检查只挡住调用时已经存在的未结兑换。
+    续期、设置到期、移除和撤邀请均在成员操作占用之内调用，防止检查后并发记账。
     """
     open_redemption = await find_open_redemption(
         team_id, email, uncertain_in_any_team=operation == "invite"
@@ -216,7 +217,11 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
     if open_redemption is None:
         return
     token_use_id = open_redemption["token_use_id"]
-    detail = open_redemption_detail(open_redemption, operation=operation)
+    detail = (
+        "该邮箱有一笔未结兑换，未移除成员或撤销邀请；请等待兑换完成，或在待确认的兑换中完成对账。"
+        if operation in {"remove_member", "revoke_invite"}
+        else open_redemption_detail(open_redemption, operation=operation)
+    )
     await log_operation(
         team_id,
         _OPEN_REDEMPTION_LOG_ACTIONS[operation],
@@ -562,14 +567,20 @@ async def _invite_member_claimed(team_id: str, req: InviteMemberRequest, expires
 
 @router.delete("/members/{user_id}")
 async def remove_member(team_id: str, user_id: str):
-    target_email: str | None = None
-    cached = await get_cached_members(team_id)
-    if cached:
-        for member in cached["members"]:
-            if member.get("id") == user_id:
-                target_email = member.get("email")
-                break
+    canonical_user_id, target_email = await _resolve_member_identity(team_id, user_id)
+    async with member_operation_claim(
+        team_id, email=target_email, user_id=canonical_user_id, operation="admin_remove_member"
+    ) as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="成员状态正在变更，请稍后重试")
+        canonical_user_id, target_email = await _resolve_member_identity(
+            team_id, user_id, target_email, refresh=True
+        )
+        await _refuse_if_open_redemption(team_id, target_email, operation="remove_member")
+        return await _remove_member_claimed(team_id, canonical_user_id, target_email)
 
+
+async def _remove_member_claimed(team_id: str, user_id: str, target_email: str):
     client = await get_team_client(team_id)
     result = await run_chatgpt_call(client.remove_member, user_id)
 
@@ -742,8 +753,23 @@ async def _change_seat_claimed(team_id: str, user_id: str, email: str, target: s
 
 @router.delete("/invites/{email:path}")
 async def revoke_invite(team_id: str, email: str):
-    email = unquote(email)
-    client = await get_team_client(team_id)
+    email = unquote(email).strip().lower()
+    async with team_invite_lock(team_id):
+        async with member_operation_claim(
+            team_id, email=email, operation="admin_revoke_invite"
+        ) as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail="成员状态正在变更，请稍后重试")
+            await _refuse_if_open_redemption(team_id, email, operation="revoke_invite")
+            client = await get_team_client(team_id)
+            snapshot = await fetch_and_cache_members(team_id, client)
+            kind, _entry = _snapshot_email_entry(snapshot, email)
+            if kind != "invite":
+                raise HTTPException(status_code=409, detail="邀请状态已变化，请刷新后重试")
+            return await _revoke_invite_claimed(team_id, email, client)
+
+
+async def _revoke_invite_claimed(team_id: str, email: str, client):
     result = await run_chatgpt_call(client.revoke_invite, email)
 
     error = _chatgpt_error(result)
@@ -766,15 +792,23 @@ async def revoke_invite(team_id: str, email: str):
 async def set_expiry(team_id: str, user_id: str, req: SetExpiryRequest):
     expires_at, detail = _expiry_from_request(req)
     canonical_user_id, email = await _resolve_member_identity(team_id, user_id, req.email)
-    # 有对账日后还会记账的兑换就 409：否则对账会在这次设的到期上再加一次兑换码时长。
-    await _refuse_if_open_redemption(team_id, email, operation="set_expiry")
-    expires_iso = await upsert_member_expiry(team_id, canonical_user_id, email, expires_at)
-    await log_operation(team_id, "set_expiry", email, f"user_id={canonical_user_id}, {detail}", "success")
-    await update_cached_member_expiry(
-        team_id, user_id=canonical_user_id, email=email, expires_at=expires_iso
-    )
+    async with member_operation_claim(
+        team_id, email=email, user_id=canonical_user_id, operation="admin_set_expiry"
+    ) as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail="成员状态正在变更，请稍后重试")
+        canonical_user_id, email = await _resolve_member_identity(
+            team_id, user_id, email, refresh=True
+        )
+        # 有对账日后还会记账的兑换就 409：否则对账会在这次设的到期上再加一次兑换码时长。
+        await _refuse_if_open_redemption(team_id, email, operation="set_expiry")
+        expires_iso = await upsert_member_expiry(team_id, canonical_user_id, email, expires_at)
+        await log_operation(team_id, "set_expiry", email, f"user_id={canonical_user_id}, {detail}", "success")
+        await update_cached_member_expiry(
+            team_id, user_id=canonical_user_id, email=email, expires_at=expires_iso
+        )
 
-    return {"status": "ok", "expires_at": expires_iso}
+        return {"status": "ok", "expires_at": expires_iso}
 
 
 @router.post("/members/{user_id}/expiry/extend")
