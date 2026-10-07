@@ -15,7 +15,7 @@ import { BUTTON, CARD } from './ui';
  *
  * key 带版本号：条款内容有实质变化时递增版本号，所有人会重新确认一次。
  */
-const STORAGE_KEY = 'teamboss.terms.accepted.v2';
+const STORAGE_KEY = 'teamboss.terms.accepted.v3';
 
 interface TermsGateProps {
   children: ReactNode;
@@ -23,9 +23,9 @@ interface TermsGateProps {
 
 interface Term {
   id: string;
-  /** The checkbox sentence: first person, one complete statement. */
+  /** The checkbox sentence: affirmative formal statement. */
   text: ReactNode;
-  /** Background facts under the sentence; inside the label, so clicking it ticks the box too. */
+  /** Professional background context and obligations under the statement. */
   note?: string;
 }
 
@@ -35,77 +35,80 @@ function Key({ children }: { children: ReactNode }) {
 
 const GROUPS: { title: string; terms: Term[] }[] = [
   {
-    title: '风险',
+    title: '系统运行与安全边界',
     terms: [
       {
         id: 'unofficial',
         text: (
           <>
-            我明白 TeamBoss 依赖 ChatGPT / OpenAI <Key>未公开的私有接口</Key>，官方随时可能改动它们，功能很可能
-            <Key>有时效性</Key>，随时会不经通知地失效。
+            本人已充分知悉 TeamBoss 基于 ChatGPT / OpenAI <Key>未公开的私有协议与非官方接口</Key>运行，其功能具备
+            <Key>强时效性与不确定性</Key>，随时可能因上游接口调整或服务策略变更而失效。
           </>
         ),
-        note: '本项目与 OpenAI 没有任何关联，不是官方产品。',
+        note: '本项目为独立第三方开源工具，与 OpenAI 官方无任何隶属、合作或商业关联。',
       },
       {
         id: 'credentials',
         text: (
           <>
-            我知晓 Owner 账号的登录凭证会<Key>以明文存放在这台服务器上</Key>，拿到服务器、数据卷或备份的人，就能完全接管我的
-            Team。
+            本人已明确知晓工作区 Owner 凭证（包括 Access Token 及 Session Cookie）将
+            <Key>以明文形式持久化于本地服务器</Key>，任何获取宿主机、数据卷或备份访问权限的主体均可完整控制对应工作区。
           </>
         ),
-        note: '接入 Team 需要提供 Owner 账号的会话数据（access token 和 session cookie）。',
+        note: '部署者须自行承担基础设施与宿主机的安全隔离、存储权限管控及凭证防护责任。',
       },
       {
         id: 'auto-kick',
         text: (
           <>
-            我知道到期踢人和巡逻踢人会<Key>真的把成员移出 Team</Key>，用之前我会先弄清触发规则，并核对成员数据。
+            本人已明确知晓到期清理与巡逻机制将对工作区成员
+            <Key>实际执行不可逆的移出与权限变更操作</Key>，承诺在启用相关自动化能力前核验触发规则及成员数据。
           </>
         ),
-        note: '设了到期时间的成员，到点会被自动移出。巡逻踢人出厂是空跑演练，在「TG 与巡逻」页激活后，会在超员或有人占用 Premium 席位时，移除绕过 TeamBoss 加入的成员。',
+        note: '到期成员将按既定策略自动解除席位；巡逻剔除功能出厂默认处于演练模式（Dry-Run），激活后将依据规则自动移除违规或超员接入的外部成员。',
       },
       {
         id: 'premium-beta',
         text: (
           <>
-            我知晓 <Key>Premium 席位是 Beta 功能</Key>，从未在生产环境中测试过，随时可能出错。
+            本人已明确知晓 <Key>Premium 席位管理属于实验性功能（Beta）</Key>，尚未经过生产环境充分验证，可能存在未知缺陷或处理异常。
           </>
         ),
-        note: '涉及 Premium 的邀请、换席位、兑换码和巡逻都算在内；Premium 席位单价高、按月扣费，出错的代价也更大。',
+        note: '涉及 Premium 席位之邀请分配、席位切换、兑换流转及巡逻逻辑均属实验性范围；鉴于该类席位单价较高且涉及周期性账单变更，请谨慎评估启用风险。',
       },
     ],
   },
   {
-    title: '责任',
+    title: '使用责任与免责声明',
     terms: [
       {
         id: 'review',
         text: (
           <>
-            我会在投入生产使用前，<Key>自己审查一遍代码</Key>，或者让 AI Agent 替我审查。
+            本人承诺在正式投入生产环境使用前，
+            <Key>独立完成源代码审查与业务逻辑评估</Key>（或经由受信自动化审计工具完成合规复核）。
           </>
         ),
-        note: '它会用 Owner 凭证邀请、移除成员，必要时加购席位并扣费，上线前值得先看清它到底做了什么。',
+        note: '系统将持 Owner 权限自动执行成员增删、席位调整及计费增购等高危操作，部署者有责任在投产前充分审阅其执行逻辑与安全边界。',
       },
       {
         id: 'own-risk',
         text: (
           <>
-            我同意<Key>自行承担</Key>使用 TeamBoss 的<Key>全部风险</Key>，一切后果由我自行负责。
+            本人确认自愿并<Key>独立承担使用本项目的全部风险与后果</Key>，包括但不限于合规风险、资产损失及账号安全风险。
           </>
         ),
-        note: '用非官方接口操作 ChatGPT 处在服务条款的灰色地带，账号有被限制或封禁的可能，别用输不起的账号。',
+        note: '经由非官方逆向通道管理工作区可能违反服务提供商的服务条款，存在工作区功能受限、速率拦截或账号被处置的潜在风险。',
       },
       {
         id: 'no-liability',
         text: (
           <>
-            我同意作者对任何损失<Key>概不负责</Key>，包括扣费、加购的席位、被移除的成员，以及账号被限制或封禁。
+            本人确认免除项目开发者及贡献者的全部法律责任与经济赔偿义务，同意开发者对因使用本项目导致的
+            <Key>任何直接或间接损失概不负责</Key>。
           </>
         ),
-        note: '完整免责声明见项目 README。',
+        note: '免责范围涵盖但不限于自动扣费、席位增购、成员变更、数据灭失及账号处置等一切连带后果。详见项目根目录完整免责声明。',
       },
     ],
   },
@@ -154,16 +157,16 @@ export default function TermsGate({ children }: TermsGateProps) {
   if (accepted) return <>{children}</>;
 
   return (
-    <PublicShell title="使用条款" width="xl">
+    <PublicShell title="安全须知与风险确认" width="xl">
       <div className={cn(CARD, 'shadow-sm')}>
         <div className="flex items-start gap-3 border-b border-gray-200 px-5 py-5 sm:px-7 dark:border-ink-800">
           <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-amber-50 dark:bg-amber-500/15">
             <AlertTriangle size={20} className="text-amber-600 dark:text-amber-400" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">使用前请逐条确认</h1>
+            <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">安全须知与风险确认</h1>
             <p className="mt-0.5 text-sm text-gray-500 dark:text-ink-400">
-              第一次在这台设备上打开管理后台，需要读完并勾选下面每一条。
+              首次在此设备访问管理控制台须完成风险知悉确认。请逐项审阅并勾选确认以下条款。
             </p>
           </div>
         </div>
@@ -211,11 +214,11 @@ export default function TermsGate({ children }: TermsGateProps) {
           <div className="flex items-center justify-between gap-3">
             <p id={progressId} aria-live="polite" className="text-sm text-gray-600 dark:text-ink-300">
               {allChecked ? (
-                '已全部确认'
+                '已完成全部条款确认'
               ) : (
                 <>
                   已确认 <span className="font-semibold tabular-nums text-gray-900 dark:text-gray-100">{checked.size}</span>
-                  <span className="tabular-nums"> / {TERM_COUNT}</span> 条
+                  <span className="tabular-nums"> / {TERM_COUNT}</span> 项
                 </>
               )}
             </p>
@@ -229,7 +232,7 @@ export default function TermsGate({ children }: TermsGateProps) {
               同意并继续
             </button>
           </div>
-          <p className="mt-2.5 text-xs text-gray-500 dark:text-ink-400">不同意请直接关闭页面，并停止使用本项目。</p>
+          <p className="mt-2.5 text-xs text-gray-500 dark:text-ink-400">若不同意上述任一条款，请立即关闭本页面并终止使用本项目。</p>
         </div>
       </div>
     </PublicShell>
