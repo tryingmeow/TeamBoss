@@ -32,13 +32,19 @@ class TeamResponse(BaseModel):
     billing_symbol: Optional[str] = None
     billing_period: Optional[str] = None
     price_per_seat: Optional[float] = None
-    discount_amount: float = 0.0
+    # Premium 每席每月价格（真实单价，不含税，币种同 billing_currency；年付是年付方案的月价）；
+    # 计费周期未知或单价对不上为 None。price_per_seat 同样是每月。
+    premium_price_per_seat: Optional[float] = None
+    discount_amount: Optional[float] = 0.0
     discount_duration_num_periods: Optional[int] = None
     discount_expires_at: Optional[str] = None
     discount_quantity_off: Optional[int] = None
     promo_campaign_id: Optional[str] = None
+    # 每月（年付为月均 = 一年 / 12）；period_total 是一个计费周期的钱（月付一个月，年付一年）。
     monthly_subtotal: Optional[float] = None
     monthly_total: Optional[float] = None
+    period_total: Optional[float] = None
+    period_subtotal: Optional[float] = None
     balance: str
     active_start: Optional[str] = None
     active_until: Optional[str] = None

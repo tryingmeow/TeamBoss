@@ -2,6 +2,7 @@ import hashlib
 import re
 from datetime import datetime, timezone
 from http import HTTPStatus
+from uuid import uuid4
 
 import jwt
 from curl_cffi import requests as curl_requests
@@ -504,6 +505,35 @@ class ChatGPTClient:
             return resp.json()
         except Exception as e:
             return self._error(e)
+
+    def preview_seat_purchase(self, quantities: dict[str, int]) -> dict:
+        """Request a quote only; this endpoint never submits a subscription update."""
+        try:
+            resp = self.session.post(
+                f"{self.base_url}/backend-api/subscriptions/update/preview",
+                json={
+                    "account_id": self.team_id,
+                    "flow_id": str(uuid4()),
+                    "mutation_attempt_id": str(uuid4()),
+                    "updated_seat_quantities": [
+                        {"seat_type": seat_type, "quantity": quantity}
+                        for seat_type, quantity in quantities.items()
+                    ],
+                },
+                allow_redirects=False,
+                timeout=60,
+            )
+            _raise_for_status(resp)
+            if not 200 <= resp.status_code < 300:
+                return {"error": "seat_purchase_quote_unavailable", "status_code": resp.status_code}
+            return resp.json()
+        except Exception as exc:
+            # Billing bodies may contain payment details. Do not retain upstream errors.
+            result = {"error": "seat_purchase_quote_unavailable"}
+            status_code = _upstream_status(exc)
+            if status_code is not None:
+                result["status_code"] = status_code
+            return result
 
     def get_members(self, offset: int = 0, limit: int = 25) -> dict:
         try:

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .database import init_database
 from .scheduler import start_scheduler, stop_scheduler
 from .routes import teams, members, sessions, settings, logs, access_tokens, admin, users, resources, proxies, gpt_members, finance, patrol, tg, team_policy
+from .routes import seat_purchase_preview
 from .security import (
     _bearer_token,
     ensure_admin_credentials_initialized,
@@ -93,6 +94,7 @@ admin_dependencies = [Depends(require_admin)]
 
 app.include_router(teams.router, dependencies=admin_dependencies)
 app.include_router(team_policy.router, dependencies=admin_dependencies)
+app.include_router(seat_purchase_preview.router, dependencies=admin_dependencies)
 app.include_router(members.router, dependencies=admin_dependencies)
 app.include_router(sessions.router, dependencies=admin_dependencies)
 app.include_router(settings.router, dependencies=admin_dependencies)

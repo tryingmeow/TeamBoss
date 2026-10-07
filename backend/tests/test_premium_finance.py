@@ -1,4 +1,4 @@
-"""财务总览里的 Premium 估算与 ChatGPT 计费席位数。"""
+"""财务总览里的 Premium 未知单价与 ChatGPT 计费席位数。"""
 import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import json
@@ -48,7 +48,7 @@ class PremiumFinanceTest(unittest.TestCase):
     def _team(self, result, team_id):
         return next(item for item in result["teams"] if item["team_id"] == team_id)
 
-    def test_premium_estimate_and_billed_chatgpt_seats(self):
+    def test_unknown_premium_and_billed_chatgpt_seats(self):
         self._insert_team(
             id="p1", name="P1", price_per_seat=25.0, seats_entitled=5, seats_in_use=3,
             seat_capacity_json=json.dumps(
@@ -59,13 +59,9 @@ class PremiumFinanceTest(unittest.TestCase):
         team = self._team(result, "p1")
         self.assertEqual(team["chatgpt_seats_billed"], 3)
         self.assertEqual(team["premium_seats_paid"], 2)
-        self.assertEqual(team["premium_monthly_estimate_usd"], 250)
-        self.assertAlmostEqual(team["premium_monthly_estimate_base"], 250.0)
         # ChatGPT 月费只乘 default 已付席位，不含 Premium。
-        self.assertAlmostEqual(team["monthly_total_native"], 75.0)
-        self.assertAlmostEqual(result["monthly_total_base"], 75.0)
-        self.assertAlmostEqual(result["premium_monthly_estimate_base_total"], 250.0)
-        self.assertEqual(result["premium_seat_price_estimate_usd"], 125)
+        self.assertIsNone(team["monthly_total_native"])
+        self.assertEqual(result["monthly_total_base"], 0.0)
 
     def test_unknown_capacity_falls_back_to_entitled_and_zero_premium(self):
         self._insert_team(
@@ -75,9 +71,7 @@ class PremiumFinanceTest(unittest.TestCase):
         team = self._team(result, "p2")
         self.assertEqual(team["chatgpt_seats_billed"], 5)
         self.assertEqual(team["premium_seats_paid"], 0)
-        self.assertEqual(team["premium_monthly_estimate_usd"], 0)
         self.assertAlmostEqual(team["monthly_total_native"], 125.0)
-        self.assertAlmostEqual(result["premium_monthly_estimate_base_total"], 0.0)
 
     def test_capacity_without_premium_entry_is_zero_premium(self):
         self._insert_team(
@@ -88,7 +82,7 @@ class PremiumFinanceTest(unittest.TestCase):
         self.assertEqual(team["chatgpt_seats_billed"], 4)
         self.assertEqual(team["premium_seats_paid"], 0)
 
-    def test_no_fx_rate_gives_null_base_estimate(self):
+    def test_no_fx_rate_gives_unknown_total(self):
         self._insert_team(
             id="p4", name="P4", price_per_seat=25.0, seats_entitled=2,
             seat_capacity_json=json.dumps({"prolite": {"paid": 1, "available": 0}}),
@@ -96,9 +90,6 @@ class PremiumFinanceTest(unittest.TestCase):
         with patch("app.routes.finance.convert", return_value=None):
             result = asyncio.run(get_overview())
         team = self._team(result, "p4")
-        self.assertEqual(team["premium_monthly_estimate_usd"], 125)
-        self.assertIsNone(team["premium_monthly_estimate_base"])
-        self.assertEqual(result["premium_monthly_estimate_base_total"], 0.0)
 
 
 if __name__ == "__main__":

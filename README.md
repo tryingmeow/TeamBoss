@@ -2,7 +2,14 @@
 
 [![CI](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml/badge.svg)](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml)
 
-**English:** TeamBoss is a self-hosted admin panel for ChatGPT Team / Business workspaces (FastAPI + React, SQLite, Docker Compose). It puts seats, members, expiry and billing of multiple workspaces in one dashboard, with a per-workspace overage policy, scheduled patrols, auto-removal of expired or unexpected members, self-service redemption codes and a Telegram bot. The UI and docs are in Chinese. It is unofficial and relies on ChatGPT's private, undocumented web endpoints, which can change or break at any time. Use it at your own risk: the authors accept no liability for any loss (charges, added seats, removed members, account restrictions). Review the code before using it in production. Premium seat support is beta and has never been tested in production. See the disclaimer (免责声明) below and the [getting-started guide](docs/getting-started.md) (Chinese) for a Docker Compose quickstart.
+<a id="production-test-scope"></a>
+
+> [!CAUTION]
+> **生产测试范围**
+>
+> 目前仅对已购买的月付 ChatGPT Standard 席位做过生产测试。Premium、年付及超出已购席位的邀请尚未经过生产测试，不保证费用准确或操作成功。
+
+**English:** TeamBoss is a self-hosted admin panel for ChatGPT Team / Business workspaces (FastAPI + React, SQLite, Docker Compose). It puts seats, members, expiry and billing of multiple workspaces in one dashboard, with a per-workspace overage policy, scheduled patrols, auto-removal of expired or unexpected members, self-service redemption codes and a Telegram bot. The UI and docs are in Chinese. It is unofficial and relies on ChatGPT's private, undocumented web endpoints, which can change or break at any time. Use it at your own risk: the authors accept no liability for any loss (charges, added seats, removed members, account restrictions). Review the code before using it in production. Premium operations, annual billing and invitations beyond already-purchased seats remain untested in production; see the production-test notice above. See the disclaimer (免责声明) below and the [getting-started guide](docs/getting-started.md) (Chinese) for a Docker Compose quickstart.
 
 ---
 
@@ -39,7 +46,7 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
 - **到期与自动踢人** —— 给成员设到期时间，后台定时任务到点自动移除。
 - **自助兑换** —— 生成一次性兑换码，分 ChatGPT 码和 Premium 码（**Beta**）；成员凭邮箱 + 兑换码自助加入 / 续期 / 查自己的状态，无需你手动操作。兑换只用已经付费的空位，**任何超员策略下都不会加购席位**；没有空位就兑换失败，码不消耗。
 - **Session 管理** —— 导入 / 导出 ChatGPT 账号会话，access_token 过期自动用 session cookie 刷新。
-- **账单与财务** —— Team 卡片上的「查看账单」打开这个 Team 已同步的 Stripe 账单；「财务」页汇总各队订阅、账单、汇率换算。上游不提供 Premium 单价，Premium 支出一律标为「估算」。
+- **账单与财务** —— Team 卡片上的「查看账单」打开已同步的 Stripe 账单；「财务」页汇总各队订阅、折扣、账单和汇率换算，支持标准与 Premium 的真实价格及月付／年付。金额与优惠的计算方式见[上手指南 §6](docs/getting-started.md#6-钱都花在哪了)。
 - **巡检与告警** —— 定时巡检 Team 健康，异常通过 Telegram 告警；续费前 3 天内还有没人用的计费席位（ChatGPT / Premium）会提醒一次，卡片上同时出现「续费前可减 N 席」（只提醒，不改账单）。巡逻会按规则自动移除绕过 TeamBoss 加入的外部成员：ChatGPT 席位超员时移除多出来的那几个；占用 Premium 席位的外部成员不论是否超员都会移除（**Beta**）；陌生的待接受邀请会被撤销。Owner、开启时已在队里的人、TeamBoss 邀请过或凭兑换码加入的人受保护，开了 Codex 或设了豁免的 Team 不踢人，完整规则见上手指南 [4.2](docs/getting-started.md#42-巡逻自动踢人--它会真的把人移出你的工作区)。巡逻**出厂是空跑演练**，要在后台「TG 与巡逻」页手动激活后才会真的移除人。
 - **Telegram 机器人** —— Team 状态与异常通知 + 常用命令（邀请 / 移除 / 查成员 / 查自己的到期等；管理命令仅限已配对管理员）。**默认关闭**，需填入 Bot Token 后在后台开启。
 - **操作日志** —— 成员操作、Team 管理（含超员策略修改）、系统设置、代理、Telegram 配置、财务设置、巡检自动移除开关等写操作均留痕可查；密钥类字段只记掩码，不落明文。
@@ -61,7 +68,7 @@ TeamBoss 是一个自托管的 ChatGPT Team / Business 工作区管理面板。�
   <img alt="账单对话框：顶部是累计实付、近 30 天实付、最新一期三个汇总，下方是逐期账单表，列出账期、状态、应付、实付、说明和跳到 Stripe 发票的链接" src="docs/images/team-billing.png">
 </picture>
 
-财务总览：各队订阅、折扣、余额按基准币种汇总，带支出趋势；Premium 支出按估算单独标出。
+财务总览：各队订阅、折扣、余额按基准币种汇总，带支出趋势；月付和年付分别按月均展示，并列出年付全年金额及整期续费金额。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/finance-dark.png">
@@ -321,7 +328,7 @@ npm ci
 npm run demo                      # 即 vite --mode demo，打开 http://localhost:5173/admin
 ```
 
-演示模式下 Vite 不配置 `/api` 代理，前端启动时把浏览器的 `fetch` 换成一个内存里的假后端：所有 `/api/*` 请求（哪怕设置了 `VITE_API_BASE_URL`）都由浏览器里的虚构数据应答，**一条都不会发到真后端，也不会碰到 ChatGPT**，所以不需要后端在跑，也不需要 `.env`。任意密码都能登录，所有改动只存在内存里，刷新即重置。演示数据覆盖了三种超员策略、Premium 席位、会话失效、超员、多币种账单等状态，适合先看界面或截图（上面的截图就来自这里）；邮箱、卡号、金额全部是编造的。这段演示代码只在 `demo` 模式下加载，`npm run build` 出来的正式构建里没有它。
+演示模式下 Vite 不配置 `/api` 代理，前端启动时把浏览器的 `fetch` 换成一个内存里的假后端：所有 `/api/*` 请求（哪怕设置了 `VITE_API_BASE_URL`）都由浏览器里的虚构数据应答，**一条都不会发到真后端，也不会碰到 ChatGPT**，所以不需要后端在跑，也不需要 `.env`。任意密码都能登录，所有改动只存在内存里，刷新即重置。演示数据覆盖了三种超员策略、月付、年付无优惠、真实 Premium 价格和未知价格，以及会话失效、超员、多币种账单等状态，适合先看界面或截图（上面的截图就来自这里）；邮箱、卡号、金额全部是编造的。这段演示代码只在 `demo` 模式下加载，`npm run build` 出来的正式构建里没有它。
 
 `npm run dev` 起的 Vite 开发服务器会把 `/api` 请求代理到后端：目标地址优先取 `VITE_API_BASE_URL`，否则用 `http://AUTO_TEAM_BACKEND_HOST:AUTO_TEAM_BACKEND_PORT`（默认 `127.0.0.1:18087`），这些变量都从仓库根目录的 `.env` 读取。前端端口可用 `AUTO_TEAM_FRONTEND_PORT` 改。开发服务器默认只绑定 `127.0.0.1`；确需从其他机器访问时设置 `AUTO_TEAM_FRONTEND_HOST`（例如 `0.0.0.0`），注意这会把开发服务器暴露出去。
 
@@ -329,6 +336,7 @@ npm run demo                      # 即 vite --mode demo，打开 http://localho
 
 ```bash
 cd backend
+python -m pip install -r requirements-test.txt
 AUTO_TEAM_DATA_DIR=$(mktemp -d) python -m unittest discover -s tests
 ```
 
@@ -338,7 +346,7 @@ AUTO_TEAM_DATA_DIR=$(mktemp -d) python -m unittest discover -s tests
 
 目前只有作者自己在生产环境跑，没有经过大范围真实使用的验证。涉及邀请、移除、到期、兑换的自动化都会直接改动你的工作区成员，超员策略允许时还会让 ChatGPT 加购席位并扣费，接入前请先用一个不重要的 Team 跑一遍，确认行为符合预期再接生产。
 
-**Premium 席位（内部值 `prolite`）是 Beta，从未在生产环境中测试过。** 邀请和切换到 Premium、Premium 兑换码、巡逻移除 Premium 外部成员、Premium 的财务估算，都只在代码和自动化测试里验证过，作者自己的生产环境没有跑过。ChatGPT 侧怎么计费、怎么计数 Premium 席位，也可能和代码的假设不一致。要用的话，先在一个不重要的 Team 上手动验证每一步，并对照 ChatGPT 官方后台的账单。
+Premium 席位（内部值 `prolite`）是 Beta，生产操作的验证范围见[顶部红色提示](#production-test-scope)。真实工作区已验证价格读取和官方加购报价查询，查询前后已付席位数未变；查询成功不证明实际加购、扣款或成员变更成功。Premium 邀请、切换、兑换和巡逻移除仍需先在一个不重要的 Team 上验证；金额说明见[上手指南 §6](docs/getting-started.md#6-钱都花在哪了)。
 
 TeamBoss 依赖的是 ChatGPT 的私有接口，任何一项功能都可能因为官方改动而突然失效，见「免责声明」。
 

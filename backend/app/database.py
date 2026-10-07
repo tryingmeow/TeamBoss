@@ -648,6 +648,21 @@ async def init_database():
         # 写入规则见 services/seat_capacity.subscription_column_updates / seat_counts_column_updates。
         await _migrate(db, "ALTER TABLE teams ADD COLUMN seat_capacity_json TEXT")
         await _migrate(db, "ALTER TABLE teams ADD COLUMN seat_type_counts_json TEXT")
+        # Premium 席位每席每月价格（pricing 响应 currency_config.business_prolite 的 month / year 桶，
+        # 不含税，币种同 billing_currency）。写入规则和 price_per_seat 一样，读不到就是 NULL（= 未知）。
+        # 老库升级后先是 NULL，下一次展示字段同步时补上。
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN premium_price_per_seat REAL")
+        # 两个单价取自哪个计费周期的桶（'monthly' / 'yearly'）。只有它和 billing_period 一致时单价
+        # 才算数，年付价格永远不会被当成月付价格乘（见 services/pricing.priced_period）。
+        # 老行是 NULL：那时只有月付 Team 存单价，NULL + monthly 按月付认，NULL + yearly 不认。
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN price_period TEXT")
+        await _migrate(db, "ALTER TABLE teams ADD COLUMN discount_start_in_num_periods INTEGER")
+        # 计费快照的 monthly_total 和财务页同一算法（services/pricing.team_monthly_cost）：
+        # 含真实 Premium 部分，年付 Team 记月均。这几列记下当天的计费周期、Premium 单价和已付席位，
+        # 好对得上总额。
+        await _migrate(db, "ALTER TABLE billing_snapshots ADD COLUMN premium_price_per_seat REAL")
+        await _migrate(db, "ALTER TABLE billing_snapshots ADD COLUMN premium_seats_paid INTEGER")
+        await _migrate(db, "ALTER TABLE billing_snapshots ADD COLUMN billing_period TEXT")
         # 兑换码的席位类型（default = ChatGPT，prolite = Premium）。历史码都是 ChatGPT 码。
         await _migrate(
             db, "ALTER TABLE access_tokens ADD COLUMN seat_type TEXT NOT NULL DEFAULT 'default'"

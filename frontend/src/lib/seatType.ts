@@ -25,7 +25,10 @@ export const SEAT_TYPES: Record<SeatType, SeatTypeInfo> = {
 /** Every type an admin may pick when inviting or switching a member. */
 export const SEAT_TYPE_OPTIONS: SeatTypeInfo[] = [SEAT_TYPES.default, SEAT_TYPES.usage_based, SEAT_TYPES.prolite];
 
-/** The workspace "default invite seat type": never Premium (members would land on a $125 seat). */
+/**
+ * The workspace "default invite seat type": never Premium (every invite without an explicit type
+ * would then take a billed Premium seat, at that Team's Premium price).
+ */
 export const WORKSPACE_DEFAULT_SEAT_OPTIONS: Array<SeatTypeInfo & { value: WorkspaceDefaultSeatType }> = [
   { ...SEAT_TYPES.default, value: 'default' },
   { ...SEAT_TYPES.usage_based, value: 'usage_based' },

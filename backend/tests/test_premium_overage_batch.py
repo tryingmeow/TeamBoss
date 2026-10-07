@@ -133,7 +133,7 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertEqual(detail["seat_type"], "default")
         self.assertEqual(
             detail["overage_plan"],
-            [{"team_id": "t-confirm-old", "team_name": "t-confirm-old-name", "extra_seats": 2}],
+            [{"team_id": "t-confirm-old", "team_name": "t-confirm-old-name", "extra_seats": 2, "seat_price": None}],
         )
         self.assertEqual(detail["extra_seats_total"], 2)
         self.assertEqual(detail["team_id"], "t-confirm-old")
@@ -191,7 +191,7 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertEqual(exc.status_code, 409)
         self.assertEqual(
             exc.detail["overage_plan"],
-            [{"team_id": "t-confirm-new", "team_name": "t-confirm-new-name", "extra_seats": 2}],
+            [{"team_id": "t-confirm-new", "team_name": "t-confirm-new-name", "extra_seats": 2, "seat_price": None}],
         )
         self.assertEqual(exc.detail["remaining_emails"], emails)
         self.assertEqual(self.all_mutations(), {}, "不能把加购挪到管理员没看到的 Team 上")
@@ -308,7 +308,7 @@ class SeatCountBindingTest(_BatchHarness):
         self.assertEqual([item["email"] for item in detail["added"]], ["a@example.com", "b@example.com"])
         self.assertEqual(detail["remaining_emails"], ["c@example.com"])
         self.assertEqual(
-            detail["overage_plan"], [{"team_id": "t-confirm", "team_name": "t-confirm-name", "extra_seats": 1}]
+            detail["overage_plan"], [{"team_id": "t-confirm", "team_name": "t-confirm-name", "extra_seats": 1, "seat_price": None}]
         )
         self.assertEqual(detail["extra_seats_total"], 1)
         self.assertIn("比你确认的 2 个多", detail["message"])

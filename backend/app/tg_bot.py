@@ -23,7 +23,8 @@ from typing import Callable, Optional
 import requests
 
 from .database import get_db_path
-from .seat_types import OVERAGE_POLICY_LABELS, normalize_overage_policy, seat_type_label
+from .seat_types import DEFAULT_SEAT_TYPE, OVERAGE_POLICY_LABELS, normalize_overage_policy, seat_type_label
+from .services.pricing import seat_charge_text, seat_price_info
 from .tg_format import detail_card, overview_panel
 from .services.tg_member_bindings import (
     claim_member_pairing_code_sync,
@@ -912,6 +913,26 @@ def _team_overage_policy(team_id: Optional[str]) -> str:
     return normalize_overage_policy(row[0] if row else None)
 
 
+def _team_chatgpt_seat_charge(team_id) -> str:
+    """加购 1 个 ChatGPT 席位多出的钱（这个 Team 的单价、币种和计费周期）；读不到就是「单价未知」。"""
+    try:
+        conn = sqlite3.connect(get_db_path())
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                """SELECT billing_period, price_period, billing_currency, billing_symbol,
+                          price_per_seat, premium_price_per_seat
+                   FROM teams WHERE id = ?""",
+                (str(team_id or ""),),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        row = None
+    price = seat_price_info(dict(row), DEFAULT_SEAT_TYPE) if row is not None else None
+    return seat_charge_text(price, 1)
+
+
 def _team_cached_full(team: dict) -> bool:
     active = team.get("active_chatgpt", 0) or 0
     seats = team.get("seats_entitled", 0) or 0
@@ -984,7 +1005,8 @@ def _step_invite(chat_id: str, w: dict, text: str) -> Optional[str]:
         elif is_full:
             confirm_msg += (
                 f"\n\n⚠️ 该 Team 的 ChatGPT 席位已满（{OVERAGE_POLICY_LABELS.get(policy, policy)}）："
-                "继续会让 ChatGPT 自动加购 1 个 ChatGPT 席位并扣费。"
+                "继续会让 ChatGPT 自动加购 1 个 ChatGPT 席位并扣费，"
+                f"{_team_chatgpt_seat_charge(team.get('team_id'))}。"
             )
         confirm_msg += "\n\n回复 1 确认 · 回复 0 取消"
         return confirm_msg

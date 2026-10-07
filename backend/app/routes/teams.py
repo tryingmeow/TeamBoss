@@ -16,7 +16,7 @@ from ..services.open_redemptions import (
     unsettleable_team_note,
 )
 from ..seat_types import normalize_overage_policy, normalize_seat_type
-from ..services.pricing import discounted_monthly_total
+from ..services.pricing import team_monthly_cost
 from ..services.renewal_reminders import renewal_idle_seats
 from ..services.seat_capacity import cached_seat_capacity, cached_seat_type_counts
 from ..services.subscription_status import subscription_status_display
@@ -146,23 +146,16 @@ def _team_row_to_response(row, pending_json=_READ_FROM_DB, invoice_count=_READ_F
     billing_period = d.get("billing_period")
     d["billing_period"] = billing_period
 
-    # Calculate monthly fees only if billing period is monthly and price is available
-    price_per_seat = d.get("price_per_seat")
-    seats_entitled = int(d.get("seats_entitled") or 0)
-
-    if billing_period == "monthly" and price_per_seat is not None:
-        price_per_seat_float = float(price_per_seat)
-        d["price_per_seat"] = price_per_seat_float
-        d["monthly_subtotal"] = price_per_seat_float * seats_entitled
-        d["monthly_total"] = discounted_monthly_total(
-            price_per_seat_float,
-            seats_entitled,
-            d.get("discount_amount") or 0,
-        )
-    else:
-        d["price_per_seat"] = None
-        d["monthly_subtotal"] = None
-        d["monthly_total"] = None
+    # 月费和财务页同一算法（services/pricing.team_monthly_cost）：月付 / 年付（月均）都算，
+    # 计费周期未知为 None；含真实 Premium 部分，有已付 Premium 但单价未知时合计未知。
+    cost = team_monthly_cost(d)
+    d["price_per_seat"] = cost.price_per_seat
+    d["premium_price_per_seat"] = cost.premium_price_per_seat
+    d["monthly_subtotal"] = cost.monthly_subtotal
+    d["monthly_total"] = cost.monthly_total
+    d["period_total"] = cost.period_total
+    d["period_subtotal"] = cost.period_subtotal
+    d["discount_amount"] = cost.discount_amount
 
     # 库里存的是 JSON 字符串，接口统一给数组，前端不必再解析一次。
     raw_failures = d.get("last_sync_partial_failures")

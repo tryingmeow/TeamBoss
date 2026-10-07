@@ -1,12 +1,13 @@
 /** Teams, members, batch GPT invites and session import/export. */
 import type { OveragePolicy, Team, WorkspaceDefaultSeatType } from '../../types';
 import type { InviteGptMembersResult, TeamBatchResult } from '../../api/client';
+import { groupSeatCosts, seatChargeText, teamSeatPrice } from '../../lib/seatPrice';
 import { findTeam, nextId, recount, type DemoDb, type DemoInvite, type DemoTeam } from '../db';
 import { bodyObject, bodyString, fail, ok, queryFlag, type DemoContext, type DemoResponse, type DemoRoute } from '../http';
 import { appendLog } from '../logs';
 import { DAY, durationMs, isNeverDuration, isoAt } from '../time';
 import { isOverage, isRegistrySeat, overageGate, parseConfirmation, parseSeat, policyOf, seatLabel } from '../overage';
-import { availableGptSeats, expiryState, membersData, teamView, workspaceSettings } from '../views';
+import { availableGptSeats, expiryState, membersData, teamMonthlyCost, teamView, workspaceSettings } from '../views';
 
 const AUTH_REJECTED = { code: 'team_auth_rejected', message: '登录已失效，请重新导入' };
 const EMAIL_ALREADY_IN_TEAM = '邮箱已在该 Team 中，未重复邀请';
@@ -626,10 +627,25 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
   if (remaining.length > 0 && askTeams.length > 0) {
     const free = candidates.reduce((sum, t) => sum + availableGptSeats(t), 0);
     const first = askTeams[0];
+    // Like the server: each plan item carries one ChatGPT seat's monthly price (null = unknown),
+    // and cost_totals sums the priced items per currency.
+    const plan = [{
+      team_id: first.team.id,
+      team_name: first.team.name,
+      extra_seats: remaining.length,
+      seat_price: teamSeatPrice(first.team, 'default'),
+    }];
+    const { totals } = groupSeatCosts(plan.map((item) => ({ price: item.seat_price, seats: item.extra_seats })));
     return fail(409, {
       code: 'require_overage_confirmation',
-      message: (allowOverage ? '你确认过的超员计划已经不成立，需要重新确认。' : '') + (added.length ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个没有空位。` : '空闲 ChatGPT 席位不足。') +
-        `继续会在「${first.team.name}」超员 ${remaining.length} 个，ChatGPT 自动加购 ${remaining.length} 个 ChatGPT 席位并扣费。`,
+      // Same shape as the server's batch message: the UI keeps what comes before 「继续会让」.
+      message: (allowOverage ? '你确认过的超员计划已经不成立，需要重新确认。' : '') +
+        (added.length
+          ? `已添加 ${added.length} 个，剩余 ${remaining.length} 个没有空闲 ChatGPT 席位。`
+          : `空闲 ChatGPT 席位只有 ${free} 个，要邀请 ${remaining.length} 个。`) +
+        `继续会让 ChatGPT 自动加购 ${remaining.length} 个 ChatGPT 席位并扣费：` +
+        plan.map((item) => `「${item.team_name}」${item.extra_seats} 个，${seatChargeText(item.seat_price, item.extra_seats)}`).join('；') +
+        '。',
       seat_type: 'default',
       policy: 'confirm',
       operation: 'batch',
@@ -640,8 +656,9 @@ function inviteGptMembers(ctx: DemoContext): DemoResponse {
         free_team_count: candidates.filter((t) => availableGptSeats(t) > 0).length,
         active_team_count: candidates.length,
       },
-      overage_plan: [{ team_id: first.team.id, team_name: first.team.name, extra_seats: remaining.length }],
+      overage_plan: plan,
       extra_seats_total: remaining.length,
+      cost_totals: totals,
       added,
       remaining_emails: remaining,
       failed,
@@ -698,6 +715,38 @@ function importSessions(ctx: DemoContext): DemoResponse {
   return ok({ status: 'ok', imported, count: imported.length, errors });
 }
 
+/** Fake quote only: no request reaches ChatGPT in demo mode. */
+function seatPurchasePreview(ctx: DemoContext): DemoResponse {
+  const record = teamOr404(ctx);
+  if (isResponse(record)) return record;
+  const body = bodyObject(ctx);
+  const seat = body.seat_type;
+  const additional = body.additional_seats;
+  if ((seat !== 'default' && seat !== 'prolite') || typeof additional !== 'number' || !Number.isInteger(additional) || additional <= 0) return fail(422, 'Invalid seat purchase');
+  const current = teamMonthlyCost(record.team);
+  const months = record.team.billing_period === 'yearly' ? 12 : 1;
+  const price = teamSeatPrice(record.team, seat);
+  if (!price || current.period_total === null) return fail(502, { code: 'seat_purchase_quote_unavailable', message: '演示：当前 Team 报价不可用' });
+  const baseline = { default: record.paid.default, prolite: record.paid.prolite };
+  const proposed = { ...baseline, [seat]: baseline[seat] + additional };
+  const nextTeam = { ...record.team, seat_capacity: { ...record.team.seat_capacity,
+    [seat]: { paid: proposed[seat], available: additional } } };
+  const next = teamMonthlyCost(nextTeam);
+  if (next.period_total === null) return fail(502, '演示：费用未知');
+  return ok({
+    currency: record.team.billing_currency,
+    minor_unit_exponent: 2,
+    quoted_at: isoAt(Date.now()),
+    seat_type: seat,
+    additional_seats: additional,
+    baseline_quantities: baseline,
+    proposed_quantities: proposed,
+    current_recurring: { period: record.team.billing_period, amount: current.period_total, discount: (current.discount_monthly ?? 0) * months },
+    proposed_recurring: { period: record.team.billing_period, amount: next.period_total, discount: (next.discount_monthly ?? 0) * months },
+    due_now: { amount: Math.round((next.period_total - current.period_total) * 0.5 * 100) / 100, tax_amount: 0 },
+  });
+}
+
 export const teamRoutes: DemoRoute[] = [
   { method: 'GET', pattern: '/api/teams', handler: (ctx) => ok(ctx.db.teams.map((t) => teamView(t))) },
   { method: 'POST', pattern: '/api/teams', handler: importTeam },
@@ -712,6 +761,7 @@ export const teamRoutes: DemoRoute[] = [
     },
   },
   { method: 'DELETE', pattern: '/api/teams/:teamId', handler: deleteTeam },
+  { method: 'POST', pattern: '/api/teams/:teamId/seat-purchase-preview', handler: seatPurchasePreview },
   { method: 'POST', pattern: '/api/teams/:teamId/sync', handler: syncTeam },
   { method: 'POST', pattern: '/api/teams/:teamId/reimport', handler: reimportTeam },
   { method: 'POST', pattern: '/api/teams/:teamId/refresh', handler: refreshTeamToken },

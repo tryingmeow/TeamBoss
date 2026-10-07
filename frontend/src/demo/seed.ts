@@ -27,10 +27,8 @@ export interface TeamSpec {
   currency: string;
   symbol: string;
   period: 'monthly' | 'yearly';
-  /** Monthly price per seat in the native currency; null for yearly billing. */
+  /** Monthly rate per seat in the native currency, including annual plans; null = unknown. */
   price: number | null;
-  /** Yearly invoice total (native) for yearly teams. */
-  yearlyTotal?: number;
   discount?: { amount: number; periods: number; expiresInDays: number; campaign: string };
   balance: string;
   card: { brand: string; last4: '0000' | '4242' } | null;
@@ -51,6 +49,11 @@ export interface TeamSpec {
   policy?: OveragePolicy;
   /** Paid Premium (`prolite`) seats. `entitled` stays the paid ChatGPT count; seats_entitled adds this on top. */
   premiumPaid?: number;
+  /**
+   * Invented upstream Premium monthly rate for this fixture (annual plans also use a monthly rate).
+   * Missing means pricing has not synced; the Team total remains unknown.
+   */
+  premiumPrice?: number;
   /** Premium seat members (not counted in `gptMembers`). */
   premiumMembers?: number;
   /** Members on a seat type TeamBoss does not know (`automation`). */
@@ -61,7 +64,7 @@ export interface TeamSpec {
 
 export const TEAM_SPECS: TeamSpec[] = [
   {
-    // Healthy flagship: Codex on, promo discount → "还剩 N 次折扣", shared card, proxy.
+    // Healthy flagship: Codex on, promo discount with its exact expiry, shared card, proxy.
     n: 1, slug: 'aurora', name: 'Aurora', remark: '主力', status: 'active',
     entitled: 25, gptMembers: 21, codexMembers: 3, invites: ['default', 'usage_based'],
     codexEnabled: true, defaultSeat: 'usage_based',
@@ -93,23 +96,27 @@ export const TEAM_SPECS: TeamSpec[] = [
     invoice: 'match', forcedExpiries: [20 * HOUR, 4 * DAY],
   },
   {
-    // THB billing with a symbol; negative balance (credit).
+    // THB billing with a symbol; negative balance (credit). Premium with its real price (the public
+    // THB prices, tax-exclusive): Premium is inside the monthly total and on the invoices; Premium full.
     n: 4, slug: 'bangkok', name: 'Bangkok Hub', remark: null, status: 'active',
     entitled: 8, gptMembers: 7, codexMembers: 0, invites: ['default'],
+    premiumPaid: 2, premiumMembers: 2, premiumPrice: 3900,
     codexEnabled: false, defaultSeat: 'default',
-    currency: 'THB', symbol: '฿', period: 'monthly', price: 1050,
+    currency: 'THB', symbol: '฿', period: 'monthly', price: 780,
+    discount: { amount: 999, periods: 3, expiresInDays: 70, campaign: 'promo-demo-thb' },
     balance: '-300.0000000000', card: { brand: 'visa', last4: '0000' },
     renewsInDays: 21, periodDays: 30, willRenew: true, proxyId: null, createdDaysAgo: 80,
     invoice: 'match',
   },
   {
-    // EUR, yearly billing → monthly totals are null ("年付，月费暂不计算").
+    // Annual EUR Standard + Premium, no discount: monthly equivalent and full annual renewal.
     n: 5, slug: 'berlin', name: 'Berlin Ops', remark: '年付', status: 'active', policy: 'auto',
     entitled: 15, gptMembers: 13, codexMembers: 2, invites: [],
+    premiumPaid: 1, premiumMembers: 1, premiumPrice: 100,
     codexEnabled: true, defaultSeat: 'default',
-    currency: 'EUR', symbol: '€', period: 'yearly', price: null, yearlyTotal: 4500,
+    currency: 'EUR', symbol: '€', period: 'yearly', price: 25,
     balance: '0', card: { brand: 'amex', last4: '0000' },
-    renewsInDays: 200, periodDays: 365, willRenew: true, proxyId: null, createdDaysAgo: 170,
+    renewsInDays: 11, periodDays: 365, willRenew: true, proxyId: null, createdDaysAgo: 170,
     invoice: 'yearly',
   },
   {
@@ -186,6 +193,7 @@ export const TEAM_SPECS: TeamSpec[] = [
   },
   {
     // Paid Premium seats (3) with 2 members + 1 pending Premium invite → Premium full; ChatGPT has 2 free.
+    // No premiumPrice → Premium and the complete Team total are unknown.
     // seats_entitled includes the Premium seats, so the legacy free-seat formula would invent free seats.
     n: 13, slug: 'zenith', name: 'Zenith-13', remark: 'Premium 试点', status: 'active', policy: 'confirm',
     entitled: 8, gptMembers: 6, codexMembers: 1, invites: ['prolite'],

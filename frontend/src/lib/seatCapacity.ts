@@ -5,11 +5,19 @@
  */
 import type { OveragePolicy, SeatType, Team } from '../types';
 import { SEAT_TYPES, overagePolicyLabel, parseOveragePolicy, parseSeatType } from './seatType';
+import { formatSeatAmountShort, seatChargeText, teamSeatPrice, type SeatPrice } from './seatPrice';
 
 type TeamSeatFields = Pick<Team, 'seats_entitled' | 'seats_in_use' | 'codex_count' | 'chatgpt_count'>;
-/** Older payloads (and some pages) may lack the per-type fields; every reader treats them as unknown. */
+/** The synced billing fields a gate needs to say what a bought seat costs. */
+type TeamPriceFields = Pick<Team,
+  'billing_period' | 'billing_currency' | 'billing_symbol' | 'price_per_seat' | 'premium_price_per_seat'>;
+/**
+ * Older payloads (and some pages) may lack the per-type fields; every reader treats them as unknown.
+ * Without the billing fields a gate's price is unknown.
+ */
 export type TeamCapacityFields = TeamSeatFields &
-  Partial<Pick<Team, 'seat_capacity' | 'seat_type_counts' | 'overage_policy' | 'pending_invite_counts'>>;
+  Partial<Pick<Team, 'seat_capacity' | 'seat_type_counts' | 'overage_policy' | 'pending_invite_counts'>> &
+  Partial<TeamPriceFields>;
 
 function toNumber(value: number | null | undefined): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
@@ -141,6 +149,11 @@ export interface SeatGate {
   needed: number;
   /** Seats ChatGPT would add (and charge) for this action. */
   extra: number;
+  /**
+   * One seat of this type per month in this Team (synced Team row; a yearly Team's is its annual-plan
+   * price per month); null = unknown or not billed.
+   */
+  price: SeatPrice | null;
   capacityUnknown: boolean;
   /** The Team has no paid seat of this type at all. */
   noSeats: boolean;
@@ -149,6 +162,17 @@ export interface SeatGate {
   policy: OveragePolicy;
   /** free: enough free seats (or not billed). Otherwise the policy decides. */
   action: 'free' | OveragePolicy;
+}
+
+/** The per-seat monthly price of a billed type from the cached Team row; missing fields = unknown. */
+function cachedSeatPrice(team: TeamCapacityFields, seatType: SeatType): SeatPrice | null {
+  return teamSeatPrice({
+    billing_period: team.billing_period ?? null,
+    billing_currency: team.billing_currency ?? '',
+    billing_symbol: team.billing_symbol ?? null,
+    price_per_seat: team.price_per_seat ?? null,
+    premium_price_per_seat: team.premium_price_per_seat ?? null,
+  }, seatType);
 }
 
 export function seatGate(
@@ -162,7 +186,7 @@ export function seatGate(
   const want = Math.max(1, needed);
   if (!info.billed) {
     return {
-      seatType, label: info.label, billed: false, free: 0, needed: want, extra: 0,
+      seatType, label: info.label, billed: false, free: 0, needed: want, extra: 0, price: null,
       capacityUnknown: false, noSeats: false, over: 0, policy, action: 'free',
     };
   }
@@ -175,6 +199,7 @@ export function seatGate(
     free,
     needed: want,
     extra,
+    price: cachedSeatPrice(team, seatType),
     capacityUnknown: unknown,
     noSeats,
     over,
@@ -206,25 +231,33 @@ function fullPhrase(gate: SeatGate): string {
   return `${gate.label} 席位已满`;
 }
 
-function willBuy(_label: string, count: number): string {
-  return `自动加购 ${count} 个席位并扣费`;
+/**
+ * "自动加购 3 个席位并扣费，约 +฿2,340 + 税/月（每席 ฿780）"; a yearly Team adds the annual figure
+ * and the yearly note (seatChargeText); unknown → 「单价未知，以 ChatGPT 账单为准」.
+ */
+function charge(count: number, price: SeatPrice | null): string {
+  return `自动加购 ${count} 个席位并扣费，${seatChargeText(price, count)}`;
 }
 
 /**
  * One line that says what will happen to the operator's money. Null when nothing will be
- * bought. Used for the add-member dialog and as the confirm text.
+ * bought. Used as the add-member dialog's hint and the seat menu's tooltip.
  */
 export function gateMessage(gate: SeatGate): string | null {
   if (gate.action === 'free') return null;
-  const charge = willBuy(gate.label, gate.extra);
   const setTo = gate.noSeats && gate.over === 0 ? '且设为' : '设为';
   if (gate.action === 'forbid') {
     return gate.free > 0 && !gate.capacityUnknown
       ? `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，最多再加 ${gate.free} 人。`
       : `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，禁止自动加购。`;
   }
-  if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续将${charge}（提交需确认）。`;
-  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交将${charge}。`;
+  if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续将${charge(gate.extra, gate.price)}。提交需确认。`;
+  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交将${charge(gate.extra, gate.price)}。`;
+}
+
+/** The confirm step's text for a 超员需确认 gate: what is about to be bought and what it adds. */
+export function gateConfirmText(gate: SeatGate): string {
+  return `${fullPhrase(gate)}，继续将${charge(gate.extra, gate.price)}。`;
 }
 
 /** Short hint under an option in a seat-switch menu. */
@@ -239,11 +272,21 @@ export function gateShortHint(gate: SeatGate | null): string | null {
 }
 
 /**
+ * Second line under that hint: what the seat it would buy adds per month, compact enough for a
+ * narrow menu ("约 +฿780 + 税/月", yearly "约 +฿630 + 税/月 · 年付"). The row's tooltip and the
+ * confirm dialog carry the full text (annual figure, yearly note).
+ */
+export function gateShortPrice(gate: SeatGate | null): string | null {
+  if (!gate || (gate.action !== 'confirm' && gate.action !== 'auto')) return null;
+  return gate.price ? `约 +${formatSeatAmountShort(gate.price, gate.extra)}` : seatChargeText(null, gate.extra);
+}
+
+/**
  * Confirm text after the server found the seat type full while inviting one by one: the live
  * free count is 0, so every remaining email would buy a seat. Quotes that count, not the
  * server's per-request "1 个".
  */
-export function liveFullConfirmText({ label, teamName, count, invited, capacityUnknown, reconfirm }: {
+export function liveFullConfirmText({ label, teamName, count, invited, capacityUnknown, reconfirm, price }: {
   label: string;
   teamName?: string;
   /** Emails still to invite; each one buys a seat. */
@@ -253,6 +296,8 @@ export function liveFullConfirmText({ label, teamName, count, invited, capacityU
   capacityUnknown: boolean;
   /** The server did not accept the confirmation sent with this email (used up or expired). */
   reconfirm?: boolean;
+  /** One seat's monthly price from the server's 409 (`seat_price`); null = unknown. */
+  price: SeatPrice | null;
 }): string {
   const team = teamName ? `「${teamName}」` : '';
   const done = invited > 0 ? `已邀请 ${invited} 人。` : '';
@@ -261,7 +306,7 @@ export function liveFullConfirmText({ label, teamName, count, invited, capacityU
     ? `未获取到${team}的 ${label} 空位，按已满处理，`
     : `${team}${label} 席位已满，`;
   const who = invited > 0 ? `剩余 ${count} 个邮箱` : count > 1 ? `这 ${count} 个邮箱` : '';
-  return `${again}${done}${full}${who}继续将自动加购 ${count} 个席位并扣费。`;
+  return `${again}${done}${full}${who}继续将${charge(count, price)}。`;
 }
 
 /** Confirm text before switching a member into a full billed type. */
@@ -271,7 +316,7 @@ export function switchConfirmText(gate: SeatGate): string {
     : gate.noSeats
       ? `暂无 ${gate.label} 席位，`
       : gate.capacityUnknown ? `未获取到 ${gate.label} 空位，按已满处理：` : `${gate.label} 席位已满，`;
-  return `${lead}切换将自动加购 1 个席位并扣费。`;
+  return `${lead}切换将${charge(1, gate.price)}。`;
 }
 
 /** "其中 22 个在「Aurora」自动加购并扣费" — the invites that made ChatGPT buy a seat. */

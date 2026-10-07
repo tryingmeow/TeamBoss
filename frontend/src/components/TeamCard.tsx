@@ -10,7 +10,7 @@ import TeamBillingDialog from './TeamBillingDialog';
 import SeatBetaBadge from './BetaBadge';
 import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
-import { billedSeatSummary, premiumSeatUsage, teamPendingCounts } from '../lib/seatCapacity';
+import { billedSeatSummary, chatgptPaidSeats, premiumSeatUsage, teamPendingCounts } from '../lib/seatCapacity';
 import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, SEAT_TYPES, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
@@ -138,56 +138,46 @@ function cardBrandLabel(brand: string): string {
 }
 
 function discountedMonthlyTotal(team: Team): number | null {
-  if (typeof team.monthly_total === 'number') return team.monthly_total;
-  if (team.price_per_seat === null) return null;
-  return Math.max(0, (team.price_per_seat * team.seats_entitled) - (team.discount_amount || 0));
+  return typeof team.monthly_total === 'number' ? team.monthly_total : null;
 }
 
 function monthlySubtotal(team: Team): number | null {
-  if (typeof team.monthly_subtotal === 'number') return team.monthly_subtotal;
-  if (team.price_per_seat === null) return null;
-  return team.price_per_seat * team.seats_entitled;
+  return typeof team.monthly_subtotal === 'number' ? team.monthly_subtotal : null;
 }
 
-function remainingPromoMonths(team: Team, now = new Date()): number | null {
-  const totalMonths = team.discount_duration_num_periods;
-  if (!team.discount_expires_at) return totalMonths;
+function periodTotal(team: Team): number | null {
+  return typeof team.period_total === 'number' ? team.period_total : null;
+}
 
-  const expiresAt = new Date(team.discount_expires_at);
-  if (Number.isNaN(expiresAt.getTime())) return totalMonths;
-  if (expiresAt.getTime() <= now.getTime()) return 0;
-
-  let months = (expiresAt.getUTCFullYear() - now.getUTCFullYear()) * 12
-    + expiresAt.getUTCMonth() - now.getUTCMonth();
-  const expiryRemainder = [
-    expiresAt.getUTCDate(),
-    expiresAt.getUTCHours(),
-    expiresAt.getUTCMinutes(),
-    expiresAt.getUTCSeconds(),
-    expiresAt.getUTCMilliseconds(),
-  ];
-  const nowRemainder = [
-    now.getUTCDate(),
-    now.getUTCHours(),
-    now.getUTCMinutes(),
-    now.getUTCSeconds(),
-    now.getUTCMilliseconds(),
-  ];
-  let expiresEarlierInMonth = false;
-  for (let index = 0; index < expiryRemainder.length; index += 1) {
-    if (expiryRemainder[index] === nowRemainder[index]) continue;
-    expiresEarlierInMonth = expiryRemainder[index] < nowRemainder[index];
-    break;
+/**
+ * Tooltip of the 月费 figure: what the server's monthly_total is made of (Team currency,
+ * tax-exclusive). Premium is in the total only when its real price is known. Seat prices are per
+ * month; a yearly Team's are the annual-plan prices per month and its discount is per year.
+ */
+function monthlyFeeTitle(team: Team, total: number, premiumPaid: number, unit: string): string {
+  const yearly = team.billing_period === 'yearly';
+  const perMonth = yearly ? '/月' : '';
+  const lines: string[] = yearly ? ['年付：按年扣费，这里折成每月（月均）'] : [];
+  if (team.price_per_seat !== null) {
+    lines.push(`ChatGPT ${formatMoney(team.price_per_seat, unit)}${perMonth} × ${chatgptPaidSeats(team)} 席`);
   }
-  if (expiresEarlierInMonth) months -= 1;
-
-  const remaining = Math.max(0, months);
-  return totalMonths ? Math.min(totalMonths, remaining) : remaining;
+  if (premiumPaid > 0) {
+    lines.push(typeof team.premium_price_per_seat === 'number'
+      ? `Premium ${formatMoney(team.premium_price_per_seat, unit)}${perMonth} × ${premiumPaid} 席`
+      : `Premium ${premiumPaid} 席：单价未知，总额暂不计算`);
+  }
+  if ((team.discount_amount ?? 0) > 0) lines.push(`优惠 -${formatMoney(team.discount_amount, unit)}${yearly ? '/年' : ''}`);
+  const annual = periodTotal(team);
+  lines.push(yearly
+    ? `${annual !== null ? `一年 ${formatMoney(annual, unit)}，` : ''}月均 ${formatMoney(total, unit)}/月，不含税；按年付月价 × 12 推算，以 ChatGPT 账单为准`
+    : `合计 ${formatMoney(total, unit)}/月，不含税，以 ChatGPT 账单为准`);
+  return lines.join('\n');
 }
 
 function promoLabel(team: Team): string {
-  const remainingCharges = remainingPromoMonths(team);
-  if (remainingCharges !== null) return `余${remainingCharges}次折扣`;
+  if (team.discount_expires_at && !Number.isNaN(Date.parse(team.discount_expires_at))) {
+    return `优惠至 ${formatShortDate(team.discount_expires_at)}`;
+  }
   return '优惠中';
 }
 
@@ -542,6 +532,9 @@ export default function TeamCard({
   const gptSeats = billedSeatSummary(team, 'default', pendingByType);
   const premiumSeats = premium ? billedSeatSummary(team, 'prolite', pendingByType) : null;
   const seatBlocks = 1 + (showCodex ? 1 : 0) + (premium ? 1 : 0);
+  const premiumPaidSeats = premium?.paid ?? 0;
+  const isYearly = team.billing_period === 'yearly';
+  const annualTotal = isYearly ? periodTotal(team) : null;
   // 默认的「超员需确认」不挂标签；另外两种会改变花钱方式，挂在卡片上一眼能看到。
   const overagePolicy = parseOveragePolicy(team.overage_policy);
   // 续费前 3 天内还有没人用的计费席位（后端判定，窗口外 / 数据不全时为 null）。
@@ -803,21 +796,37 @@ export default function TeamCard({
                   <>
                     <span
                       className="whitespace-nowrap"
-                      title={team.discount_amount ? `原价 ${formatMoney(subtotal, unit)}，优惠 -${formatMoney(team.discount_amount, unit)}` : undefined}
+                      title={monthlyFeeTitle(team, monthlyTotal, premiumPaidSeats, unit)}
                     >
                       {formatMoney(monthlyTotal, unit)}
                       <span className="font-normal text-gray-400 dark:text-ink-500"> /月</span>
                     </span>
-                    {team.discount_amount > 0 && (
-                      <span className="block truncate text-xs font-normal text-sky-600 dark:text-sky-400">
-                        -{formatMoney(team.discount_amount, unit)} {promoLabel(team)}
+                    {/* 年付：上面是按年总额折成的每月，年总额另起一行（按年付月价 × 12 推算，以账单为准）。 */}
+                    {isYearly && (
+                      <span className="block text-xs font-normal text-gray-500 dark:text-ink-400">
+                        年付·月均{annualTotal !== null && <> · <span className="whitespace-nowrap tabular-nums">一年 {formatMoney(annualTotal, unit)}</span></>}
+                      </span>
+                    )}
+                    {(team.discount_amount ?? 0) > 0 && (
+                      <span
+                        className="block truncate text-xs font-normal text-sky-600 dark:text-sky-400"
+                        title={isYearly ? `折扣按年扣：每次年付续费减 ${formatMoney(team.discount_amount, unit)}` : undefined}
+                      >
+                        -{formatMoney(team.discount_amount, unit)}{isYearly ? '/年' : ''} {promoLabel(team)}
                       </span>
                     )}
                   </>
                 ) : team.billing_period === null ? (
                   <span className="font-normal text-gray-400 dark:text-ink-500">计费周期未知</span>
                 ) : (
-                  <span className="font-normal text-gray-500 dark:text-ink-400" title="年付订阅不折算月费">年付</span>
+                  <span
+                    className="font-normal text-gray-500 dark:text-ink-400"
+                    title={team.billing_period === 'monthly' || team.billing_period === 'yearly'
+                      ? (team.discount_amount === null ? '尚未读到折扣金额，总额暂不计算' : '尚未读到全部已付席位单价，总额暂不计算')
+                      : `不认识的计费周期「${team.billing_period}」，月费暂不计算`}
+                  >
+                    {team.discount_amount === null ? '折扣未知' : '单价未知'}
+                  </span>
                 )}
               </dd>
             </div>
@@ -1013,6 +1022,7 @@ export default function TeamCard({
         ownerEmail={team.owner_email}
         currentProxyId={team.proxy_id}
         overagePolicy={team.overage_policy}
+        billing={team}
         onTeamUpdated={(updated) => onTeamSynced({
           ...updated,
           cached_member_emails: updated.cached_member_emails ?? team.cached_member_emails ?? [],

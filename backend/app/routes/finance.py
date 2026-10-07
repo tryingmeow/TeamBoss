@@ -10,9 +10,7 @@ from pydantic import BaseModel
 from ..database import get_db, log_operation
 from ..services.fx import DEFAULT_FX_RATES, FxRefreshError, convert, get_fx_config, refresh_fx_rates, save_fx_rates
 from ..services.invoices import classify_latest_invoice, refresh_invoices_for_team_blocking
-from ..seat_types import DEFAULT_SEAT_TYPE, PREMIUM_SEAT_TYPE
-from ..services.pricing import PREMIUM_SEAT_PRICE_ESTIMATE_USD, discounted_monthly_total
-from ..services.seat_capacity import cached_seat_capacity
+from ..services.pricing import format_money, team_monthly_cost
 from ..services.subscription_status import subscription_status_display
 
 router = APIRouter(prefix="/api/finance", tags=["finance"])
@@ -36,16 +34,10 @@ def _card_key(card_brand: Optional[str], card_last4: Optional[str]) -> Optional[
     return f"{brand}:{last4}"
 
 
-def _format_money(value: float, unit: str) -> str:
-    """与前端 formatMoney 一致：整数不带小数，其余两位；符号前置，币种代码后置。"""
-    rounded = round(abs(value), 2)
-    body = f"{int(rounded):,}" if rounded == int(rounded) else f"{rounded:,.2f}"
-    sign = "-" if value < 0 and body != "0" else ""
-    if not unit:
-        return f"{sign}{body}"
-    if len(unit) == 3 and unit.isascii() and unit.isalpha():
-        return f"{sign}{body} {unit.upper()}"
-    return f"{sign}{unit}{body}"
+def _convert_or_none(value: Optional[float], currency: str, base_currency: str, rates: dict):
+    if value is None or not currency:
+        return None
+    return convert(value, currency, base_currency, rates)
 
 
 @router.get("/overview")
@@ -83,7 +75,8 @@ async def get_overview():
 
     teams_data = []
     monthly_total_base = 0.0
-    premium_total_base = 0.0
+    # Premium 真实单价中已计入 monthly_total_base 的部分。
+    premium_real_total_base = 0.0
     discount_total_base = 0.0
     timeline_data = []
     excluded_teams_count = 0
@@ -102,12 +95,10 @@ async def get_overview():
         card_key = _card_key(card_brand, card_last4)
         card_note = card_notes.get(card_key, "") if card_key else ""
         card_team_count = card_team_counts.get(card_key, 0) if card_key else 0
-        price_per_seat = team_row["price_per_seat"]
         seats_entitled = team_row["seats_entitled"]
         seats_in_use = team_row["seats_in_use"]
         codex_count = team_row["codex_count"]
         chatgpt_count = team_row["chatgpt_count"]
-        discount_amount = team_row["discount_amount"] or 0.0
         balance_str = team_row["balance"]
         active_until = team_row["active_until"]
         will_renew_raw = team_row["will_renew"]
@@ -118,24 +109,28 @@ async def get_overview():
         )
         billing_period = team_row["billing_period"]
 
-        # Calculate native monthly total only if billing_period is monthly and price is available
-        seat_capacity = cached_seat_capacity(team_row["seat_capacity_json"])
-        default_entry = (seat_capacity or {}).get(DEFAULT_SEAT_TYPE)
-        # ChatGPT 席位的计费数：上游 seat_capacity.default.paid（已付，不含 Premium）；
-        # 读不到时退回 seats_entitled（旧行为）。
-        chatgpt_seats_billed = default_entry["paid"] if default_entry is not None else seats_entitled
-        premium_entry = (seat_capacity or {}).get(PREMIUM_SEAT_TYPE)
-        premium_seats_paid = premium_entry["paid"] if premium_entry is not None else 0
-        premium_monthly_estimate_usd = float(premium_seats_paid * PREMIUM_SEAT_PRICE_ESTIMATE_USD)
-        premium_monthly_estimate_base = convert(premium_monthly_estimate_usd, "USD", base_currency, rates)
-
-        if billing_period == "monthly" and price_per_seat is not None:
-            monthly_total_native = discounted_monthly_total(price_per_seat, chatgpt_seats_billed, discount_amount)
-            # Convert to base currency
-            monthly_total_base_value = convert(monthly_total_native, billing_currency, base_currency, rates)
-        else:
-            monthly_total_native = None
-            monthly_total_base_value = None
+        # 月费算月付和年付（月均）、单价对得上计费周期的 Team；算法（含 Premium、折扣每个计费
+        # 周期只减一次）见 services/pricing.team_monthly_cost。ChatGPT 席位按
+        # seat_capacity.default.paid 计费，读不到时退回 seats_entitled（旧行为）。
+        cost = team_monthly_cost(dict(team_row))
+        price_per_seat = cost.price_per_seat
+        chatgpt_seats_billed = cost.chatgpt_seats_billed
+        premium_seats_paid = cost.premium_seats_paid
+        premium_price_source = cost.premium_price_source
+        # 真实 Premium 单价那部分（已含在 monthly_total 里）。
+        premium_monthly_native = cost.premium_subtotal if premium_price_source == "upstream" else None
+        premium_monthly_base = _convert_or_none(
+            premium_monthly_native, billing_currency, base_currency, rates
+        )
+        # monthly_*：每月（年付为月均）；period_*：一个计费周期（年付是一年），续费那天扣的就是它。
+        monthly_total_native = cost.monthly_total
+        monthly_total_base_value = _convert_or_none(
+            monthly_total_native, billing_currency, base_currency, rates
+        )
+        period_total_native = cost.period_total
+        period_total_base = _convert_or_none(
+            period_total_native, billing_currency, base_currency, rates
+        )
 
         # Parse balance safely
         try:
@@ -148,8 +143,9 @@ async def get_overview():
         inv_row = latest_invoice_by_team.get(team_id)
         if inv_row is not None:
             inv = dict(inv_row)
+            # 一期发票对的是一个计费周期的钱（年付 Team 是一年）。
             reconciliation, display_amount, diff_native = classify_latest_invoice(
-                inv, monthly_total_native, billing_currency
+                inv, period_total_native, billing_currency
             )
             invoice_currency = inv["currency"] or ""
             display_amount_base = (
@@ -207,13 +203,21 @@ async def get_overview():
             "card_key": card_key,
             "card_note": card_note,
             "card_team_count": card_team_count,
-            "price_per_seat": price_per_seat if billing_period == "monthly" else None,
+            "price_per_seat": price_per_seat,
+            "price_per_seat_base": _convert_or_none(
+                price_per_seat, billing_currency, base_currency, rates
+            ),
             "seats_entitled": seats_entitled,
             "seats_in_use": seats_in_use,
             "chatgpt_seats_billed": chatgpt_seats_billed,
             "premium_seats_paid": premium_seats_paid,
-            "premium_monthly_estimate_usd": premium_monthly_estimate_usd,
-            "premium_monthly_estimate_base": premium_monthly_estimate_base,
+            "premium_price_per_seat": cost.premium_price_per_seat,
+            "premium_price_per_seat_base": _convert_or_none(
+                cost.premium_price_per_seat, billing_currency, base_currency, rates
+            ),
+            "premium_price_source": premium_price_source,
+            "premium_monthly_native": premium_monthly_native,
+            "premium_monthly_base": premium_monthly_base,
             "chatgpt_in_use": (
                 chatgpt_count
                 if chatgpt_count is not None
@@ -221,9 +225,11 @@ async def get_overview():
             ),
             "codex_count": codex_count or 0,
             "is_codex_enabled": 1 if team_row["is_codex_enabled"] else 0,
-            "discount_amount": discount_amount,
+            "discount_amount": cost.discount_amount,
             "monthly_total_native": monthly_total_native,
             "monthly_total_base": monthly_total_base_value,
+            "period_total_native": period_total_native,
+            "period_total_base": period_total_base,
             "balance": balance_str,
             "active_until": active_until,
             "days_left": days_left,
@@ -241,24 +247,35 @@ async def get_overview():
                 excluded_teams_count += 1
             else:
                 monthly_total_base += monthly_total_base_value
-            if premium_monthly_estimate_base is not None:
-                premium_total_base += premium_monthly_estimate_base
+                if premium_monthly_base is not None:
+                    premium_real_total_base += premium_monthly_base
 
-            discount_base = convert(discount_amount, billing_currency, base_currency, rates)
+            # 折扣是每个计费周期的固定金额：「每月折算减免」按月均算（年付 ÷ 12），周期未知不算。
+            discount_base = _convert_or_none(
+                cost.discount_monthly, billing_currency, base_currency, rates
+            )
             if discount_base is not None:
                 discount_total_base += discount_base
 
         # Add to timeline if active
         if status == "active" and subscription_state != "expired":
             if active_until:
+                try:
+                    renewal_at = datetime.fromisoformat(active_until.replace("Z", "+00:00"))
+                    if renewal_at.tzinfo is None:
+                        renewal_at = renewal_at.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    renewal_at = None
+                renewal_total = team_monthly_cost(dict(team_row), now=renewal_at).period_total if renewal_at else None
                 timeline_data.append({
                     "date": active_until.split("T")[0] if "T" in active_until else active_until,
                     "team_id": team_id,
                     "team_name": team_name,
                     "owner_email": owner_email,
-                    "amount_native": monthly_total_native,
+                    # 按当前单价预测续费金额，折扣到期日以续费日期判断。
+                    "amount_native": renewal_total,
                     "currency": billing_currency,
-                    "amount_base": monthly_total_base_value,
+                    "amount_base": _convert_or_none(renewal_total, billing_currency, base_currency, rates),
                     "card_last4": card_last4,
                     "card_brand": card_brand,
                     "card_key": card_key,
@@ -295,11 +312,11 @@ async def get_overview():
                 "team_id": team_id,
                 "team_name": team_name,
                 "detail": (
-                    f"Credit 余额为负 · {_format_money(balance_float, unit)}"
+                    f"Credit 余额为负 · {format_money(balance_float, unit)}"
                     if balance_float < 0
                     else (
-                        f"Credit 余额 {_format_money(balance_float, unit)} "
-                        f"低于阈值 {_format_money(float(low_balance_threshold), unit)}"
+                        f"Credit 余额 {format_money(balance_float, unit)} "
+                        f"低于阈值 {format_money(float(low_balance_threshold), unit)}"
                     )
                 ),
             })
@@ -389,9 +406,8 @@ async def get_overview():
         "fx_updated_at": fx_updated_at,
         "low_balance_threshold": low_balance_threshold,
         "monthly_total_base": monthly_total_base,
-        # Premium 没有上游价格来源：已付席位 × 固定估算价，只作参考，不并入 monthly_total_base。
-        "premium_monthly_estimate_base_total": premium_total_base,
-        "premium_seat_price_estimate_usd": PREMIUM_SEAT_PRICE_ESTIMATE_USD,
+        # 真实 Premium 单价那部分，已经算在 monthly_total_base 里（只是拆出来给界面说明）。
+        "premium_monthly_base_total": premium_real_total_base,
         "discount_total_base": discount_total_base,
         "excluded_teams_count": excluded_teams_count,
         "last_paid_total_base": last_paid_total_base if last_paid_count else None,

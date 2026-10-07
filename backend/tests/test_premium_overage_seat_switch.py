@@ -111,7 +111,12 @@ class SwitchToChatGPTTest(_SeatHarness):
         self.assertEqual(detail["code"], "require_overage_confirmation")
         self.assertEqual(detail["operation"], "seat_switch")
         self.assertEqual(detail["seat_type"], "default")
-        self.assertEqual(detail["message"], "切换到 ChatGPT 会让 ChatGPT 自动加购 1 个 ChatGPT 席位并扣费。")
+        # 这个 Team 的单价没同步过：不猜金额，直说单价未知。
+        self.assertEqual(
+            detail["message"],
+            "切换到 ChatGPT 会让 ChatGPT 自动加购 1 个 ChatGPT 席位并扣费，单价未知，以 ChatGPT 账单为准。",
+        )
+        self.assertIsNone(detail["seat_price"])
         self.assert_no_mutation()
         log = self.logs("change_seat")[-1]
         self.assertEqual(log["result"], "skipped")

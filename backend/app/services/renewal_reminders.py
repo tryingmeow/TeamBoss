@@ -21,7 +21,11 @@ from typing import Any, Mapping, Optional
 from ..database import get_db_path
 from ..seat_types import BILLED_SEAT_TYPES, DEFAULT_SEAT_TYPE, PREMIUM_SEAT_TYPE, seat_type_label
 from ..tg_format import detail_card
-from .pricing import PREMIUM_SEAT_PRICE_ESTIMATE_USD
+from .pricing import (
+    MONTHS_PER_PERIOD,
+    priced_period,
+    seat_price_per_month,
+)
 from .seat_capacity import cached_seat_capacity, cached_seat_type_counts, pending_count_from_api
 from .subscription_status import parse_active_until
 from .team_health_alerts import close_incident_family_sync, report_team_failure_sync
@@ -194,35 +198,33 @@ def _seat_line(line: IdleSeatLine) -> str:
     )
 
 
-def _positive_price(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        price = float(value)
-    except (TypeError, ValueError):
-        return None
-    return price if price > 0 else None
-
-
 def _cost_line(team: Mapping[str, Any], result: RenewalIdleSeats) -> str:
-    """空闲席位续费后多花的钱：ChatGPT 按这个 Team 的单价和币种；Premium 按每席 125 美元/月估算。"""
+    """空闲席位续费后多花的钱，按这个 Team 每种席位的真实单价和币种（不含税）。月付写每月；
+    年付写月均和一年的钱（一席一年 = 年付月价 × 12，按公开定价推断，以账单为准）。计费周期
+    未知或单价对不上就说未知，不估算缺失的价格。"""
     parts: list[str] = []
-    gpt_idle = result.idle_of(DEFAULT_SEAT_TYPE)
-    if gpt_idle > 0:
-        price = _positive_price(team.get("price_per_seat"))
-        currency = str(team.get("billing_currency") or "").strip()
-        period = {"monthly": "月", "yearly": "年"}.get(str(team.get("billing_period") or ""))
-        if price is not None and currency and period:
-            parts.append(f"{_format_amount(gpt_idle * price, currency)}/{period}（ChatGPT）")
+    currency = str(team.get("billing_currency") or "").strip().upper()
+    period = priced_period(team)
+    upstream_priced = False
+    for seat_type in (DEFAULT_SEAT_TYPE, PREMIUM_SEAT_TYPE):
+        idle = result.idle_of(seat_type)
+        if idle <= 0:
+            continue
+        label = seat_type_label(seat_type)
+        price = seat_price_per_month(team, seat_type)
+        if price is not None and currency:
+            monthly = idle * price
+            if period == "yearly":
+                annual = _format_amount(monthly * MONTHS_PER_PERIOD["yearly"], currency)
+                parts.append(f"{_format_amount(monthly, currency)}/月（{label}，年付，一年 {annual}）")
+            else:
+                parts.append(f"{_format_amount(monthly, currency)}/月（{label}）")
+            upstream_priced = True
         else:
-            parts.append("ChatGPT 单价未知")
-    premium_idle = result.idle_of(PREMIUM_SEAT_TYPE)
-    if premium_idle > 0:
-        parts.append(
-            f"{_format_amount(premium_idle * PREMIUM_SEAT_PRICE_ESTIMATE_USD, 'USD')}/月"
-            f"（{seat_type_label(PREMIUM_SEAT_TYPE)}，估算）"
-        )
-    return "💸 续费后约多花：" + " + ".join(parts)
+            parts.append(f"{label} 单价未知")
+    line = "💸 续费后约多花：" + " + ".join(parts)
+    # 上游给的单价都不含税（ChatGPT 后台写的是「+ 税费/月」）。
+    return f"{line}，税费另计" if upstream_priced else line
 
 
 def render_reminder_text(team: Mapping[str, Any], result: RenewalIdleSeats) -> str:

@@ -64,6 +64,7 @@ class PricingTest(unittest.TestCase):
                         "applied_discounts": [
                             {
                                 "amount": 52,
+                                "discount_type": "fixed",
                                 "duration_num_periods": 48,
                                 "discount_expires_at": "2030-05-19T17:16:55+00:00",
                                 "quantity_off": None,
@@ -86,7 +87,7 @@ class PricingTest(unittest.TestCase):
         self.assertEqual(discounted_monthly_total(41, 2, 52), 30.0)
         self.assertEqual(discounted_monthly_total(41, 1, 52), 0.0)
 
-    def test_nonmonthly_subscription_explicitly_clears_stale_monthly_price(self):
+    def test_yearly_subscription_uses_year_bucket(self):
         async def run_call(_func, *_args):
             return {
                 "currency_config": {
@@ -106,7 +107,7 @@ class PricingTest(unittest.TestCase):
         ))
 
         self.assertEqual(updates["billing_period"], "yearly")
-        self.assertIsNone(updates["price_per_seat"])
+        self.assertEqual(updates["price_per_seat"], 300.0)
 
     def test_pricing_failure_explicitly_clears_stale_price_and_symbol(self):
         async def run_call(_func, *_args):

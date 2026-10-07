@@ -2,6 +2,7 @@
  * Overage-policy enforcement, mirroring contract §3.2 / §3.3: every place a billed seat can be added
  * (single invite, seat switch) runs `overageGate` before it changes anything.
  */
+import { seatChargeText, teamSeatPrice } from '../lib/seatPrice';
 import type { OveragePolicy, SeatType } from '../types';
 import type { DemoDb, DemoTeam } from './db';
 import { fail, type DemoResponse } from './http';
@@ -183,16 +184,20 @@ export function overageGate(input: GateInput): GateOutcome {
   const use = consumeConfirmation(confirmation, team.id, seatType);
   if ('used' in use) return { refused: null, confirmed: use };
   refusedLog('overage_needs_confirmation');
+  // Like the server: one seat of this type per month in this Team, and the message ends with it.
+  const seatPrice = teamSeatPrice(team, seatType);
+  const money = seatChargeText(seatPrice, 1);
   return {
     refused: fail(409, {
       code: 'require_overage_confirmation',
       message:
         reconfirmNote(use.status) +
         (operation === 'seat_switch'
-          ? `切换到 ${label} 会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费。`
-          : `「${team.name}」${label} 席位已满，继续会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费。`),
+          ? `切换到 ${label} 会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费，${money}。`
+          : `「${team.name}」${label} 席位已满，继续会让 ChatGPT 自动加购 1 个 ${label} 席位并扣费，${money}。`),
       operation,
       confirmation_status: use.status,
+      seat_price: seatPrice,
       ...base,
     }),
   };

@@ -15,6 +15,7 @@ import { MAX_CONFIRMED_SEATS, newOverageConfirmation } from '../lib/overageConfi
 import { SEAT_STYLE, SEAT_TYPES, SEAT_TYPE_OPTIONS, parseOveragePolicy } from '../lib/seatType';
 import {
   cachedFreeSeats,
+  gateConfirmText,
   gateMessage,
   liveFullConfirmText,
   overagePurchaseText,
@@ -23,8 +24,22 @@ import {
   teamPendingCounts,
   type TeamCapacityFields,
 } from '../lib/seatCapacity';
+import {
+  SEAT_PRICE_UNKNOWN_TEXT,
+  YEARLY_PURCHASE_NOTE,
+  PURCHASE_NOTE,
+  formatSeatAmountShort,
+  formatSeatCostTotals,
+  formatSeatPrice,
+  groupSeatCosts,
+  seatChargeText,
+  teamSeatPrice,
+  type SeatCostTotal,
+} from '../lib/seatPrice';
+import { sameCurrency } from '../lib/money';
 import type { PendingInvite, SeatType, Team } from '../types';
-import ConfirmDialog from './ConfirmDialog';
+import SeatPurchaseConfirmDialog, { type SeatPurchaseRequest } from './SeatPurchaseConfirmDialog';
+import SeatProductionWarning from './SeatProductionWarning';
 import DialogFrame from './DialogFrame';
 import SeatBetaBadge from './BetaBadge';
 import { BUTTON, INPUT } from './ui';
@@ -90,6 +105,7 @@ interface OverageAsk {
    * this many (server-enforced); beyond it the dialog asks again.
    */
   purchaseCount?: number;
+  quotePlan?: OveragePlanItem[];
   /**
    * Batch: the plan the admin is shown (its Teams and seat count go back as overage_team_ids /
    * overage_seat_limit) and what the server already did before asking.
@@ -130,13 +146,52 @@ function quoteNames(names: string[]): string {
 }
 
 /**
- * The batch confirm step. The counts come from the server's own lead sentence (it knows how
- * many free seats the emails will use first), then the plan: where seats get bought and how many.
+ * What the auto Teams' overflow adds per month, before submitting. The split across Teams is not
+ * known in advance, so a total only when every one of them has the same known price and period;
+ * otherwise each Team's per-seat price (never a made-up total, never a sum across currencies or
+ * periods), with the yearly note once when any of them is yearly.
  */
-function BatchPlanMessage({ serverMessage, plan, total, invitedOverage, replan }: {
+function autoOverflowCost(autoTeams: Team[], extra: number): string {
+  const priced = autoTeams.map((item) => ({ name: item.name, price: teamSeatPrice(item, 'default') }));
+  const first = priced[0]?.price ?? null;
+  const uniform = first !== null && priced.every(({ price }) =>
+    price !== null
+    && price.amount === first.amount
+    && price.period === first.period
+    && sameCurrency(price.currency, first.currency));
+  if (uniform) return seatChargeText(first, extra);
+  const known = priced.flatMap(({ name, price }) => (price ? [`「${name}」${formatSeatPrice(price)}`] : []));
+  if (known.length === 0) return SEAT_PRICE_UNKNOWN_TEXT;
+  const yearly = `，${priced.some(({ price }) => price?.period === 'yearly') ? YEARLY_PURCHASE_NOTE : PURCHASE_NOTE}`;
+  const unknown = priced.filter(({ price }) => !price).map(({ name }) => name);
+  return `每席：${known.join('、')}${yearly}${unknown.length > 0 ? `；${quoteNames(unknown)}${SEAT_PRICE_UNKNOWN_TEXT}` : ''}`;
+}
+
+/**
+ * "约 +฿2,340 + 税/月" per currency and period (yearly ones with the annual figure and the yearly
+ * note, once); seats without a known price are named as such, never priced.
+ */
+function planCostText(plan: OveragePlanItem[], serverTotals: SeatCostTotal[]): string {
+  const grouped = groupSeatCosts(plan.map((item) => ({ price: item.seat_price, seats: item.extra_seats })));
+  const totals = serverTotals.length > 0 ? serverTotals : grouped.totals;
+  if (totals.length === 0) return SEAT_PRICE_UNKNOWN_TEXT;
+  const known = formatSeatCostTotals(totals);
+  return grouped.unknownSeats > 0
+    ? `${known}。另有 ${grouped.unknownSeats} 席${SEAT_PRICE_UNKNOWN_TEXT}`
+    : known;
+}
+
+/**
+ * The batch confirm step. The counts come from the server's own lead sentence (it knows how
+ * many free seats the emails will use first), then the plan: where seats get bought, how many,
+ * and what they add per month (per currency).
+ */
+function BatchPlanMessage({ serverMessage, plan, total, costTotals, invitedOverage, replan }: {
   serverMessage: string;
   plan: OveragePlanItem[];
   total: number;
+  /** The server's per-currency totals of the plan (empty = work them out from the plan). */
+  costTotals: SeatCostTotal[];
   /** Already invited onto 超员自动 Teams in this run (a seat was bought for each). */
   invitedOverage: number;
   replan: boolean;
@@ -153,7 +208,8 @@ function BatchPlanMessage({ serverMessage, plan, total, invitedOverage, replan }
       {invitedOverage > 0 && <p>已邀请的里有 {invitedOverage} 个在「超员自动」的 Team，已加购席位。</p>}
       {plan.length === 1 ? (
         <p className="font-medium text-gray-900 dark:text-gray-100">
-          继续会在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费。
+          继续会在「{plan[0].team_name}」自动加购 {plan[0].extra_seats} 个 ChatGPT 席位并扣费，
+          {seatChargeText(plan[0].seat_price, plan[0].extra_seats)}。
         </p>
       ) : (
         <>
@@ -162,11 +218,19 @@ function BatchPlanMessage({ serverMessage, plan, total, invitedOverage, replan }
             {plan.map((item) => (
               <li key={item.team_id || item.team_name} className="flex items-center justify-between gap-3 px-3 py-1.5">
                 <span className="min-w-0 truncate" title={item.team_name}>{item.team_name}</span>
-                <span className="shrink-0 font-medium tabular-nums">+{item.extra_seats} 席</span>
+                <span className="shrink-0 text-right tabular-nums">
+                  <span className="font-medium">+{item.extra_seats} 席</span>
+                  <span className="ml-1.5 text-gray-500 dark:text-ink-400">
+                    {/* 行内放不下年付的全年金额和说明：写在下面的合计里。 */}
+                    {item.seat_price ? formatSeatAmountShort(item.seat_price, item.extra_seats) : '单价未知'}
+                  </span>
+                </span>
               </li>
             ))}
           </ul>
-          <p className="font-medium text-gray-900 dark:text-gray-100">共加购 {total} 个 ChatGPT 席位。</p>
+          <p className="font-medium text-gray-900 dark:text-gray-100">
+            共加购 {total} 个 ChatGPT 席位，{planCostText(plan, costTotals)}。
+          </p>
         </>
       )}
     </div>
@@ -208,6 +272,11 @@ export default function AddMemberDialog({
   const [error, setError] = useState('');
   const kickPolicy = useKickPolicy();
   const [ask, setAsk] = useState<OverageAsk | null>(null);
+  const quoteRequests = useMemo<SeatPurchaseRequest[]>(() => {
+    if (!ask || (ask.seatType !== 'default' && ask.seatType !== 'prolite')) return [];
+    if (ask.quotePlan) return ask.quotePlan.map(item => ({ teamId: item.team_id, teamName: item.team_name, seatType: 'default', additionalSeats: item.extra_seats }));
+    return teamId ? [{ teamId, teamName, seatType: ask.seatType, additionalSeats: Math.min(MAX_CONFIRMED_SEATS, ask.purchaseCount ?? ask.emails.length) }] : [];
+  }, [ask, teamId, teamName]);
   const [batchResult, setBatchResult] = useState<BatchInviteOutcome | null>(null);
   // 批量模式：每个 Team 的缓存 ChatGPT 空位（已扣待接受邀请），用来在提交前说清楚会不会加购。
   const [freeByTeam, setFreeByTeam] = useState<Map<string, number> | null>(null);
@@ -271,20 +340,22 @@ export default function AddMemberDialog({
       return total + (fromUsage === undefined ? fromTeam : Math.min(fromUsage, fromTeam));
     }, 0);
     const extra = Math.max(0, emails.length - free);
-    const autoNames = candidates.filter((item) => parseOveragePolicy(item.overage_policy) === 'auto').map((item) => item.name);
+    const autoTeams = candidates.filter((item) => parseOveragePolicy(item.overage_policy) === 'auto');
+    const autoNames = autoTeams.map((item) => item.name);
     const hasConfirm = candidates.some((item) => parseOveragePolicy(item.overage_policy) === 'confirm');
-    return { free, extra, autoNames, hasConfirm };
+    return { free, extra, autoTeams, autoNames, hasConfirm };
   }, [batchMode, teams, emails.length, freeByTeam]);
 
   const batchNote: { tone: 'warn' | 'plain'; text: string } | null = (() => {
     if (!batchPreview || batchPreview.extra === 0) return null;
-    const { free, extra, autoNames, hasConfirm } = batchPreview;
+    const { free, extra, autoTeams, autoNames, hasConfirm } = batchPreview;
     const lead = `空闲 ChatGPT 席位约 ${free} 个，多出约 ${extra} 人。`;
+    const buy = `ChatGPT 会自动加购约 ${extra} 个席位并扣费，${autoOverflowCost(autoTeams, extra)}。`;
     if (autoNames.length === 1) {
-      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team「${autoNames[0]}」，ChatGPT 会自动加购约 ${extra} 个席位并扣费。` };
+      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team「${autoNames[0]}」，${buy}` };
     }
     if (autoNames.length > 1) {
-      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team（${quoteNames(autoNames)}），ChatGPT 会自动加购约 ${extra} 个席位并扣费。` };
+      return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team（${quoteNames(autoNames)}），${buy}` };
     }
     if (hasConfirm) return { tone: 'warn', text: `${lead}超出部分需确认后加购。` };
     return { tone: 'plain', text: `${lead}其余 Team 均禁止超员，超出成员将跳过邀请。` };
@@ -366,6 +437,7 @@ export default function AddMemberDialog({
         const added = [...carriedAdded, ...asAdded(err.added)];
         setAsk({
           seatType: 'default',
+          quotePlan: err.overagePlan,
           emails: remaining,
           batch: {
             planTeamIds: err.overagePlan.map((item) => item.team_id).filter(Boolean),
@@ -379,6 +451,7 @@ export default function AddMemberDialog({
                 serverMessage={err.message}
                 plan={err.overagePlan}
                 total={err.extraSeatsTotal}
+                costTotals={err.costTotals}
                 invitedOverage={added.filter((item) => item.overage).length}
                 replan={allowOverage || err.message.startsWith(REPLAN_NOTE)}
               />
@@ -450,6 +523,7 @@ export default function AddMemberDialog({
           invited: done,
           capacityUnknown: err.capacityUnknown,
           reconfirm: attached && err.confirmationStatus !== null && err.confirmationStatus !== 'missing',
+          price: err.seatPrice,
         });
         setAsk({
           seatType: effectiveSeatType,
@@ -475,8 +549,8 @@ export default function AddMemberDialog({
     setBatchResult(null);
     setLeftoverText('');
     if (gate?.action === 'confirm') {
-      // 缓存显示已满且这个 Team 要先问：先确认再发，确认里写明他看到的加购个数。
-      const text = gateText ?? '';
+      // 缓存显示已满且这个 Team 要先问：先确认再发，确认里写明他看到的加购个数和每月多出的钱。
+      const text = gateConfirmText(gate);
       setAsk({
         seatType: effectiveSeatType,
         emails,
@@ -581,7 +655,8 @@ export default function AddMemberDialog({
         </>
       }
       nested={
-        <ConfirmDialog
+        <SeatPurchaseConfirmDialog
+          quoteRequests={quoteRequests}
           open={ask !== null}
           onOpenChange={handleAskOpenChange}
           title={`确认加购 ${SEAT_TYPES[ask?.seatType ?? 'default'].label} 席位`}
@@ -592,10 +667,11 @@ export default function AddMemberDialog({
           onConfirm={() => { void handleConfirmOverage(); }}
         >
           <p className="text-xs text-gray-600 dark:text-ink-300">超员策略可在 Team 设置里修改。</p>
-        </ConfirmDialog>
+        </SeatPurchaseConfirmDialog>
       }
     >
       <div className="space-y-5">
+        <SeatProductionWarning />
         <div>
           <label htmlFor="add-member-emails" className={LABEL}>
             {retrying ? '没加上的邮箱' : '邮箱'} <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>

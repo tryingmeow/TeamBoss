@@ -14,13 +14,25 @@ export interface Team {
   billing_symbol: string | null;
   billing_period: string | null;
   price_per_seat: number | null;
-  discount_amount: number;
+  /**
+   * Real Premium (Business `business_prolite`) per-seat price per month in billing_currency,
+   * tax-exclusive. null = unknown; annual plans use their monthly rate. Optional for old servers.
+   */
+  premium_price_per_seat?: number | null;
+  discount_amount: number | null;
   discount_duration_num_periods: number | null;
   discount_expires_at: string | null;
   discount_quantity_off: number | null;
   promo_campaign_id: string | null;
+  /**
+   * Per month before / after the discount: ChatGPT price × billed ChatGPT seats, plus Premium
+   * real price × paid Premium seats. Annual discounts apply once per year before dividing by 12.
+   * null = billing period or a paid seat price is unknown.
+   */
   monthly_subtotal: number | null;
   monthly_total: number | null;
+  period_subtotal?: number | null;
+  period_total?: number | null;
   balance: string;
   active_start: string | null;
   active_until: string | null;

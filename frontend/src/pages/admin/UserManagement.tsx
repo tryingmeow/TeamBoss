@@ -614,6 +614,7 @@ function SeatTypeCell({
 }) {
   const [open, setOpen] = useState(false);
   const seatSwitch = useSeatSwitch({
+    teamId: context?.teamId ?? '',
     apply: (target, allowOverage) =>
       context ? updateMemberSeat(context.teamId, context.userId, target, allowOverage) : Promise.resolve(),
     onSwitched: () => context?.onSwitched(),
@@ -647,7 +648,7 @@ function SeatTypeCell({
             </button>
           </Popover.Trigger>
           <Popover.Portal>
-            <Popover.Content className={cn(POPOVER, 'w-48 p-1')} sideOffset={6} collisionPadding={16}>
+            <Popover.Content className={cn(POPOVER, 'w-52 p-1')} sideOffset={6} collisionPadding={16}>
               <SeatSwitchOptions
                 current={current}
                 gateFor={(target) => seatSwitchGate(context.team, seatType, target, context.pendingByType)}

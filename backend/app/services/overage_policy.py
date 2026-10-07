@@ -38,6 +38,7 @@ from ..seat_types import (
     normalize_seat_type,
     seat_type_label,
 )
+from .pricing import seat_charge_text, seat_cost_totals, seat_price_info
 from .seat_capacity import (
     fetch_live_chatgpt_seat_capacity,
     fetch_live_seat_type_capacity,
@@ -378,26 +379,49 @@ def refusal_message(
     operation: str = OPERATION_INVITE,
     capacity_unknown: bool = False,
     confirmation_status: str | None = None,
+    charge: str | None = None,
 ) -> str:
-    """给管理员看的一句话：为什么没加，以及继续会对钱发生什么。"""
+    """给管理员看的一句话：为什么没加，以及继续会对钱发生什么。
+
+    ``charge`` 是加购这 1 席每月多出的钱（``seat_charge_text``），给了就接在「扣费」后面。
+    """
     label = seat_type_label(seat_type)
+    money = f"，{charge}" if charge else ""
     if normalize_overage_policy(policy) == "forbid":
         text = (
             f"「{team_name}」设为禁止超员：{label} 席位已满，不会自动加购。"
             "要加人请先在 Team 设置里修改超员策略。"
         )
     elif operation == OPERATION_SEAT_SWITCH:
-        text = f"切换到 {label} 会让 ChatGPT 自动加购 1 个 {label} 席位并扣费。"
+        text = f"切换到 {label} 会让 ChatGPT 自动加购 1 个 {label} 席位并扣费{money}。"
     else:
-        text = f"「{team_name}」{label} 席位已满，继续会让 ChatGPT 自动加购 1 个 {label} 席位并扣费。"
+        text = f"「{team_name}」{label} 席位已满，继续会让 ChatGPT 自动加购 1 个 {label} 席位并扣费{money}。"
     if capacity_unknown:
         text = f"{CAPACITY_UNKNOWN_PREFIX}{text}"
     note = _CONFIRMATION_RETRY_NOTES.get(confirmation_status or "")
     return f"{note}{text}" if note and normalize_overage_policy(policy) == "confirm" else text
 
 
-def refusal_detail(check: SeatCheck, *, operation: str) -> dict[str, Any]:
-    """单个 Team 被策略挡下时的 409 ``detail``（禁止超员 / 需要确认两种）。"""
+async def load_seat_price(team_id: str, seat_type: str) -> dict[str, Any] | None:
+    """这个 Team 一席 ``seat_type`` 的价格（``seat_price_info``）；行不在、单价未知、计费周期未知都是 None。"""
+    async with get_db() as db:
+        cursor = await db.execute(
+            """SELECT billing_period, price_period, billing_currency, billing_symbol,
+                      price_per_seat, premium_price_per_seat
+               FROM teams WHERE id = ?""",
+            (team_id,),
+        )
+        row = await cursor.fetchone()
+    return seat_price_info(dict(row), seat_type) if row is not None else None
+
+
+def refusal_detail(
+    check: SeatCheck, *, operation: str, seat_price: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """单个 Team 被策略挡下时的 409 ``detail``（禁止超员 / 需要确认两种）。
+
+    需要确认时带上 ``seat_price``（一席的月价，未知为 None），文案里也写上金额或「单价未知」。
+    """
     forbid = normalize_overage_policy(check.policy) == "forbid"
     capacity = dict(check.capacity) if check.capacity else _unknown_capacity(check.seat_type, 0)
     detail = {
@@ -409,6 +433,7 @@ def refusal_detail(check: SeatCheck, *, operation: str) -> dict[str, Any]:
             operation=operation,
             capacity_unknown=check.capacity_unknown,
             confirmation_status=check.confirmation_status,
+            charge=None if forbid else seat_charge_text(seat_price, 1),
         ),
         "team_id": check.team_id,
         "team_name": check.team_name,
@@ -419,12 +444,16 @@ def refusal_detail(check: SeatCheck, *, operation: str) -> dict[str, Any]:
     }
     if not forbid:
         detail["confirmation_status"] = check.confirmation_status or CONFIRMATION_MISSING
+        detail["seat_price"] = seat_price
     return detail
 
 
 async def refuse(check: SeatCheck, *, operation: str, action: str, email: str | None) -> NoReturn:
     """记一条 skipped 日志（与这次尝试的操作同一个 action），然后抛 409。"""
-    detail = refusal_detail(check, operation=operation)
+    seat_price = None
+    if normalize_overage_policy(check.policy) != "forbid":
+        seat_price = await load_seat_price(check.team_id, check.seat_type)
+    detail = refusal_detail(check, operation=operation, seat_price=seat_price)
     await log_operation(check.team_id, action, email, check.log_detail(), "skipped", detail["message"])
     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
@@ -438,9 +467,17 @@ def batch_confirmation_detail(
     remaining_emails: list[str],
     failed: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """批量自动分配要超员时问一次的 409 ``detail``：说清加购几个、加在哪些 Team。"""
+    """批量自动分配要超员时问一次的 409 ``detail``：说清加购几个、加在哪些 Team、每月多花多少。
+
+    ``plan`` 的每一项带 ``seat_price``（那个 Team 一席 ChatGPT 的月价，未知为 None）；
+    ``cost_totals`` 按币种分开合计，不同币种绝不相加，单价未知的不计入。
+    """
     extra_total = sum(int(item.get("extra_seats") or 0) for item in plan)
-    targets = "、".join(f"「{item['team_name']}」{item['extra_seats']} 个" for item in plan)
+    targets = "；".join(
+        f"「{item['team_name']}」{item['extra_seats']} 个，"
+        f"{seat_charge_text(item.get('seat_price'), int(item.get('extra_seats') or 0))}"
+        for item in plan
+    )
     label = seat_type_label(DEFAULT_SEAT_TYPE)
     first = plan[0] if plan else {}
     return {
@@ -459,4 +496,7 @@ def batch_confirmation_detail(
         "failed": failed or [],
         "overage_plan": plan,
         "extra_seats_total": extra_total,
+        "cost_totals": seat_cost_totals(
+            [(item.get("seat_price"), int(item.get("extra_seats") or 0)) for item in plan]
+        ),
     }

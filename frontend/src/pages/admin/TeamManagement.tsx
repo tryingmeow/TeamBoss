@@ -28,7 +28,7 @@ import {
 } from '../../api/client';
 import PageShell from '../../components/PageShell';
 import { BUTTON, CARD, PILL, TONE } from '../../components/ui';
-import { formatMoney } from '../../lib/money';
+import { formatMoney, sameCurrency } from '../../lib/money';
 import { SEAT_STYLE, formatSeatTypeLabel, seatStyle } from '../../lib/seatType';
 import type { SeatType } from '../../types';
 import { cn } from '../../lib/utils';
@@ -273,10 +273,6 @@ function MoreLink({ to, children }: { to: string; children: ReactNode }) {
   );
 }
 
-function sameCurrency(a: string | null | undefined, b: string | null | undefined) {
-  return Boolean(a && b && a.trim().toUpperCase() === b.trim().toUpperCase());
-}
-
 export default function TeamManagement() {
   const [data, setData] = useState<UsageData | null>(null);
   const [finance, setFinance] = useState<FinanceOverview | null>(null);
@@ -390,15 +386,15 @@ export default function TeamManagement() {
   const upcomingMembers = expiringMembers.filter((member) => member.daysUntil <= WINDOW_DAYS);
   const laterMemberCount = expiringMembers.length - upcomingMembers.length;
 
+  // 空闲 ChatGPT 席位 × ChatGPT 每席月价（基准币种；年付 Team 是年付价折成的每月）。月费总额里有
+  // Premium、有折扣，不能拿它平摊；单价未知（计费周期未知 / 没同步到 / 缺汇率）的 Team 不算。
   const idleCost = useMemo(() => {
     if (!data || !finance) return 0;
     const freeSeatsByTeam = new Map(data.teams.map((team) => [team.team_id, team.free_gpt_seats]));
     return finance.teams.reduce((total, team) => {
-      if (team.status !== 'active' || team.will_renew !== 1 || team.monthly_total_base === null || team.seats_entitled <= 0) {
-        return total;
-      }
-      const freeSeats = freeSeatsByTeam.get(team.team_id) ?? 0;
-      return total + ((team.monthly_total_base / team.seats_entitled) * freeSeats);
+      const price = team.price_per_seat_base;
+      if (team.status !== 'active' || team.will_renew !== 1 || typeof price !== 'number') return total;
+      return total + price * (freeSeatsByTeam.get(team.team_id) ?? 0);
     }, 0);
   }, [data, finance]);
 
@@ -408,6 +404,15 @@ export default function TeamManagement() {
     0,
   );
   const baseCurrency = finance?.base_currency || 'USD';
+  // 月预计支出里已含的真实 Premium：有 Team 不是基准币种就是换算出来的，带 ≈（和财务页同一写法）。
+  const premiumIncludedConverted = (finance?.teams ?? []).some((team) => (
+    team.status === 'active'
+    && team.subscription_status === 'renewing'
+    && team.premium_price_source === 'upstream'
+    && (team.premium_seats_paid ?? 0) > 0
+    && team.monthly_total_native !== null
+    && !sameCurrency(team.billing_currency, baseCurrency)
+  ));
 
   return (
     <PageShell
@@ -526,25 +531,29 @@ export default function TeamManagement() {
                 title="月预计支出"
                 value={formatMoney(finance?.monthly_total_base, baseCurrency)}
                 detail={
-                  (finance?.premium_monthly_estimate_base_total ?? 0) > 0 ? (
-                    <span className="block">
-                      另加 <span className={SEAT_STYLE.prolite.text}>Premium 估算</span>{' '}
-                      {baseCurrency.toUpperCase() === 'USD' ? '' : '≈ '}{formatMoney(finance?.premium_monthly_estimate_base_total, baseCurrency)}
-                    </span>
-                  ) : finance?.excluded_teams_count ? (
+                  finance?.excluded_teams_count ? (
                     <span className="font-medium text-amber-600 dark:text-amber-400">
-                      未计入 {finance.excluded_teams_count} 个异常 Team
+                      未计入 {finance.excluded_teams_count} 个费用不明或异常的 Team
+                    </span>
+                  ) : (finance?.premium_monthly_base_total ?? 0) > 0 ? (
+                    <span className="block">
+                      含 <span className={SEAT_STYLE.prolite.text}>Premium</span>{' '}
+                      {premiumIncludedConverted ? '≈ ' : ''}{formatMoney(finance?.premium_monthly_base_total, baseCurrency)}
                     </span>
                   ) : null
                 }
-                tooltip="只计入活跃且自动续费的 Team（已剔除异常及已取消续费的 Team）"
+                tooltip={
+                  (finance?.premium_monthly_base_total ?? 0) > 0
+                    ? '只计入活跃且自动续费的 Team（已剔除异常及已取消续费的 Team），年付按月均，含已读到单价的 Premium 席位；不含税'
+                    : '只计入活跃且自动续费的 Team（已剔除异常及已取消续费的 Team），年付按月均；不含税'
+                }
                 icon={Wallet}
                 toneKey="indigo"
               />
               <StatCard
                 title="闲置席位折算"
                 value={finance ? `约 ${formatMoney(idleCost, baseCurrency)}` : '—'}
-                tooltip={`${data.free_gpt_seats} 个空闲席位按月费分摊折算`}
+                tooltip={`${data.free_gpt_seats} 个空闲 ChatGPT 席位 × 每席月价（不含税，年付按月均）；单价未知的 Team 不算`}
                 icon={CreditCard}
                 toneKey="amber"
               />
@@ -609,6 +618,10 @@ export default function TeamManagement() {
                         <div className="shrink-0 text-right">
                           <div className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">
                             {formatMoney(item.amount_base, baseCurrency)}
+                            {/* 这次续费要扣的钱：年付 Team 是一整年的。 */}
+                            {item.billing_period === 'yearly' && item.amount_native !== null && (
+                              <span className="font-normal text-gray-500 dark:text-ink-400"> /年</span>
+                            )}
                           </div>
                           {item.amount_native !== null && (converted || item.amount_base === null) && (
                             <div className="mt-1 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">

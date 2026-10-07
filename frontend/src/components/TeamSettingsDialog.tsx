@@ -10,7 +10,8 @@ import {
   updateTeamProxy,
   type Proxy,
 } from '../api/client';
-import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
+import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, SEAT_TYPES, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
+import { SEAT_PRICE_UNKNOWN_TEXT, YEARLY_PURCHASE_NOTE, formatSeatPrice, teamSeatPrice } from '../lib/seatPrice';
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { cn } from '../lib/utils';
@@ -30,6 +31,9 @@ interface TeamSettingsDialogProps {
   onProxyChanged?: (proxyId: number | null) => void;
   /** The server's Team after the overage policy changed. */
   onTeamUpdated?: (team: Team) => void;
+  /** The Team's synced billing fields: the 超员自动 confirm says what one bought seat adds per month. */
+  billing?: Pick<Team,
+    'billing_period' | 'billing_currency' | 'billing_symbol' | 'price_per_seat' | 'premium_price_per_seat'> | null;
 }
 
 /** The workspace default is ChatGPT or Codex only; anything else upstream reports reads as ChatGPT. */
@@ -49,6 +53,7 @@ export default function TeamSettingsDialog({
   onChanged,
   onProxyChanged,
   onTeamUpdated,
+  billing,
 }: TeamSettingsDialogProps) {
   const [settings, setSettings] = useState<TeamWorkspaceSettings | null>(null);
   const [loading, setLoading] = useState(false);
@@ -271,7 +276,22 @@ export default function TeamSettingsDialog({
               if (!next && savingPolicy !== 'auto') setConfirmAutoOpen(false);
             }}
             title="开启超员自动加购？"
-            message="席位不足时将自动加购并计费，不再弹出确认提示。"
+            message={
+              <>
+                <p>席位不足时将自动加购并计费，不再弹出确认提示。</p>
+                {billing && (
+                  <p className="mt-1.5">
+                    这个 Team 每加购 1 席：
+                    {(['default', 'prolite'] as const).map((seatType) => {
+                      const price = teamSeatPrice(billing, seatType);
+                      return `${SEAT_TYPES[seatType].label} ${price ? formatSeatPrice(price) : SEAT_PRICE_UNKNOWN_TEXT}`;
+                    }).join('；')}。
+                    {(['default', 'prolite'] as const).some((seatType) => teamSeatPrice(billing, seatType)?.period === 'yearly')
+                      && `${YEARLY_PURCHASE_NOTE}。`}
+                  </p>
+                )}
+              </>
+            }
             confirmLabel="确认开启"
             destructive
             loading={savingPolicy === 'auto'}

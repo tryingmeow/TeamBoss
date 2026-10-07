@@ -15,7 +15,7 @@ from .chatgpt_limiter import (
 from .database import get_db, log_operation
 from .models import TeamSession
 from .seat_types import CODEX_SEAT_TYPE
-from .services.pricing import account_billing_updates, fetch_seat_pricing
+from .services.pricing import account_billing_updates, subscription_billing_updates, fetch_seat_pricing
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
     seat_counts_column_updates,
@@ -140,8 +140,8 @@ async def upsert_team_from_session(
         updates.update(subscription_column_updates(subscription, team_id=team_id))
 
     # fetch_seat_pricing itself only returns keys it could actually resolve
-    # (country_code/billing_symbol/price_per_seat/billing_period); price_per_seat
-    # in particular is only included when billing_period is confirmed "monthly".
+    # (country_code/billing_symbol/price_per_seat/premium_price_per_seat/price_period/
+    # billing_period); the prices are only non-NULL for a confirmed monthly or yearly period.
     updates.update(await fetch_seat_pricing(client, subscription))
 
     if "error" not in balance_info:
@@ -160,6 +160,7 @@ async def upsert_team_from_session(
     # account_info is guaranteed non-error at this point (an earlier check
     # raises HTTPException otherwise), so these keys are always populated.
     updates.update(account_billing_updates(account_info, team_id))
+    updates.update(subscription_billing_updates(subscription))
 
     if "error" not in payment_methods:
         methods = payment_methods.get("payment_methods", [])
@@ -226,8 +227,9 @@ async def upsert_team_from_session(
                 "seat_capacity_json", "seat_type_counts_json",
                 "is_codex_enabled",
                 "country_code", "billing_currency", "billing_symbol", "billing_period",
-                "price_per_seat", "discount_amount", "discount_duration_num_periods",
-                "discount_expires_at", "discount_quantity_off", "promo_campaign_id",
+                "price_per_seat", "premium_price_per_seat", "price_period",
+                "discount_amount", "discount_duration_num_periods",
+                "discount_expires_at", "discount_start_in_num_periods", "discount_quantity_off", "promo_campaign_id",
                 "balance", "active_start", "active_until", "will_renew",
                 "proxy_id", "status", "created_at", "updated_at",
             ]

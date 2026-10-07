@@ -13,7 +13,8 @@ from ..services.open_redemptions import (
     open_redemption_detail,
     settled_redemption_row_detail,
 )
-from ..seat_types import normalize_overage_policy
+from ..seat_types import DEFAULT_SEAT_TYPE, normalize_overage_policy
+from ..services.pricing import seat_price_info
 from ..services.overage_policy import (
     load_team_policy,
     proceeds_without_capacity_check,
@@ -148,7 +149,9 @@ async def _load_active_team_rows() -> list[dict[str, Any]]:
         cursor = await db.execute(
             """SELECT id, name, owner_email, seats_in_use, seats_entitled,
                       codex_count, chatgpt_count, created_at, active_until, will_renew,
-                      seat_capacity_json, overage_policy
+                      seat_capacity_json, overage_policy,
+                      billing_period, price_period, billing_currency, billing_symbol,
+                      price_per_seat, premium_price_per_seat
                FROM teams
                WHERE status = 'active'"""
         )
@@ -289,6 +292,8 @@ def batch_overage_plan(candidates: list[dict[str, Any]], extra_seats: int) -> li
         "team_id": first["id"],
         "team_name": first.get("name") or first["id"],
         "extra_seats": int(extra_seats),
+        # 一席 ChatGPT 的价格（每月，年付是月价；这个 Team 的币种，不含税）；未知为 None，界面写「单价未知」。
+        "seat_price": seat_price_info(first, DEFAULT_SEAT_TYPE),
     }]
 
 

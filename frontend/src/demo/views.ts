@@ -77,9 +77,46 @@ export function renewalIdleSeats(record: DemoTeam, now = Date.now()): RenewalIdl
   return { renews_at: isoAt(until).replace(/\.\d{3}Z$/, 'Z'), total_idle: totalIdle, lines };
 }
 
+/** Cost for the current billing cycle, and its monthly equivalent; incomplete pricing stays unknown. */
+export function teamMonthlyCost(team: Team) {
+  const months = team.billing_period === 'monthly' ? 1 : team.billing_period === 'yearly' ? 12 : null;
+  const positive = (value: number | null | undefined) => (months && typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null);
+  const price = positive(team.price_per_seat);
+  const premiumPrice = positive(team.premium_price_per_seat);
+  const chatgptSeats = team.seat_capacity?.default?.paid ?? team.seats_entitled;
+  const premiumSeats = team.seat_capacity?.prolite?.paid ?? 0;
+  const chatgptSubtotal = chatgptSeats === 0 ? 0 : price === null ? null : price * chatgptSeats;
+  const premiumSubtotal = premiumSeats === 0 ? 0 : premiumPrice === null ? null : premiumPrice * premiumSeats;
+  const known = months !== null && chatgptSubtotal !== null && premiumSubtotal !== null;
+  const appliedDiscount = months !== null && chatgptSubtotal !== null && team.discount_amount !== null
+    ? Math.min(Math.max(0, team.discount_amount), chatgptSubtotal * months) : null;
+  const periodSubtotal = known ? (chatgptSubtotal + premiumSubtotal) * months : null;
+  const periodTotal = periodSubtotal !== null && appliedDiscount !== null ? periodSubtotal - appliedDiscount : null;
+  return {
+    price_per_seat: price,
+    premium_price_per_seat: premiumPrice,
+    chatgpt_seats_billed: chatgptSeats,
+    premium_seats_paid: premiumSeats,
+    premium_subtotal: premiumSubtotal,
+    premium_price_source: premiumPrice !== null ? 'upstream' as const : null,
+    discount_monthly: appliedDiscount !== null && months !== null ? appliedDiscount / months : null,
+    period_subtotal: periodSubtotal,
+    period_total: periodTotal,
+    monthly_subtotal: periodSubtotal !== null && months !== null ? periodSubtotal / months : null,
+    monthly_total: periodTotal !== null && months !== null ? periodTotal / months : null,
+  };
+}
+
 export function teamView(record: DemoTeam, sortedEmails = false): Team {
+  const cost = teamMonthlyCost(record.team);
   const team = {
     ...record.team,
+    price_per_seat: cost.price_per_seat,
+    premium_price_per_seat: cost.premium_price_per_seat,
+    monthly_subtotal: cost.monthly_subtotal,
+    monthly_total: cost.monthly_total,
+    period_subtotal: cost.period_subtotal,
+    period_total: cost.period_total,
     last_sync_partial_failures: [...record.team.last_sync_partial_failures],
     seat_capacity: record.team.seat_capacity
       ? Object.fromEntries(Object.entries(record.team.seat_capacity).map(([k, v]) => [k, { ...v }]))
@@ -553,7 +590,7 @@ export function cardKey(team: Team): string | null {
 }
 
 function monthlyNative(team: Team): number | null {
-  return team.billing_period === 'monthly' && team.price_per_seat !== null ? team.monthly_total : null;
+  return teamMonthlyCost(team).monthly_total;
 }
 
 function utcDay(ms: number): number {
@@ -567,7 +604,7 @@ function latestInvoice(record: DemoTeam, base: string): FinanceLatestInvoice | n
   if (!invoice) return null;
   const status = (invoice.status || '').toLowerCase();
   const display = status === 'paid' ? invoice.amount_paid : invoice.amount_due;
-  const native = monthlyNative(team);
+  const native = teamMonthlyCost(team).period_total;
   const currency = invoice.currency || '';
   let reconciliation: FinanceLatestInvoice['reconciliation'] = null;
   let diffNative: number | null = null;
@@ -596,19 +633,21 @@ function latestInvoice(record: DemoTeam, base: string): FinanceLatestInvoice | n
   };
 }
 
-/** Contract §3.7 fields that the shared FinanceTeamItem type may not carry yet. */
-export type PremiumFinanceFields = {
-  chatgpt_seats_billed: number | null;
-  premium_seats_paid: number;
-  premium_monthly_estimate_usd: number;
-  premium_monthly_estimate_base: number | null;
-};
-export const PREMIUM_SEAT_PRICE_ESTIMATE_USD = 125;
+/** The per-seat and Premium fields FinanceTeamItem marks optional (for older servers); the demo always sends them. */
+export type PremiumFinanceFields = Required<Pick<FinanceTeamItem,
+  | 'chatgpt_seats_billed'
+  | 'premium_seats_paid'
+  | 'price_per_seat_base'
+  | 'premium_price_per_seat'
+  | 'premium_price_per_seat_base'
+  | 'premium_price_source'
+  | 'premium_monthly_native'
+  | 'premium_monthly_base'
+>>;
 
 export function financeOverview(db: DemoDb): FinanceOverview & {
   teams: Array<FinanceTeamItem & PremiumFinanceFields>;
-  premium_monthly_estimate_base_total: number;
-  premium_seat_price_estimate_usd: number;
+  premium_monthly_base_total: number;
 } {
   const base = db.finance.base_currency;
   const threshold = db.finance.low_balance_threshold;
@@ -623,7 +662,7 @@ export function financeOverview(db: DemoDb): FinanceOverview & {
   let monthlyTotalBase = 0;
   let discountTotalBase = 0;
   let excluded = 0;
-  let premiumTotalBase = 0;
+  let premiumIncludedBase = 0;
   let lastPaidTotal = 0;
   let lastPaidCount = 0;
   const alerts: FinanceAlert[] = [];
@@ -633,22 +672,24 @@ export function financeOverview(db: DemoDb): FinanceOverview & {
     const { team } = record;
     const usage = teamSeatUsage(record);
     const key = cardKey(team);
-    const native = monthlyNative(team);
+    const cost = teamMonthlyCost(team);
+    const native = cost.monthly_total;
     const nativeBase = convert(native, team.billing_currency, base);
     const latest = latestInvoice(record, base);
     const untilMs = team.active_until ? Date.parse(team.active_until) : null;
     const daysLeft = untilMs === null ? null : Math.round((utcDay(untilMs) - today) / DAY);
+    // Known Premium costs are included only when the complete Team total is known.
+    const premiumNative = cost.premium_price_source === 'upstream' ? cost.premium_subtotal : null;
+    const premiumBase = convert(premiumNative, team.billing_currency, base);
 
     if (team.status === 'active' && team.subscription_status === 'renewing') {
-      if (nativeBase === null) excluded += 1;
-      else monthlyTotalBase += nativeBase;
-      discountTotalBase += convert(team.discount_amount, team.billing_currency, base) ?? 0;
-    }
-    const premiumPaid = record.team.seat_capacity?.prolite?.paid ?? 0;
-    const premiumUsd = premiumPaid * PREMIUM_SEAT_PRICE_ESTIMATE_USD;
-    const premiumBase = convert(premiumUsd, 'USD', base);
-    if (team.status === 'active' && team.subscription_status === 'renewing' && premiumBase !== null) {
-      premiumTotalBase += premiumBase;
+      if (nativeBase === null) {
+        excluded += 1;
+      } else {
+        monthlyTotalBase += nativeBase;
+        if (premiumBase !== null) premiumIncludedBase += premiumBase;
+      }
+      discountTotalBase += convert(cost.discount_monthly, team.billing_currency, base) ?? 0;
     }
     if (latest && (latest.status || '').toLowerCase() === 'paid' && latest.display_amount_base !== null) {
       lastPaidTotal += latest.display_amount_base;
@@ -699,9 +740,9 @@ export function financeOverview(db: DemoDb): FinanceOverview & {
         team_id: team.id,
         team_name: team.name,
         owner_email: team.owner_email,
-        amount_native: native,
+        amount_native: cost.period_total,
         currency: team.billing_currency,
-        amount_base: nativeBase,
+        amount_base: convert(cost.period_total, team.billing_currency, base),
         card_last4: team.card_last4,
         card_brand: team.card_brand,
         card_key: key,
@@ -726,18 +767,24 @@ export function financeOverview(db: DemoDb): FinanceOverview & {
       card_key: key,
       card_note: note,
       card_team_count: key ? cardCounts.get(key) ?? 0 : 0,
-      price_per_seat: team.billing_period === 'monthly' ? team.price_per_seat : null,
+      price_per_seat: cost.price_per_seat,
+      price_per_seat_base: convert(cost.price_per_seat, team.billing_currency, base),
       seats_entitled: team.seats_entitled,
-      chatgpt_seats_billed: team.seat_capacity?.default?.paid ?? team.seats_entitled,
-      premium_seats_paid: premiumPaid,
-      premium_monthly_estimate_usd: premiumUsd,
-      premium_monthly_estimate_base: premiumBase,
+      chatgpt_seats_billed: cost.chatgpt_seats_billed,
+      premium_seats_paid: cost.premium_seats_paid,
+      premium_price_per_seat: cost.premium_price_per_seat,
+      premium_price_per_seat_base: convert(cost.premium_price_per_seat, team.billing_currency, base),
+      premium_price_source: cost.premium_price_source,
+      premium_monthly_native: premiumNative,
+      premium_monthly_base: premiumBase,
       seats_in_use: usage.inUse,
       chatgpt_in_use: usage.activeChatgpt,
       codex_count: usage.codex,
       is_codex_enabled: team.is_codex_enabled ? 1 : 0,
       discount_amount: team.discount_amount,
       monthly_total_native: native,
+      period_total_native: cost.period_total,
+      period_total_base: convert(cost.period_total, team.billing_currency, base),
       monthly_total_base: nativeBase,
       balance: team.balance,
       active_until: team.active_until,
@@ -755,8 +802,7 @@ export function financeOverview(db: DemoDb): FinanceOverview & {
     fx_updated_at: db.finance.fx_updated_at,
     low_balance_threshold: threshold,
     monthly_total_base: round2(monthlyTotalBase),
-    premium_monthly_estimate_base_total: round2(premiumTotalBase),
-    premium_seat_price_estimate_usd: PREMIUM_SEAT_PRICE_ESTIMATE_USD,
+    premium_monthly_base_total: round2(premiumIncludedBase),
     discount_total_base: round2(discountTotalBase),
     excluded_teams_count: excluded,
     last_paid_total_base: lastPaidCount > 0 ? round2(lastPaidTotal) : null,
@@ -819,7 +865,7 @@ export function financeTrends(db: DemoDb, daysParam: number): FinanceTrends {
         snapshot_date: date,
         team_id: record.team.id,
         billing_currency: record.team.billing_currency,
-        monthly_total_native: native ?? 0,
+        monthly_total_native: native,
         monthly_total_base: nativeBase,
         balance: record.team.balance,
       });

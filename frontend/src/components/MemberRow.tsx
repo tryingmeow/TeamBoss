@@ -90,6 +90,7 @@ export default function MemberRow({
 
   // 失败时浮层保留：让管理员看到当前选择仍未生效，而不是悄悄关掉装作成功。
   const seatSwitch = useSeatSwitch({
+    teamId,
     apply: (seatType, allowOverage) => changeSeat(teamId, member.id, seatType, allowOverage),
     onSwitched: () => {
       onUpdate();
@@ -196,7 +197,7 @@ export default function MemberRow({
               </button>
             </Popover.Trigger>
             <Popover.Portal>
-              <Popover.Content className={cn(POPOVER, 'w-48 p-1')} sideOffset={6} align="end" collisionPadding={16}>
+              <Popover.Content className={cn(POPOVER, 'w-52 p-1')} sideOffset={6} align="end" collisionPadding={16}>
                 <SeatSwitchOptions
                   current={currentSeat}
                   gateFor={(target) => seatSwitchGate(team, member.seat_type, target, pendingByType)}

@@ -10,6 +10,7 @@ import type {
   TeamWorkspaceSettings,
   WorkspaceDefaultSeatType,
 } from '../types';
+import { parseSeatCostTotals, parseSeatPrice, type SeatCostTotal, type SeatPrice } from '../lib/seatPrice';
 
 const BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const ADMIN_API_KEY_STORAGE = 'auto_team_admin_api_key';
@@ -39,6 +40,8 @@ export interface OveragePlanItem {
   team_id: string;
   team_name: string;
   extra_seats: number;
+  /** One ChatGPT seat's monthly price in that Team (tax-exclusive); null = unknown. */
+  seat_price: SeatPrice | null;
 }
 
 /** Who a 409 overage refusal is about. Absent fields (older backend) stay empty. */
@@ -91,6 +94,13 @@ export class OverageConfirmationError extends Error {
    * was sent (or only the legacy allow_overage); the others mean a fresh confirmation is needed.
    */
   confirmationStatus: OverageConfirmationStatus | null = null;
+  /**
+   * Single invite / seat switch: one seat of `seatType` per month in that Team's billing currency
+   * (tax-exclusive); null = unknown (older server, price not synced, or billing period unknown).
+   */
+  seatPrice: SeatPrice | null = null;
+  /** Batch: what the plan adds per month, one entry per currency and billing period (never summed across currencies). */
+  costTotals: SeatCostTotal[] = [];
 
   constructor(
     message: string,
@@ -163,6 +173,7 @@ function parseOveragePlan(raw: unknown): OveragePlanItem[] {
       team_id: String(item.team_id ?? ''),
       team_name: String(item.team_name ?? item.team_id ?? ''),
       extra_seats: Math.max(0, Number(item.extra_seats) || 0),
+      seat_price: parseSeatPrice(item.seat_price),
     }))
     .filter((item) => item.extra_seats > 0);
 }
@@ -243,6 +254,8 @@ async function request<T>(url: string, options?: RequestInit, behavior: RequestB
             Number(parsed.detail.extra_seats_total) || 0,
           );
           error.confirmationStatus = parseConfirmationStatus(parsed.detail.confirmation_status);
+          error.seatPrice = parseSeatPrice(parsed.detail.seat_price);
+          error.costTotals = parseSeatCostTotals(parsed.detail.cost_totals);
           throw error;
         }
       } catch (e) {
@@ -933,7 +946,7 @@ export interface FinanceTeamItem {
   chatgpt_in_use: number;
   codex_count: number;
   is_codex_enabled: number;
-  discount_amount: number;
+  discount_amount: number | null;
   monthly_total_native: number | null;
   monthly_total_base: number | null;
   balance: string | null;
@@ -946,10 +959,17 @@ export interface FinanceTeamItem {
   chatgpt_seats_billed?: number | null;
   /** Paid Premium seats (0 when unknown). */
   premium_seats_paid?: number;
-  /** premium_seats_paid × the estimated Premium price; there is no upstream price source. */
-  premium_monthly_estimate_usd?: number;
-  /** The same estimate in the base currency; null when there is no FX rate. */
-  premium_monthly_estimate_base?: number | null;
+  /** ChatGPT per-seat monthly price in the base currency; null = unknown or no FX rate. */
+  price_per_seat_base?: number | null;
+  /** Upstream monthly seat rate, including annual-plan monthly rates; null = unknown. */
+  premium_price_per_seat?: number | null;
+  premium_price_per_seat_base?: number | null;
+  premium_price_source?: 'upstream' | null;
+  premium_monthly_native?: number | null;
+  premium_monthly_base?: number | null;
+  /** Full billing-cycle amount (12 months for annual plans); null = incomplete pricing. */
+  period_total_native?: number | null;
+  period_total_base?: number | null;
 }
 
 export interface FinanceLatestInvoice {
@@ -1015,10 +1035,8 @@ export interface FinanceOverview {
   excluded_teams_count: number;
   last_paid_total_base: number | null;
   last_paid_count: number;
-  /** Sum of premium_monthly_estimate_base (estimate; not part of monthly_total_base). */
-  premium_monthly_estimate_base_total?: number;
-  /** Estimated Premium price per seat per month (USD). */
-  premium_seat_price_estimate_usd?: number;
+  /** Real Premium cost already inside monthly_total_base (Teams whose Premium price is known). */
+  premium_monthly_base_total?: number;
   teams: FinanceTeamItem[];
   timeline: FinanceTimelineItem[];
   alerts: FinanceAlert[];
@@ -1028,7 +1046,7 @@ export interface FinanceTrendsRow {
   snapshot_date: string;
   team_id: string;
   billing_currency: string;
-  monthly_total_native: number;
+  monthly_total_native: number | null;
   monthly_total_base: number | null;
   balance: string;
 }
@@ -1458,5 +1476,32 @@ export async function resolvePendingConfirmation(
   return request(`/api/access-tokens/pending-confirmations/${tokenUseId}/resolve`, {
     method: 'POST',
     body: JSON.stringify({ outcome, note }),
+  });
+}
+
+/** Official update preview. All amounts are major currency units, after upstream discounts/tax. */
+export interface SeatPurchasePreview {
+  currency: string;
+  minor_unit_exponent: number;
+  quoted_at: string;
+  seat_type: 'default' | 'prolite';
+  additional_seats: number;
+  baseline_quantities: { default: number; prolite: number };
+  proposed_quantities: { default: number; prolite: number };
+  current_recurring: { period: 'monthly' | 'yearly'; amount: number; discount: number };
+  proposed_recurring: { period: 'monthly' | 'yearly'; amount: number; discount: number };
+  due_now: { amount: number; tax_amount: number };
+}
+
+export function getSeatPurchasePreview(
+  teamId: string,
+  seatType: 'default' | 'prolite',
+  additionalSeats: number,
+  signal?: AbortSignal,
+): Promise<SeatPurchasePreview> {
+  return request(`/api/teams/${encodeURIComponent(teamId)}/seat-purchase-preview`, {
+    method: 'POST',
+    body: JSON.stringify({ seat_type: seatType, additional_seats: additionalSeats }),
+    signal,
   });
 }

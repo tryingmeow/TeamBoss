@@ -12,7 +12,7 @@ from .chatgpt_limiter import run_chatgpt_call_sync
 from .database import get_db_path
 from .member_cache_service import snapshot_fetch_started_now, store_member_snapshot_sync
 from .services.invoices import refresh_invoices_if_stale_sync
-from .services.pricing import account_billing_updates, fetch_seat_pricing_sync
+from .services.pricing import account_billing_updates, subscription_billing_updates, fetch_seat_pricing_sync
 from .seat_types import is_known_seat_type, normalize_seat_type
 from .services.snapshot_pages import SnapshotPageAccumulator, SnapshotPageError
 from .services.seat_capacity import (
@@ -1178,10 +1178,11 @@ def data_sync_job():
                         updates.extend(["card_last4 = ?", "card_brand = ?", "payment_method_id = ?"])
                         params.extend([card.get("last4"), card.get("brand"), methods[0].get("id")])
 
-                if account_info is not None:
-                    for key, value in account_billing_updates(account_info, team_id).items():
-                        updates.append(f"{key} = ?")
-                        params.append(value)
+                billing_updates = account_billing_updates(account_info, team_id)
+                billing_updates.update(subscription_billing_updates(subscription))
+                for key, value in billing_updates.items():
+                    updates.append(f"{key} = ?")
+                    params.append(value)
 
                 if refresh_display and "error" not in subscription:
                     pricing_updates = fetch_seat_pricing_sync(
@@ -1196,6 +1197,12 @@ def data_sync_job():
                     if "price_per_seat" in pricing_updates:
                         updates.append("price_per_seat = ?")
                         params.append(pricing_updates["price_per_seat"])
+                    if "premium_price_per_seat" in pricing_updates:
+                        updates.append("premium_price_per_seat = ?")
+                        params.append(pricing_updates["premium_price_per_seat"])
+                    if "price_period" in pricing_updates:
+                        updates.append("price_period = ?")
+                        params.append(pricing_updates["price_period"])
                     if "billing_symbol" in pricing_updates:
                         updates.append("billing_symbol = ?")
                         params.append(pricing_updates["billing_symbol"])
@@ -1255,47 +1262,42 @@ def data_sync_job():
                 # ── 计费快照 ──
                 try:
                     team_row = conn.execute(
-                        """SELECT billing_currency, billing_period, price_per_seat, seats_entitled, seats_in_use,
-                                  codex_count, chatgpt_count, discount_amount, balance,
+                        """SELECT billing_currency, billing_period, price_period, price_per_seat,
+                                  premium_price_per_seat, seat_capacity_json,
+                                  seats_entitled, seats_in_use,
+                                  codex_count, chatgpt_count, discount_amount, discount_expires_at,
+                                  discount_start_in_num_periods, balance,
                                   active_until, will_renew
                            FROM teams WHERE id = ?""",
                         (team_id,)
                     ).fetchone()
 
                     if team_row:
-                        from .services.pricing import discounted_monthly_total
+                        from .services.pricing import team_monthly_cost
 
                         snapshot_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                        # teams.price_per_seat is only ever populated once billing_period
-                        # is confirmed "monthly" (see fetch_seat_pricing). NULL here means
-                        # "not confirmed monthly / unknown" — record that honestly as a NULL
+                        # 和财务页同一算法（含真实 Premium 部分，年付记月均），趋势图和总览对得上。
+                        # Prices only count when they match a known billing period (see
+                        # pricing.priced_period). Otherwise record that honestly as a NULL
                         # monthly_total instead of a fabricated 0, which would be
                         # indistinguishable from a real free/fully-discounted Team.
-                        if (
-                            team_row["billing_period"] != "monthly"
-                            or team_row["price_per_seat"] is None
-                        ):
-                            monthly_total = None
-                        else:
-                            monthly_total = max(
-                                0.0,
-                                discounted_monthly_total(
-                                    team_row["price_per_seat"],
-                                    team_row["seats_entitled"],
-                                    team_row["discount_amount"]
-                                )
-                            )
+                        cost = team_monthly_cost(dict(team_row))
+                        monthly_total = cost.monthly_total
 
                         conn.execute(
                             """INSERT INTO billing_snapshots
-                               (team_id, snapshot_date, billing_currency, price_per_seat,
+                               (team_id, snapshot_date, billing_currency, billing_period, price_per_seat,
+                                premium_price_per_seat, premium_seats_paid,
                                 seats_entitled, seats_in_use, codex_count, chatgpt_count,
                                 discount_amount, monthly_total, balance, active_until,
                                 will_renew, created_at)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                ON CONFLICT(team_id, snapshot_date) DO UPDATE SET
                                    billing_currency = excluded.billing_currency,
+                                   billing_period = excluded.billing_period,
                                    price_per_seat = excluded.price_per_seat,
+                                   premium_price_per_seat = excluded.premium_price_per_seat,
+                                   premium_seats_paid = excluded.premium_seats_paid,
                                    seats_entitled = excluded.seats_entitled,
                                    seats_in_use = excluded.seats_in_use,
                                    codex_count = excluded.codex_count,
@@ -1307,7 +1309,9 @@ def data_sync_job():
                                    will_renew = excluded.will_renew,
                                    created_at = excluded.created_at""",
                             (team_id, snapshot_date, team_row["billing_currency"],
-                             team_row["price_per_seat"], team_row["seats_entitled"],
+                             team_row["billing_period"],
+                             cost.price_per_seat, cost.premium_price_per_seat,
+                             cost.premium_seats_paid, team_row["seats_entitled"],
                              team_row["seats_in_use"], team_row["codex_count"],
                              team_row["chatgpt_count"], team_row["discount_amount"], monthly_total,
                              team_row["balance"], team_row["active_until"],

@@ -1,11 +1,12 @@
-import { useState, type ReactElement, type ReactNode } from 'react';
+import { useMemo, useState, type ReactElement, type ReactNode } from 'react';
 import { Check } from 'lucide-react';
 import { ApiError, OverageConfirmationError, OverageForbiddenError, type OverageConfirmation } from '../api/client';
 import { newOverageConfirmation } from '../lib/overageConfirmation';
 import { SEAT_STYLE, SEAT_TYPE_OPTIONS, SEAT_TYPES, seatUpdateErrorMessage } from '../lib/seatType';
-import { gateMessage, gateShortHint, switchConfirmText, type SeatGate } from '../lib/seatCapacity';
+import { gateMessage, gateShortHint, gateShortPrice, switchConfirmText, type SeatGate } from '../lib/seatCapacity';
 import type { SeatType, ShowToast } from '../types';
-import ConfirmDialog from './ConfirmDialog';
+import SeatPurchaseConfirmDialog, { type SeatPurchaseRequest } from './SeatPurchaseConfirmDialog';
+import SeatProductionWarning from './SeatProductionWarning';
 import SeatBetaBadge from './BetaBadge';
 import { cn } from '../lib/utils';
 
@@ -21,15 +22,18 @@ interface SeatSwitchOptionsProps {
 
 /**
  * The rows of a seat-type menu. A billed target with no free seat shows what the Team's
- * overage policy will do; under 禁止超员 the row is disabled.
+ * overage policy will do and what the seat it buys adds per month; under 禁止超员 the row is disabled.
  */
 export function SeatSwitchOptions({ current, gateFor, disabled, onPick, wrap }: SeatSwitchOptionsProps) {
   return (
     <>
+      <SeatProductionWarning compact />
       {SEAT_TYPE_OPTIONS.map(({ value, label }) => {
         const isCurrent = value === current;
         const gate = isCurrent ? null : gateFor(value);
         const hint = gateShortHint(gate);
+        // 会花钱的那一行写明每月多出多少；「超员自动」点了就切，这一行就是唯一的提醒。
+        const price = gateShortPrice(gate);
         const blocked = gate?.action === 'forbid';
         const row = (
           <button
@@ -61,6 +65,7 @@ export function SeatSwitchOptions({ current, gateFor, disabled, onPick, wrap }: 
                     )}
                   >
                     {hint}
+                    {price && <span className="block">{price}</span>}
                   </span>
                 )}
               </span>
@@ -75,6 +80,8 @@ export function SeatSwitchOptions({ current, gateFor, disabled, onPick, wrap }: 
 }
 
 interface UseSeatSwitchOptions {
+  teamId: string;
+  teamName?: string;
   /**
    * Performs the switch. `confirmation` is set only after the admin confirmed the charge: one
    * fresh confirmation for one seat of that type.
@@ -89,11 +96,15 @@ interface UseSeatSwitchOptions {
 
 /**
  * Switch flow shared by every seat menu: free target → switch; full + 超员需确认 → ask first,
- * saying a seat will be bought; the server's 409s (it re-checks live) are handled the same way.
+ * saying a seat will be bought and what it adds per month; the server's 409s (it re-checks live)
+ * are handled the same way — their message already ends with that price, so it is shown as is.
  */
-export function useSeatSwitch({ apply, onSwitched, showToast, isCodexEnabled, onAsk }: UseSeatSwitchOptions) {
+export function useSeatSwitch({ teamId, teamName, apply, onSwitched, showToast, isCodexEnabled, onAsk }: UseSeatSwitchOptions) {
   const [busy, setBusy] = useState(false);
   const [ask, setAsk] = useState<{ seatType: SeatType; message: string } | null>(null);
+
+  const quoteRequests = useMemo<SeatPurchaseRequest[]>(() => ask && teamId && (ask.seatType === 'default' || ask.seatType === 'prolite')
+    ? [{ teamId, teamName, seatType: ask.seatType, additionalSeats: 1 }] : [], [ask, teamId, teamName]);
 
   const openAsk = (seatType: SeatType, message: string) => {
     onAsk?.();
@@ -136,7 +147,8 @@ export function useSeatSwitch({ apply, onSwitched, showToast, isCodexEnabled, on
 
   const label = ask ? SEAT_TYPES[ask.seatType].label : '';
   const dialog = (
-    <ConfirmDialog
+    <SeatPurchaseConfirmDialog
+      quoteRequests={quoteRequests}
       open={ask !== null}
       onOpenChange={(open) => {
         if (!open && !busy) setAsk(null);

@@ -10,7 +10,7 @@ from .chatgpt_limiter import run_chatgpt_call
 from .database import get_db, log_operation
 from .member_cache_service import fetch_and_cache_members, get_cached_members
 from .seat_types import CODEX_SEAT_TYPE, DEFAULT_SEAT_TYPE
-from .services.pricing import account_billing_updates, fetch_seat_pricing
+from .services.pricing import account_billing_updates, subscription_billing_updates, fetch_seat_pricing
 from .services.seat_capacity import (
     chatgpt_count_from_seat_counts,
     seat_counts_column_updates,
@@ -197,6 +197,7 @@ async def _fetch_overview(
             updates["payment_method_id"] = methods[0].get("id")
 
     updates.update(account_billing_updates(account_info, client.team_id))
+    updates.update(subscription_billing_updates(subscription))
 
     cached = {
         "subscription": subscription,

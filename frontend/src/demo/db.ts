@@ -28,6 +28,7 @@ import {
 } from './seed';
 import { DAY, HOUR, MINUTE, isoAt, seededRandom } from './time';
 import { buildLogs, type DemoLogRow } from './logs';
+import { teamMonthlyCost } from './views';
 
 export type MemberSource = 'system' | 'detected' | 'self_service' | 'admin';
 export type KickSource = 'auto_expire' | 'admin' | 'detected' | 'patrol';
@@ -309,9 +310,7 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
   // period boundary after the Team was created), not the start of the current period.
   const periodMs = spec.periodDays * DAY;
   const subscriptionStart = activeStart - Math.max(0, Math.floor((activeStart - createdAt) / periodMs)) * periodMs;
-  const subtotal = spec.price !== null ? spec.price * spec.entitled : null;
   const discountAmount = spec.discount?.amount ?? 0;
-  const total = subtotal !== null ? Math.max(0, subtotal - discountAmount) : null;
 
   let lastFullSync = now - (3 + (spec.n % 9)) * MINUTE;
   if (spec.sync) lastFullSync = now - spec.sync.failingSinceHoursAgo * HOUR;
@@ -334,13 +333,16 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     billing_symbol: spec.symbol,
     billing_period: spec.period,
     price_per_seat: spec.price,
+    // Prices are monthly rates for the Team's actual billing period.
+    premium_price_per_seat: spec.premiumPrice ?? null,
     discount_amount: discountAmount,
     discount_duration_num_periods: spec.discount?.periods ?? null,
     discount_expires_at: spec.discount ? isoAt(now + spec.discount.expiresInDays * DAY) : null,
     discount_quantity_off: null,
     promo_campaign_id: spec.discount?.campaign ?? null,
-    monthly_subtotal: subtotal,
-    monthly_total: total,
+    // Filled from the paid seats below (teamMonthlyCost, the same rule teamView applies on read).
+    monthly_subtotal: null,
+    monthly_total: null,
     balance: spec.balance,
     active_start: isoAt(subscriptionStart),
     active_until: isoAt(activeUntil),
@@ -372,6 +374,11 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     cacheUpdatedAt: isoAt(lastFullSync),
   };
   recount(record);
+  const cost = teamMonthlyCost(team);
+  team.monthly_subtotal = cost.monthly_subtotal;
+  team.monthly_total = cost.monthly_total;
+  team.period_subtotal = cost.period_subtotal;
+  team.period_total = cost.period_total;
   return record;
 }
 
@@ -405,16 +412,26 @@ function buildInvoices(spec: TeamSpec, activeStart: number, activeUntil: number,
     });
   };
 
+  // Unknown current prices do not manufacture a zero-cost or partial invoice.
+  if (spec.price === null || ((spec.premiumPaid ?? 0) > 0 && spec.premiumPrice === undefined)) return rows;
   if (spec.period === 'yearly') {
-    const total = spec.yearlyTotal ?? 0;
+    const standard = spec.price * spec.entitled * 12;
+    const premium = (spec.premiumPrice ?? 0) * (spec.premiumPaid ?? 0) * 12;
+    const total = Math.max(0, standard - (spec.discount?.amount ?? 0)) + premium;
     add(1, activeStart, activeUntil, 'paid', total, total,
-      `${spec.entitled} × ChatGPT Business (at ${spec.symbol}${money(total / spec.entitled)} / year)`);
+      `${spec.entitled} × ChatGPT Business (at ${spec.symbol}${money(spec.price * 12)} / year)`
+      + ((spec.premiumPaid ?? 0) > 0 ? ` + ${spec.premiumPaid} × Premium (at ${spec.symbol}${money((spec.premiumPrice ?? 0) * 12)} / year)` : ''));
     return rows;
   }
 
   const price = spec.price ?? 0;
-  const line = (seats: number) => `${seats} × ChatGPT Business (at ${spec.symbol}${money(price)} / month)`;
-  const fullTotal = price * spec.entitled;
+  // Each paid seat type contributes its known price.
+  const premiumCharge = spec.premiumPrice && spec.premiumPaid ? spec.premiumPrice * spec.premiumPaid : 0;
+  const premiumLine = premiumCharge
+    ? ` + ${spec.premiumPaid} × ChatGPT Business Premium (at ${spec.symbol}${money(spec.premiumPrice ?? 0)} / month)`
+    : '';
+  const line = (seats: number) => `${seats} × ChatGPT Business (at ${spec.symbol}${money(price)} / month)${premiumLine}`;
+  const fullTotal = price * spec.entitled + premiumCharge;
   let index = 0;
   for (let k = 5; k >= 0; k -= 1) {
     const start = activeStart - k * spec.periodDays * DAY;
@@ -428,8 +445,8 @@ function buildInvoices(spec: TeamSpec, activeStart: number, activeUntil: number,
       else add(index, start, end, 'paid', price * 16, price * 16, line(16));
     } else if (spec.slug === 'vega' && latest) {
       add(index, start, end, 'open', fullTotal, 0, line(spec.entitled));
-    } else if (spec.slug === 'aurora' && latest) {
-      const discounted = fullTotal - (spec.discount?.amount ?? 0);
+    } else if (spec.discount && latest) {
+      const discounted = Math.max(0, price * spec.entitled - (spec.discount?.amount ?? 0)) + premiumCharge;
       add(index, start, end, 'paid', discounted, discounted, `${line(spec.entitled)} · promo -${spec.symbol}${money(spec.discount?.amount ?? 0)}`);
     } else {
       add(index, start, end, 'paid', fullTotal, fullTotal, line(spec.entitled));

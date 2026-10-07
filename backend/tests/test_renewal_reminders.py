@@ -282,7 +282,7 @@ class ReminderJobTest(_DbCase):
         self.assertIn("💺 ChatGPT：已付 3 · 在用 1 · 待接受 1 · 空闲 1", text)
         self.assertIn("💎 Premium：已付 2 · 在用 1 · 待接受 0 · 空闲 1", text)
         self.assertIn("780 THB/月（ChatGPT）", text)
-        self.assertIn("125 USD/月（Premium，估算）", text)
+        self.assertIn("Premium 单价未知", text)
         self.assertIn(renewal_reminders.ACTION_LINE, text)
 
     def test_unknown_price_says_so(self):
