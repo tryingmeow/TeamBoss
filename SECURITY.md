@@ -1,6 +1,6 @@
 # Security Policy
 
-TeamBoss stores ChatGPT workspace credentials (session tokens, API keys, Telegram tokens) in its database, so a vulnerability can mean full takeover of someone's workspace. **Please never report a security issue in a public issue, discussion or pull request.**
+TeamBoss stores ChatGPT workspace credentials (session tokens, API keys, Telegram tokens) in its data directory, so a vulnerability can mean full takeover of someone's workspace. **Please never report a security issue in a public issue, discussion or pull request.**
 
 ## Reporting
 
@@ -15,8 +15,8 @@ Use GitHub's private reporting: open the repository's **Security** tab and click
 
 ## Out of scope
 
-- Behaviors documented as deliberate in the README's security notes (plaintext storage of credentials in the data volume, admin settings returning secrets to the admin)
-- Deployments exposed without TLS / reverse proxy / firewall against the README's guidance
+- Behaviors documented as deliberate in [the deployment security notes](docs/deployment.md#数据与凭据安全) (plaintext storage of credentials in the data volume, admin settings returning secrets to the admin)
+- Deployments exposed without TLS / reverse proxy / firewall against [the deployment guidance](docs/deployment.md#https-与反向代理)
 - Changes or breakage on OpenAI's side (TeamBoss uses unofficial, undocumented endpoints)
 
 This is a solo-maintained project; expect a best-effort response rather than a fixed SLA.

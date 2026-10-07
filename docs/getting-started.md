@@ -1,20 +1,8 @@
 # 上手指南
 
-从 `git clone` 到「后台里有一个能用的 Team、成员能自己兑换」，这一篇讲完。
+从首次启动到接入 Team、配置自动化和发放兑换码，按本指南逐步操作。HTTPS、存储和登录排障见[部署与运维](deployment.md)。
 
-README 讲的是这东西是什么、怎么部署；这一篇讲的是**部署完之后你要做什么**——尤其是那个公开仓库里谁也没写清楚的问题：接入一个 Team 需要的 session JSON 到底从哪里来。
-
-开始之前请先读 README 的 [免责声明](../README.md#免责声明)：TeamBoss 靠 ChatGPT 未公开的私有接口工作，功能随时可能失效，一切后果自行负责。
-
-> **只想先看看界面？** 不用部署、不用 ChatGPT 账号：
->
-> ```bash
-> cd frontend
-> npm ci
-> npm run demo        # 打开 http://localhost:5173/admin，任意密码都能登录
-> ```
->
-> 演示模式里所有 `/api` 请求都由浏览器内存里的虚构数据应答，**不会连任何真后端，也碰不到 ChatGPT**，刷新即重置。细节见 README [本地开发](../README.md#本地开发)。
+开始前请阅读[免责声明](disclaimer.md)和[生产测试范围](../README.md#production-test-scope)。只想看界面时，可使用[离线演示](development.md#离线演示)：不需要 Owner 或 ChatGPT 账号，任意密码登录，不访问真实 API。
 
 ---
 
@@ -28,11 +16,7 @@ README 讲的是这东西是什么、怎么部署；这一篇讲的是**部署�
 | Docker Engine + **Compose v2.24 及以上** | `compose.yaml` 用了 `env_file` 的 `path` / `required` 长语法，更老的 v2 会直接解析失败 |
 | 一个浏览器，能登录那个工作区 | 取 session 的时候要用 |
 
-**关于「必须是 owner」这件事，说清楚一点：代码不检查你的角色。** 导入时它只做三件事——把 access token 解开拿到工作区 id、确认这个 id 在 token 的账号列表里、再拉一次账号信息。普通成员的会话、甚至一个个人账号的会话，都能被**成功导入**，卡片会正常出现在 Dashboard 上。
-
-问题出在之后：邀请、移除、改席位类型、读订阅和账单这些接口，对非 owner 一律拒绝。于是你得到的不是一句「你不是管理员」，而是一个看起来正常、但每次操作都报错、账单栏永远空着的 Team。
-
-所以：**用 owner 账号。** 这不是代码替你把关的事，是你自己要确认的事。
+**请使用工作区 Owner 账号。** 导入成功不代表有管理权限：导入时只校验会话与工作区信息，不检查角色。普通成员或个人账号也可能导入成功，但邀请、移除、切换席位及读取订阅和账单会被上游拒绝。
 
 ---
 
@@ -63,7 +47,9 @@ docker compose ps
 curl -fsS http://127.0.0.1:8080/api/health
 ```
 
-健康就是这样：
+默认端口仅在服务器本机可访问；对外开放前先配置[HTTPS 与反向代理](deployment.md#https-与反向代理)。修改了 Web 端口时，相应替换下面及后续命令中的 `8080`。
+
+正常响应：
 
 ```json
 {"status":"healthy","timestamp":"..."}
@@ -79,9 +65,9 @@ http://127.0.0.1:8080/admin
 
 你会连着看到三屏：
 
-1. **安全须知与风险确认页。** 页面将 [免责声明](../README.md#免责声明) 中的核心风险与安全责任拆分为 7 项独立确认条款：包括上游未公开接口的时效性、Owner 凭证本地明文存储、自动化到期清理与巡逻的实际剔除操作、Premium 席位的 Beta 实验性风险、生产上线前的自主代码与安全审查、自愿承担使用风险，以及作者损失豁免等。**每一条均须独立审阅并勾选确认**，全部勾选后方可点击「同意并继续」；若不同意请直接关闭页面。
+1. **安全须知与风险确认页。** 阅读并逐项勾选 7 条风险与责任说明后，点击「同意并继续」。完整声明见[免责声明](disclaimer.md)。
 
-   同意的记录只存在**这个浏览器**的 localStorage 里：换设备、换浏览器、清掉站点数据之后会再弹一次——这是故意的，需要看到它的是"第一次在某台机器上开后台的人"，而不是"这个部署"。条款有实质变化时，记录的版本号会递增，所以在旧版确认页上点过同意的管理员，升级后也会再确认一次新版。这一页只拦后台，根路径的成员自助兑换页不受影响。
+   确认记录保存在当前浏览器；换设备、清除站点数据或条款版本更新后需要重新确认。成员自助页不受此页面影响。
 
    <picture>
      <source media="(prefers-color-scheme: dark)" srcset="images/terms-gate-dark.png">
@@ -151,7 +137,7 @@ http://127.0.0.1:8080/admin
 | `Access token does not include the requested team` | 这个会话确实登录了，但它不属于你想接的那个工作区 | 在 ChatGPT 里切到正确的工作区，重新取一次 |
 | `导入的 Session 不属于当前 Team` | **重新导入**时用了另一个 Team 的会话 | 用对应那个 Team 的 owner 账号重取 |
 | `Failed to verify account: 401 Client Error: Unauthorized ...` | 会话已经失效（过期、改过密码、被登出） | 在浏览器里重新登录一次，重取 JSON |
-| `Failed to verify account: 403 Client Error: Forbidden ...` | 被 Cloudflare 或风控挡了。后端已经在模拟 Chrome 的 TLS 指纹（见 README [访问 chatgpt.com](../README.md#访问-chatgptcomcurl_cffi-浏览器指纹)），还被挡多半是服务器 IP 的问题，不是你账号的问题 | 挂一个干净的 HTTP 代理再试，见下一节 |
+| `Failed to verify account: 403 Client Error: Forbidden ...` | 被 Cloudflare 或风控挡了。后端已经在模拟 Chrome 的 TLS 指纹（见[网络排障](deployment.md#访问-chatgptcom-与网络排障)），还被挡多半是服务器 IP 的问题，不是你账号的问题 | 挂一个干净的 HTTP 代理再试，见下一节 |
 | `Failed to verify account: Expecting value: line 1 column 1 (char 0)` | 上游回了 HTML 而不是 JSON，**多半是 Cloudflare 的人机验证页**。代码没有专门识别它，所以报出来是这么一句看不懂的话 | 同上，换代理 |
 | `Failed to verify account: Failed to perform, curl: (7) ...` / `curl: (28) ...` | 服务器根本连不上 `chatgpt.com`（`(7)` 连不上，`(28)` 超时），或者代理本身坏了——报错里带 `over proxy` 字样的就是连不上代理 | 先在服务器上 `curl -I https://chatgpt.com` 确认网络 |
 
@@ -165,7 +151,7 @@ http://127.0.0.1:8080/admin
 先建代理，再导入 Team：点右上角的**齿轮「设置」→「代理」**，填名字和 URL，鼠标移到那一行上会出现「测试连接」。然后在「添加 Team」对话框底部那个下拉里选它（默认是「直连」）。已经导进来的 Team 也可以在卡片的齿轮里随时换。
 
 - 用 **HTTP(S)** 代理：`http://host:port` 或 `http://user:pass@host:port`。项目只测试过这一种。
-- 后端不校验代理地址的协议，原样交给 curl_cffi（见 README [访问 chatgpt.com](../README.md#访问-chatgptcomcurl_cffi-浏览器指纹)）。`socks5://` 这类地址填进去不会报缺依赖，但**没有测试过**；真要用，导入后先手动同步一次，确认卡片上的数据正常。
+- 后端不校验代理地址的协议，原样交给 curl_cffi（见[网络排障](deployment.md#访问-chatgptcom-与网络排障)）。`socks5://` 这类地址填进去不会报缺依赖，但**没有测试过**；真要用，导入后先手动同步一次，确认卡片上的数据正常。
 - 代理是**按 Team** 挂的，一个 Team 一个，不填就是直连。它只用于发往 `chatgpt.com` 的请求；Telegram 机器人和汇率接口始终直连，不走任何代理。
 - 「测试连接」只是朝 `chatgpt.com` 发一个请求（10 秒超时），状态码小于 500 就算通过。也就是说**被 Cloudflare 403 挡回来也会显示"ok"**——它只证明网络到得了，不证明这个出口能用。
 - 删掉一个代理，所有在用它的 Team 会**静默回退到直连**，不会报错。
@@ -410,7 +396,15 @@ python scripts/backup.py
 - `app-20260723T063420Z.db` —— 数据库
 - `sessions-20260723T063420Z.tar.gz` —— 会话目录
 
-默认保留最近 10 份，`--keep-count 20` 可以改，`--backup-dir` 可以换位置。挂个 cron 每天跑一次：
+默认保留最近 10 份，`--keep-count 20` 可以改，`--backup-dir` 可以换位置：
+
+```bash
+docker compose exec backend python scripts/backup.py --keep-count 20
+# 裸机，从仓库根目录执行
+python scripts/backup.py --keep-count 20 --backup-dir /path/to/backups
+```
+
+脚本使用 `AUTO_TEAM_DATA_DIR`，未设置时使用 `backend/data`。裸机定时备份示例（将 `python` 换成已安装依赖的 Python 解释器路径，自定义数据目录需一并设置）：
 
 ```bash
 0 2 * * * cd <项目目录> && python scripts/backup.py >> /var/log/auto_team_backup.log 2>&1
@@ -432,11 +426,11 @@ curl -fsS http://127.0.0.1:8080/api/health
 
 # systemd 等进程管理器
 sudo systemctl stop <服务名>
-./scripts/restore.sh <项目目录>/backend/data/backups/app-20260723T063420Z.db
+AUTO_TEAM_SERVICE=<服务名> ./scripts/restore.sh <项目目录>/backend/data/backups/app-20260723T063420Z.db
 sudo systemctl start <服务名>
 ```
 
-不带参数直接运行 `./scripts/restore.sh` 会打印用法。会话备份（`sessions-*.tar.gz`）用同一个脚本恢复。
+不带参数直接运行 `./scripts/restore.sh` 会打印用法。会话备份（`sessions-*.tar.gz`）用同一个脚本恢复；需要恢复数据库和会话时，在启动后端前完成两项恢复。裸机若使用了自定义 `AUTO_TEAM_DATA_DIR`，备份和恢复命令都必须指定同一个实际数据目录。`--skip-service-check` 只跳过服务检查，不会帮你停止后端写入。
 
 ---
 
@@ -456,12 +450,11 @@ curl -fsS http://127.0.0.1:8080/api/health
 docker compose logs --tail=100 backend
 ```
 
-几件不用担心和一件要担心的：
+升级时注意：
 
 - **数据库迁移是自动的**，后端启动时跑，重复执行无害，不需要你手动做什么。
-- **业务数据在名为 `auto_team_data` 的 Docker 命名卷里**，`docker compose down` 不会删它，只有 `down -v` 或手动删卷才会。
-- **`.env` 里的初始密码和 API Key 不会被重新应用**，它们只在首次初始化时写库。
-- 要担心的：启动日志里如果出现 `schema 迁移执行失败` 这类 warning，**不要当没看见**。迁移失败不会阻塞启动，但会在之后某个完全无关的地方炸出来。
+- 数据卷和凭据初始化规则见[部署配置](deployment.md#配置中容易混淆的地方)，升级时保持原有卷名。
+- 出现 `schema 迁移执行失败` warning 时，先排查迁移错误再继续使用。迁移失败不阻塞启动，健康检查通过也不代表迁移成功。
 
 ---
 
@@ -483,7 +476,7 @@ docker compose logs --tail=100 backend
 这个 Team 的那种席位满了，超员策略在起作用。要么先腾出空位，要么确认加购，要么去卡片齿轮「Team 设置」里改超员策略，见 [3.2](#32-超员策略满了之后怎么办)。
 
 **自己被锁在后台外面了，提示登录失败次数过多。**
-同一来源连错 5 次锁 15 分钟，等一刻钟即可；有人从多个地址乱试时，没登录过的新设备也会被要求稍后再试。完整规则和不等待直接进去的办法见 README「安全须知」。如果你把服务挂在反向代理后面，**务必配好 `AUTO_TEAM_TRUSTED_PROXIES`**，否则所有访客会被算成同一个 IP，任何人乱试几次就能让你一起等冷却。
+同一来源连错 5 次锁 15 分钟，等一刻钟即可；有人从多个地址乱试时，没登录过的新设备也会被要求稍后再试。完整规则和使用现有管理 Key 恢复访问的方法见[登录锁定与管理员恢复](deployment.md#登录锁定与管理员恢复)。使用反向代理时，按[真实访客 IP 配置](deployment.md#让后端收到真实访客-ip)检查各跳代理，避免所有访客共享冷却。
 
 **后端能不能多开几个进程扛并发？**
 不能。定时任务（同步、巡检、自动踢人）和 Telegram 轮询线程都是随进程启动的，开 N 个 worker 就是 N 份同时跑的定时任务在抢同一批 Team 做重复的邀请和移除。自带的部署命令都没加 `--workers`，自己另起进程管理器时也别加。
@@ -492,5 +485,8 @@ docker compose logs --tail=100 backend
 
 ## 还想看什么
 
-- [README](../README.md) —— 免责声明、功能、部署、配置项清单、安全须知
+- [README](../README.md) —— 项目介绍与生产测试范围
+- [部署与运维](deployment.md) —— HTTPS、配置、数据安全和登录恢复
+- [本地开发与离线演示](development.md) —— 开发启动及验证
+- [免责声明](disclaimer.md)
 - [ADMIN_API.md](../ADMIN_API.md) —— 兑换码的 HTTP 接口，写脚本批量出码时用
