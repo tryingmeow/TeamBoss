@@ -797,7 +797,6 @@ export default function Finance() {
   return (
     <PageShell
       title="财务"
-      description="各 Team 的月费、续费日、扣款卡和 Stripe 账单对账。"
       actions={(
         <>
           <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-ink-400">
@@ -902,7 +901,7 @@ export default function Finance() {
                   估算 {sameCurrency(baseCurrency, 'USD') ? '' : '≈ '}{formatMoney(overview?.premium_monthly_estimate_base_total, baseCurrency)}
                 </span>
                 <span className="block text-[11px]">
-                  按每席 {formatMoney(overview?.premium_seat_price_estimate_usd ?? 125, '$')}/月估算，上游没有 Premium 单价
+                  按每席 {formatMoney(overview?.premium_seat_price_estimate_usd ?? 125, '$')}/月估算
                 </span>
               </p>
             )}
@@ -918,7 +917,7 @@ export default function Finance() {
             icon={BadgePercent}
             toneKey="emerald"
           >
-            <p>每月折扣合计</p>
+            <p>每月折算减免</p>
           </StatCard>
           <StatCard
             label="30 天内续费"
@@ -937,7 +936,7 @@ export default function Finance() {
             icon={AlertTriangle}
             toneKey={alertCount > 0 ? 'amber' : 'emerald'}
           >
-            <p>{alertCount > 0 ? '详情见下方' : '暂无需要处理的问题'}</p>
+            <p>{alertCount > 0 ? '需及时处理' : '运行正常'}</p>
           </StatCard>
         </div>
 
@@ -982,7 +981,7 @@ export default function Finance() {
             )}
             {activeBillingTab === 'details' && (
               <p className="text-xs text-gray-500 dark:text-ink-400">
-                <span className="md:hidden">左右滑动看全部列，</span>点一行展开该 Team 的 Stripe 账单
+                点击展开 Stripe 账单
               </p>
             )}
           </div>
@@ -996,7 +995,7 @@ export default function Finance() {
                   ))}
                 </div>
               ) : !overview || overview.timeline.length === 0 ? (
-                <EmptyState title="暂无续费计划" hint="Team 同步到订阅信息后，续费日会按时间排在这里。" />
+                <EmptyState title="暂无续费计划" hint="暂无已同步的订阅续费日程" />
               ) : timelineSort === 'date' ? (
                 <div className="space-y-2">
                   {sortedTimeline.map(item => (
@@ -1046,7 +1045,7 @@ export default function Finance() {
               {overviewLoading ? (
                 <div className="py-8 text-center text-gray-500 dark:text-ink-400">加载中…</div>
               ) : cardSummaries.length === 0 ? (
-                <EmptyState title="暂无卡片" hint="Team 同步到扣款卡片后，会按卡片汇总在这里。" />
+                <EmptyState title="暂无卡片" hint="暂无已同步的扣款卡片" />
               ) : (
                 <div className="divide-y divide-gray-100 dark:divide-ink-800">
                   {cardSummaries.map(card => (
@@ -1103,7 +1102,7 @@ export default function Finance() {
                   {overviewLoading ? (
                     <tr><td colSpan={7} className="px-3 py-8 text-center text-gray-500 dark:text-ink-400">加载中…</td></tr>
                   ) : !overview || overview.teams.length === 0 ? (
-                    <tr><td colSpan={7}><EmptyState title="暂无 Team" hint="在「Team 列表」添加 Team 后，这里会列出它的计费明细。" /></td></tr>
+                    <tr><td colSpan={7}><EmptyState title="暂无 Team" hint="添加 Team 并同步后将显示计费明细" /></td></tr>
                   ) : (
                     overview.teams.map((team) => {
                       const sym = teamUnit(team, null);

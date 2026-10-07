@@ -179,7 +179,7 @@ export default function MemberPanel({ teamId, team, data, loading, settling, isC
         title="撤销邀请"
         message={
           <>
-            确定撤销发给 <span className="break-all font-medium text-gray-900 dark:text-gray-100">{confirmRevoke}</span> 的邀请吗？对方将无法再用这封邀请加入，需要时得重新邀请。
+            确定撤销发送给 <span className="break-all font-medium text-gray-900 dark:text-gray-100">{confirmRevoke}</span> 的邀请吗？邀请链接将立即失效。
           </>
         }
         confirmLabel="撤销"

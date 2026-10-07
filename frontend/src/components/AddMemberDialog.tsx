@@ -97,9 +97,9 @@ interface OverageAsk {
   batch?: { planTeamIds: string[]; seatLimit: number; added: BatchInviteAdded[]; failed: BatchInviteFailure[] };
 }
 
-const NO_PLACE = '没位置，未邀请';
-const CAP_NOTE = `一次最多确认 ${MAX_CONFIRMED_SEATS} 个，超出的会再问你。`;
-const REPLAN_NOTE = '你确认过的超员计划已经不成立，需要重新确认。';
+const NO_PLACE = '席位不足，未邀请';
+const CAP_NOTE = `单次最多确认 ${MAX_CONFIRMED_SEATS} 席，超出部分将分批确认。`;
+const REPLAN_NOTE = '超员计划已变更，需重新确认。';
 
 function asAdded(list: unknown): BatchInviteAdded[] {
   if (!Array.isArray(list)) return [];
@@ -286,8 +286,8 @@ export default function AddMemberDialog({
     if (autoNames.length > 1) {
       return { tone: 'warn', text: `${lead}多出的会加进「超员自动」的 Team（${quoteNames(autoNames)}），ChatGPT 会自动加购约 ${extra} 个席位并扣费。` };
     }
-    if (hasConfirm) return { tone: 'warn', text: `${lead}超出的部分要加购，提交后会先问你。` };
-    return { tone: 'plain', text: `${lead}其余 Team 都是「禁止超员」，多出的不会邀请，也不会加购。` };
+    if (hasConfirm) return { tone: 'warn', text: `${lead}超出部分需确认后加购。` };
+    return { tone: 'plain', text: `${lead}其余 Team 均禁止超员，超出成员将跳过邀请。` };
   })();
   const batchWillBuy = Boolean(batchPreview && batchPreview.extra > 0 && batchPreview.autoNames.length > 0);
 
@@ -544,7 +544,7 @@ export default function AddMemberDialog({
         : batchWillBuy && batchPreview
           ? `添加并加购约 ${batchPreview.extra} 席`
           : retrying
-            ? '重新提交没加上的'
+            ? '重试未成功项'
             : submitLabel;
 
   return (
@@ -554,7 +554,7 @@ export default function AddMemberDialog({
       title={title}
       description={
         !teamId
-          ? '先用有空闲 ChatGPT 席位的 Team。空位不够时按各 Team 的超员策略：「超员自动」直接加购，「超员需确认」先问你，「禁止超员」不加。'
+          ? '优先分配空闲席位；席位不足时按各 Team 策略处理。'
           : teamName && (
             <>
               邀请加入 <span className="font-medium text-gray-900 dark:text-gray-100">{teamName}</span>
@@ -652,10 +652,7 @@ export default function AddMemberDialog({
             {blocked
               ? <Ban size={15} className="mt-1 shrink-0 text-gray-500 dark:text-ink-400" />
               : <CreditCard size={15} className="mt-1 shrink-0 text-amber-600 dark:text-amber-400" />}
-            <span>
-              {gateText}
-              {gate?.action === 'confirm' && '提交前会再问你一次。'}
-            </span>
+            <span>{gateText}</span>
           </div>
         )}
 
@@ -683,10 +680,10 @@ export default function AddMemberDialog({
             <div className="flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
               {(otherFailed.length > 0 || noPlaceList.length > 0) && <AlertTriangle size={15} className="shrink-0 text-amber-500" />}
               {[
-                `已邀请 ${addedCount} 个`,
-                noPlaceList.length > 0 ? `${noPlaceList.length} 个没位置` : '',
-                declined.length > 0 ? `${declined.length} 个没确认加购` : '',
-                otherFailed.length > 0 ? `${otherFailed.length} 个失败` : '',
+                `已邀请 ${addedCount} 人`,
+                noPlaceList.length > 0 ? `席位不足 ${noPlaceList.length} 人` : '',
+                declined.length > 0 ? `已取消加购 ${declined.length} 人` : '',
+                otherFailed.length > 0 ? `失败 ${otherFailed.length} 人` : '',
               ].filter(Boolean).join('，')}
             </div>
 
@@ -700,13 +697,13 @@ export default function AddMemberDialog({
             {noPlaceList.length > 0 && (
               <EmailList
                 title={NO_PLACE}
-                hint="能用的 Team 都满了，又不允许再超员，这些邮箱没有发邀请，也没有加购。"
+                hint="所有可用 Team 席位已满且禁止超员，未发送邀请。"
                 emails={noPlaceList}
               />
             )}
 
             {declined.length > 0 && (
-              <EmailList title="没确认加购，未邀请" hint="你取消了加购，这些邮箱没有发邀请，也没有扣费。" emails={declined} />
+              <EmailList title="已取消加购" hint="已放弃加购席位，未发送邀请。" emails={declined} />
             )}
 
             {otherFailed.length > 0 && (

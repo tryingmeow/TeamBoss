@@ -133,9 +133,9 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
       URL.revokeObjectURL(url);
 
       if (truncated) {
-        setExportMessage(`已导出 ${rows.length} 条记录，超过上限（最多 ${EXPORT_MAX_ROWS} 条），结果已截断。`);
+        setExportMessage(`已导出前 ${rows.length} 条记录（已达上限 ${EXPORT_MAX_ROWS} 条）`);
       } else {
-        setExportMessage(`已导出 ${rows.length} 条记录。`);
+        setExportMessage(`已导出 ${rows.length} 条记录`);
       }
     } catch (error) {
       console.error(error);
@@ -307,7 +307,6 @@ export default function SystemLogs({ embedded = false, scope, search: externalSe
   return (
     <PageShell
       title="系统日志"
-      description="后台操作、定时任务和巡逻留下的记录，悬停可看原始内容。"
       actions={
         <div className="flex w-full flex-wrap items-center gap-2 md:w-auto md:flex-nowrap">
           <label className="relative min-w-0 flex-1 md:w-72 md:flex-none">

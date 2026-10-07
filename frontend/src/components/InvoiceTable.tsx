@@ -46,7 +46,7 @@ export function InvoiceSubTable({ state }: { state: FinanceInvoiceRow[] | 'loadi
     return <div className="py-1 text-xs text-red-600 dark:text-red-400">账单加载失败</div>;
   }
   if (state.length === 0) {
-    return <div className="py-1 text-xs text-gray-500 dark:text-ink-400">这个 Team 还没有同步到账单</div>;
+    return <div className="py-1 text-xs text-gray-500 dark:text-ink-400">暂无已同步账单</div>;
   }
 
   const headerCurrency = state[0].currency || '';

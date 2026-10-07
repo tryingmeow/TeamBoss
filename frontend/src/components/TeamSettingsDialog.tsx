@@ -270,9 +270,9 @@ export default function TeamSettingsDialog({
             onOpenChange={(next) => {
               if (!next && savingPolicy !== 'auto') setConfirmAutoOpen(false);
             }}
-            title="改为超员自动？"
-            message="以后这个 Team 的 ChatGPT 或 Premium 席位满了时，加人或切换会直接进行，ChatGPT 自动加购并扣费，不再先问你。"
-            confirmLabel="改为超员自动"
+            title="开启超员自动加购？"
+            message="席位不足时将自动加购并计费，不再弹出确认提示。"
+            confirmLabel="确认开启"
             destructive
             loading={savingPolicy === 'auto'}
             onConfirm={() => {
@@ -288,7 +288,7 @@ export default function TeamSettingsDialog({
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="text-sm font-medium text-gray-900 dark:text-gray-100" aria-hidden>超员策略</div>
-              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">ChatGPT / Premium 席位满了时，加人或切换怎么办</div>
+              <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">席位不足时的处理规则</div>
             </div>
             {savingPolicy && <Loader2 size={14} className="shrink-0 animate-spin text-gray-400" aria-label="保存中" />}
           </div>
@@ -328,7 +328,6 @@ export default function TeamSettingsDialog({
         <div className="flex items-center justify-between gap-3 p-3">
           <div className="min-w-0">
             <div className="text-sm font-medium text-gray-900 dark:text-gray-100">默认邀请席位</div>
-            <div className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">成员邀请默认使用的席位</div>
           </div>
           <button
             type="button"

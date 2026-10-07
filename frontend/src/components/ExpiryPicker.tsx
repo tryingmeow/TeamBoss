@@ -330,7 +330,7 @@ export default function ExpiryPicker({
 
       <div className="min-h-4 text-xs leading-4">
         {previewSelection?.kind === 'never' ? (
-          <span className="text-amber-600 dark:text-amber-400">永不过期，不会到期移出</span>
+          <span className="text-amber-600 dark:text-amber-400">永不过期（不自动移出）</span>
         ) : previewExpiry && previewKick ? (
           <span>
             <span className="text-blue-600 dark:text-blue-400">预计 {formatAppLocalMinute(previewKick)} 移出</span>

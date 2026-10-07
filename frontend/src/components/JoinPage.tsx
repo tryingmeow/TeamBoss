@@ -340,7 +340,7 @@ export default function JoinPage() {
       <div className={cn(CARD, 'p-5 shadow-sm sm:p-7')}>
         <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Team 自助服务</h1>
         <p className="mt-1 text-pretty text-sm text-gray-500 dark:text-ink-400">
-          用兑换码加入或续期 Team，也能查询成员状态。
+          使用兑换码加入或续期 Team，或查询成员状态。
         </p>
 
         <div role="tablist" aria-label="操作" className="mt-5 grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 dark:bg-ink-950">
@@ -399,7 +399,7 @@ export default function JoinPage() {
             />
             {tab === 'query' && (
               <span className="mt-1.5 block text-xs text-gray-500 dark:text-ink-400">
-                查询邮箱时填上本人用过的兑换码，可同时查看兑换记录。
+                可附带已使用的兑换码以验证查看兑换详情
               </span>
             )}
           </label>
@@ -477,7 +477,7 @@ export default function JoinPage() {
                 (choice: RedeemTeamChoice) => choice.expiry_state === 'unmanaged' && choice.renewable !== false,
               ) && (
                 <p className="mt-3 text-xs text-gray-500 dark:text-ink-400">
-                  续期「未纳入到期管理」的 Team 会自动设定到期时间，到期后自动移出。
+                  续期「未纳入到期管理」的 Team 将设定到期时间，到期后自动移出。
                 </p>
               )}
             </ResultPanel>
@@ -499,7 +499,7 @@ export default function JoinPage() {
                 <Detail label="到期">{formatExpiresAt(redeemResult.expires_at)}</Detail>
               </Details>
               {redeemResult.action !== 'renewed_member' && (
-                <p className="mt-3 text-xs text-gray-500 dark:text-ink-400">请到邮箱查收 ChatGPT 的邀请邮件并接受邀请。</p>
+                <p className="mt-3 text-xs text-gray-500 dark:text-ink-400">请查收邮箱中的邀请邮件并接受邀请。</p>
               )}
             </ResultPanel>
           )}
@@ -576,7 +576,7 @@ export default function JoinPage() {
               <ResultPanel tone="neutral" icon={History} title="兑换记录">
                 {statusResult.membership.redemption_history.length === 0 ? (
                   <p className="text-sm text-gray-500 dark:text-ink-400">
-                    没有可显示的记录。填上本人用过的兑换码后再查询即可查看。
+                    暂无记录。输入曾使用的兑换码验证后可查看完整记录。
                   </p>
                 ) : (
                   <ol className="divide-y divide-gray-200 dark:divide-ink-800">

@@ -322,7 +322,7 @@ export default function SettingsDialog({
               <div role="alert" className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-500/10 dark:text-red-300">
                 <AlertTriangle size={16} className="mt-0.5 shrink-0" />
                 <span className="min-w-0 flex-1">
-                  读取当前设置失败，暂时不能修改：没读到服务器上的值，这时保存只会拿默认值（包括 0 小时到期宽限）覆盖它们。
+                  获取当前配置失败，请重试以避免覆盖已有配置。
                 </span>
                 <button
                   type="button"
@@ -411,7 +411,7 @@ export default function SettingsDialog({
               </fieldset>
 
               <p className="text-xs text-gray-500 dark:text-ink-400">
-                席位满了要不要加购，改在每个 Team 的设置里选（超员策略）。
+                超员加购策略请在各 Team 卡片设置中配置。
               </p>
 
               <div className="flex justify-end">
@@ -596,9 +596,9 @@ export default function SettingsDialog({
       <ConfirmDialog
         open={rotateConfirmOpen}
         onOpenChange={setRotateConfirmOpen}
-        title="更换 API Key？"
-        message="旧 Key 会立刻失效：所有正在使用它的浏览器和脚本都会被登出，需要改用新 Key 重新登录。新 Key 会显示在这里并自动复制。"
-        confirmLabel="更换"
+        title="更换 API Key"
+        message="更换后当前 API Key 将立即失效，使用该 Key 的所有会话及脚本均需重新配置。"
+        confirmLabel="确认更换"
         destructive
         onConfirm={() => void handleRotateApiKey()}
       />
@@ -607,13 +607,13 @@ export default function SettingsDialog({
         onOpenChange={(next) => {
           if (!next && !deletingProxy) setProxyToDelete(null);
         }}
-        title={`删除代理「${proxyToDelete?.name ?? ''}」？`}
+        title={`删除代理「${proxyToDelete?.name ?? ''}」`}
         message={
           boundTeams.length > 0
-            ? `${boundTeams.length} 个 Team 正在使用它（${boundTeams.map((t) => t.name).join('、')}），删除后这些 Team 会改为直连，不再经过代理。`
-            : '没有 Team 绑定这个代理。删除后不可恢复。'
+            ? `${boundTeams.length} 个 Team 正在使用该代理（${boundTeams.map((t) => t.name).join('、')}），删除后将切换为直连。`
+            : '确定删除此代理吗？删除后不可恢复。'
         }
-        confirmLabel="删除"
+        confirmLabel="确认删除"
         destructive
         loading={deletingProxy}
         onConfirm={() => proxyToDelete && void handleDeleteProxy(proxyToDelete.id)}

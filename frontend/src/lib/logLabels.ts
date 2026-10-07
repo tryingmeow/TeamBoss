@@ -248,11 +248,11 @@ const PREMIUM_OUTSIDER = '外部加入，占用 Premium 席位';
 
 const PREMIUM_ALERT_KIND: Record<string, string> = {
   premium_outsider: PREMIUM_OUTSIDER,
-  premium_detected_with_record: '外部加入的 Premium 成员，但 TeamBoss 改过他的席位、邀请过他或卖给他 Premium',
-  premium_detected_was_managed: '外部加入的 Premium 成员，但 TeamBoss 以前拉过他或他兑换过',
-  chatgpt_detected_was_managed: 'Team 超员，但这个外部加入的 ChatGPT 成员 TeamBoss 以前拉过或他兑换过，没有移除',
-  premium_unswitched: 'TeamBoss 管理的成员在 Premium 席位上，但不是 TeamBoss 切的',
-  unknown_seat_type: '席位类型 TeamBoss 不认识',
+  premium_detected_with_record: '外部加入 Premium（含历史管理或邀请记录）',
+  premium_detected_was_managed: '外部加入 Premium（曾有系统托管或兑换记录）',
+  chatgpt_detected_was_managed: '超员外部成员（曾有托管记录，暂缓移出）',
+  premium_unswitched: '托管成员处于 Premium 席位（非系统切换）',
+  unknown_seat_type: '未知席位类型',
 };
 
 /** "30d" → "30 天", "12h" → "12 小时", "3m" → "3 分钟", "never" → "永久". */
@@ -326,10 +326,10 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
   member_seat_type: (v) => `成员席位 ${seatLabel(v)}`,
   pending_seat_type: (v) => `待接受邀请席位 ${seatLabel(v)}`,
   resend: (v) => (isTrue(v) ? '重发邀请' : null),
-  teams_checked: (v) => `查了 ${v} 个 Team`,
+  teams_checked: (v) => `已检查 ${v} 个 Team`,
   deferred: (v) => ({
-    seat_changed_after_snapshot: '快照后管理员改过席位，这轮先不移出',
-    teamboss_record: 'TeamBoss 有他的记录，这轮先不移出',
+    seat_changed_after_snapshot: '快照后已手动调整席位，暂缓移出',
+    teamboss_record: '存在本地管理记录，暂缓移出',
   } as Record<string, string>)[v] ?? `推迟：${v}`,
   batch_guard: (v) => ({
     outsiders: '外部成员过多保护',
@@ -389,12 +389,12 @@ const KEY_FORMATTERS: Record<string, (value: string) => string | null> = {
     invite: '邀请后',
     kick: '移出后',
     overage_forbidden: '席位已满，禁止超员',
-    overage_needs_confirmation: '席位已满，等你确认加购',
+    overage_needs_confirmation: '席位已满，待确认加购',
     premium_outsider: PREMIUM_OUTSIDER,
     over_quota: '超员',
     seat_type_mismatch: '兑换码和成员的席位类型不符',
-    unknown_member_seat_type: '成员的席位类型 TeamBoss 不认识，未处理',
-    unknown_seat_type: '席位类型 TeamBoss 不认识，未处理',
+    unknown_member_seat_type: '未知成员席位类型，未处理',
+    unknown_seat_type: '未知席位类型，未处理',
   } as Record<string, string>)[v] ?? v,
   action: (v) => ({ renewed: '已续期', extended: '已延长', renewed_member: '续期成员', renewed_invite: '续期邀请' } as Record<string, string>)[v] ?? v,
   force: () => '强制同步',

@@ -113,9 +113,9 @@ export function seatStyle(value: string | null | undefined): SeatStyle {
 // ── Overage policy (per Team) ───────────────────────────────────────────────────
 
 export const OVERAGE_POLICY_OPTIONS: { value: OveragePolicy; label: string; hint: string }[] = [
-  { value: 'forbid', label: '禁止超员', hint: '满了就拒绝，不会自动加购' },
-  { value: 'confirm', label: '超员需确认', hint: '满了先问你，确认后 ChatGPT 自动加购并扣费' },
-  { value: 'auto', label: '超员自动', hint: '满了直接加，ChatGPT 自动加购并扣费' },
+  { value: 'forbid', label: '禁止超员', hint: '席位已满时禁止加入，不产生额外扣费' },
+  { value: 'confirm', label: '超员需确认', hint: '席位已满时弹窗确认，确认后自动加购扣费' },
+  { value: 'auto', label: '超员自动', hint: '席位已满时直接加入，自动加购扣费' },
 ];
 
 /** Same rule as the backend: missing = 'confirm' (the default); anything unrecognised = 'forbid'. */

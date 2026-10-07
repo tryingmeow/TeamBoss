@@ -88,14 +88,14 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
       size="lg"
       title={team ? `重新导入 ${team.name}` : '添加 Team'}
       description={team
-        ? '只更新这个 Team 的 Session，备注、成员到期和管理记录都会保留。属于其他 Team 的 Session 会被拒绝。'
-        : '用 ChatGPT Team 的 Owner 账号 Session 接入。'}
+        ? '更新当前 Team 的 Session 凭证，现有管理数据保持不变。'
+        : '导入 ChatGPT Team Owner 账号的 Session 凭证以接入。'}
       footer={
         <>
           <button type="button" onClick={() => onOpenChange(false)} className={BUTTON.secondary}>取消</button>
           <button type="button" onClick={handleSubmit} disabled={loading} className={BUTTON.primary}>
             {loading && <LoadingSpinner size={14} />}
-            {loading ? '处理中…' : (team ? '确认重新导入' : '确认添加')}
+            {loading ? '处理中…' : (team ? '重新导入' : '添加')}
           </button>
         </>
       }

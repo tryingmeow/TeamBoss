@@ -99,9 +99,7 @@ type ToastType = 'success' | 'error';
 function patrolRuleText(intervalMinutes: number): ReactNode {
   return (
     <>
-      每 {intervalMinutes} 分钟巡逻一次，只处理未豁免的 Team：ChatGPT 席位超出时，移除新的外部加入成员（绕过 TeamBoss
-      加入的），最多移除超出的人数；外部加入、占用 <span className="inline-flex items-center gap-1 whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 席位的成员，不管是否超出都会移除（每个
-      Premium 席位都按月扣费）。
+      每 {intervalMinutes} 分钟巡逻一次未豁免 Team：超出席位时清理外部成员；占用 <span className="inline-flex items-center gap-1 whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 的外部成员无论是否超出均自动清理。
     </>
   );
 }
@@ -573,7 +571,7 @@ function PatrolSection() {
   return (
     <div className="space-y-6">
       <section className={cn(CARD, 'p-4 sm:p-6')}>
-        <SectionHeader title="巡逻自动踢人" description="防止有人绕过 TeamBoss 直接往 Team 里加人、占用付费席位。" />
+        <SectionHeader title="巡逻自动踢人" description="监控并清理绕过系统直接加入的外部成员，避免产生非预期席位扣费。" />
         <div className="mt-5 divide-y divide-gray-100 dark:divide-ink-800">
           <SettingRow
             title={
@@ -605,7 +603,7 @@ function PatrolSection() {
           />
           <SettingRow
             title="演练空跑"
-            description="按当前规则预览会被踢的人，不会真正踢人。「缓存」用上次同步的数据，秒出；「实时刷新」先逐个刷新各 Team，较慢。"
+            description="按当前规则预览待清理成员，不执行实际操作。支持使用缓存数据或实时同步。"
             control={
               <div className="flex flex-wrap items-center gap-2">
                 <DryRunSourceToggle value={dryRunSource} onChange={setDryRunSource} disabled={!!dryRunPhase} />
@@ -636,7 +634,7 @@ function PatrolSection() {
       <section className={cn(CARD, 'p-4 sm:p-6')}>
         <SectionHeader
           title="Team 豁免"
-          description="点击 Team 切换豁免。豁免的 Team 巡逻不踢人（超员和外部加入的 Premium 成员都不踢），发现外部加入的 Premium 成员时只发 TG 提醒；开启 Codex 的 Team 自动豁免。"
+          description="豁免的 Team 不执行自动踢人，检测到异常时仅发送通知。已开启 Codex 的 Team 默认自动豁免。"
           aside={
             <span className="shrink-0 whitespace-nowrap pt-0.5 text-xs tabular-nums text-gray-500 dark:text-ink-400">
               已豁免 {exemptCount} / {status.teams.length}
@@ -686,7 +684,7 @@ function PatrolSection() {
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-gray-300 dark:border-ink-600" />正常</span>
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-amber-500" />观察</span>
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-red-500" />超员风险</span>
-          <span className="whitespace-nowrap">数字 = 在用 ChatGPT 席位 / 总席位</span>
+          <span className="whitespace-nowrap">数值：已用席位 / 总席位</span>
         </div>
       </section>
 
@@ -699,11 +697,10 @@ function PatrolSection() {
               保护现有成员并开启自动踢人
             </Dialog.Title>
             <Dialog.Description className={DIALOG_TEXT}>
-              请先确认各 Team 现在的成员都是你认可的。
-              <br />
-              <br />
-              确认后会实时刷新全部成员，把当前成员和邀请都列为受保护，再开启自动踢人。
-              {patrolRuleText(status.sync_interval_minutes)}
+              确认后将同步各 Team 成员与待处理邀请作为受保护基线，并开启自动踢人。之后的外部非受管成员将按规则处理。
+              <span className="mt-2 block">
+                {patrolRuleText(status.sync_interval_minutes)}
+              </span>
             </Dialog.Description>
             <div className={DIALOG_ACTIONS}>
               <Dialog.Close asChild>
@@ -726,8 +723,8 @@ function PatrolSection() {
             </Dialog.Title>
             <Dialog.Description className={DIALOG_TEXT}>
               {pendingExempt?.willExempt
-                ? `把「${pendingExempt?.team.name}」加入豁免后，巡逻不会在这个 Team 踢人：超员和外部加入的 Premium 成员都不踢，只发 TG 提醒。`
-                : `把「${pendingExempt?.team.name}」移出豁免后，超员时新的外部加入成员、以及外部加入、占用 Premium 席位的成员可能被自动踢人。`}
+                ? `将「${pendingExempt?.team.name}」设为豁免后，该 Team 将暂停自动踢人，仅在检测到异常时发送通知。`
+                : `取消「${pendingExempt?.team.name}」的豁免后，该 Team 将恢复执行巡逻自动踢人规则。`}
             </Dialog.Description>
             <div className={DIALOG_ACTIONS}>
               <button onClick={() => setPendingExempt(null)} className={BUTTON.secondary}>
@@ -989,7 +986,7 @@ function TgBotSection() {
       <section className={cn(CARD, 'p-4 sm:p-6')}>
         <SectionHeader
           title="Telegram 机器人"
-          description="启用后，配对过的管理员可以在 Telegram 里查询 Team、邀请或移除成员、生成兑换码，并接收提醒。"
+          description="管理员绑定后可在 Telegram 中管理 Team、成员与兑换码，并接收事件提醒。"
         />
         <div className="mt-5 divide-y divide-gray-100 dark:divide-ink-800">
           <SettingRow
@@ -1019,8 +1016,8 @@ function TgBotSection() {
               机器人 Token
             </label>
             <p className={cn('mt-1 text-sm leading-6', MUTED)}>
-              在 Telegram 里找 @BotFather 创建机器人即可获得。
-              {config?.token_set && '已设置的 Token 不会显示，填写新 Token 即替换。'}
+              从 @BotFather 获取。
+              {config?.token_set && '（已配置，输入新值可覆盖）'}
             </p>
             <div className="mt-2 flex flex-col gap-2 sm:flex-row">
               <input
@@ -1045,8 +1042,8 @@ function TgBotSection() {
           title={<h2 className="text-base font-semibold">定时摘要</h2>}
           description={
             config?.enabled
-              ? '每次自动同步后，把 Team、在线、席位和超员统计推送给管理员；两次推送至少间隔下方设定的分钟数。'
-              : '需先启用机器人。开启后，每次自动同步后把 Team、在线、席位和超员统计推送给管理员。'
+              ? '每次自动同步后，向管理员推送 Team 状态与席位用量统计。'
+              : '需先启用机器人。开启后每次自动同步后向管理员推送统计摘要。'
           }
           control={
             <Switch
@@ -1090,7 +1087,7 @@ function TgBotSection() {
           title="管理员配对码"
           description={
             <>
-              配对码拥有完整后台权限，只发给管理员。对方私聊机器人发送 <code className="font-mono text-gray-700 dark:text-ink-200">/pair &lt;配对码&gt;</code> 即可绑定。成员的配对码请在「用户管理」里按邮箱生成。
+              拥有后台权限，仅限管理员使用。私聊机器人发送 <code className="font-mono text-gray-700 dark:text-ink-200">/pair &lt;配对码&gt;</code> 绑定；普通成员配对码请在「用户管理」中生成。
             </>
           }
         />
@@ -1111,8 +1108,8 @@ function TgBotSection() {
 
         {showNewCode && (
           <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-500/30 dark:bg-emerald-500/10">
-            <div className="text-sm font-medium text-emerald-800 dark:text-emerald-300">管理员配对码已生成，只显示这一次</div>
-            <div className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300/80">一次性使用，24 小时后过期。</div>
+            <div className="text-sm font-medium text-emerald-800 dark:text-emerald-300">配对码仅显示一次</div>
+            <div className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300/80">一次性生效，24 小时内有效。</div>
             <div className="mt-2 flex items-center gap-2">
               <code className="min-w-0 flex-1 select-all break-all rounded-lg border border-emerald-200 bg-white px-3 py-2 font-mono text-base font-semibold text-gray-900 dark:border-emerald-500/20 dark:bg-ink-950 dark:text-gray-100">
                 {showNewCode}
@@ -1261,7 +1258,6 @@ export default function TgPatrol() {
   return (
     <PageShell
       title="TG 与巡逻"
-      description="巡逻自动清理超出席位的成员；Telegram 机器人用于远程管理和推送摘要。"
     >
       <div className="mb-6">
         <SegmentedTabs value={activeTab} onChange={setActiveTab} options={TABS} ariaLabel="TG 与巡逻视图" />

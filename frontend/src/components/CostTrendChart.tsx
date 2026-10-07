@@ -231,8 +231,8 @@ export default function CostTrendChart() {
         <div className="py-10 text-center text-sm text-red-600 dark:text-red-400">{error}</div>
       ) : points.length === 0 ? (
         <div className="py-10 text-center">
-          <p className="text-sm font-medium text-gray-700 dark:text-ink-200">还没有支出快照</p>
-          <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">每天会记录一次各 Team 的月预计支出，有记录后这里显示趋势。</p>
+          <p className="text-sm font-medium text-gray-700 dark:text-ink-200">暂无支出趋势数据</p>
+          <p className="mt-1 text-xs text-gray-500 dark:text-ink-400">系统按日记录月预计支出快照</p>
         </div>
       ) : (
         <>

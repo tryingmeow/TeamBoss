@@ -187,7 +187,7 @@ function remainingPromoMonths(team: Team, now = new Date()): number | null {
 
 function promoLabel(team: Team): string {
   const remainingCharges = remainingPromoMonths(team);
-  if (remainingCharges !== null) return `还剩 ${remainingCharges} 次折扣`;
+  if (remainingCharges !== null) return `余${remainingCharges}次折扣`;
   return '优惠中';
 }
 
@@ -646,8 +646,8 @@ export default function TeamCard({
               type="button"
               onClick={(e) => { e.stopPropagation(); handleOpenRemark(); }}
               className="shrink-0 rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-blue-600 dark:text-ink-500 dark:hover:bg-ink-800 dark:hover:text-blue-400"
-              aria-label="编辑备注（不改 ChatGPT 里的名称）"
-              title="编辑备注（不改 ChatGPT 里的名称）"
+              aria-label="编辑备注"
+              title="编辑备注"
             >
               <Pencil size={13} />
             </button>
@@ -810,7 +810,7 @@ export default function TeamCard({
                     </span>
                     {team.discount_amount > 0 && (
                       <span className="block truncate text-xs font-normal text-sky-600 dark:text-sky-400">
-                        已减 {formatMoney(team.discount_amount, unit)} · {promoLabel(team)}
+                        -{formatMoney(team.discount_amount, unit)} {promoLabel(team)}
                       </span>
                     )}
                   </>
@@ -830,8 +830,8 @@ export default function TeamCard({
               </div>
             )}
             <div className="min-w-0">
-              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">余额</dt>
-              <dd className="mt-0.5 truncate text-sm font-medium tabular-nums text-gray-900 dark:text-gray-100" title="账户 Credit 余额">
+              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">Credit</dt>
+              <dd className="mt-0.5 truncate text-sm font-medium tabular-nums text-gray-900 dark:text-gray-100" title="账户 Credit">
                 {formatMoney(team.balance, unit)}
               </dd>
             </div>
@@ -914,11 +914,11 @@ export default function TeamCard({
       <ConfirmDialog
         open={confirmDelete}
         onOpenChange={setConfirmDelete}
-        title="处理 Team"
-        message={`“${team.name}”仅删除本地管理数据，不会影响 OpenAI 端订阅与成员。如需刷新凭证请使用「重新导入」。`}
+        title={`删除 Team「${team.name}」`}
+        message={`仅从 TeamBoss 移除本地管理数据，不会影响 OpenAI 端的订阅与成员。`}
         secondaryLabel="重新导入"
         onSecondary={handleReimportInstead}
-        confirmLabel="仍然删除"
+        confirmLabel="确认删除"
         destructive
         loading={deleting}
         onConfirm={handleDelete}
@@ -946,7 +946,7 @@ export default function TeamCard({
         <div className="mt-4 space-y-2 text-sm leading-6 text-gray-600 dark:text-ink-300">
           <p>管理员邀请时可自选席位，成员邀请使用这个默认值。</p>
           <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-            默认设为 Codex 可以防止意外占用计费的 ChatGPT 席位，也可能有助于防止超员（以官方实际表现为准）。
+            默认设为 Codex 可避免新成员占用付费席位。
           </p>
         </div>
       </DialogFrame>
@@ -956,7 +956,7 @@ export default function TeamCard({
         onOpenChange={handleRemarkOpenChange}
         size="sm"
         title="Team 备注"
-        description="只保存在 TeamBoss 里，不会修改 ChatGPT 里的 Team 名称。"
+        description="设置本地显示备注，便于日常识别与管理。"
         footer={
           <>
             <button type="button" onClick={() => handleRemarkOpenChange(false)} disabled={savingRemark} className={BUTTON.secondary}>

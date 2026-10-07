@@ -380,7 +380,7 @@ function SortToggle({
     <button
       type="button"
       onClick={onToggle}
-      title="点击切换排序方向"
+      title="切换排序"
       className={cn(BUTTON.secondary, 'h-9 gap-1.5 px-3 py-0 font-normal')}
     >
       <ArrowUpDown className="size-3.5 text-gray-400 dark:text-ink-500" />
@@ -582,7 +582,7 @@ function CodexBadge({ isCodexEnabled }: { isCodexEnabled?: boolean | number }) {
   return (
     <span
       className={cn(PILL, enabled ? SEAT_STYLE.usage_based.pill : TONE.neutral)}
-      title={enabled ? '这个 Team 已开启 Codex 席位' : '这个 Team 未开启 Codex 席位'}
+      title={enabled ? '已启用 Codex 席位' : '未启用 Codex 席位'}
     >
       <Zap className="size-2.5" />
       {enabled ? 'Codex 已开' : 'Codex 未开'}
@@ -733,12 +733,11 @@ function UserIdentityCell({
           <Popover.Portal>
             <Popover.Content className={cn(POPOVER, 'w-72 p-4')} sideOffset={6} collisionPadding={16}>
               <div className="text-sm font-medium text-gray-900 dark:text-gray-100">显示名称</div>
-              <p className="mt-0.5 text-xs text-gray-500 dark:text-ink-400">只在 TeamBoss 里显示，留空则显示邮箱。</p>
               <input
                 type="text"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="留空则显示邮箱"
+                placeholder="未设置时显示邮箱"
                 className={cn(INPUT, 'mt-3')}
                 maxLength={120}
               />
@@ -802,7 +801,7 @@ function BillingCycleCell({
       ) : (
         <span
           className="whitespace-nowrap tabular-nums text-gray-800 dark:text-ink-200"
-          title="计费间隔未知，这里显示的是订阅开始日和本期结束日"
+          title="订阅有效周期"
         >
           订阅自 {subscribedFrom} · 至 {subscribedUntil}
         </span>
@@ -938,8 +937,8 @@ function OwnerList({
       ) : loadError && owners.length === 0 ? null : filteredOwners.length === 0 ? (
         <ListState>
           {owners.length === 0
-            ? '还没有 Team。在「Team 列表」添加 Team 后，它的 Owner 会显示在这里。'
-            : '没有符合搜索条件的 Owner。'}
+            ? '暂无 Team Owner'
+            : '未找到匹配的 Owner'}
         </ListState>
       ) : (
         <>
@@ -1369,8 +1368,8 @@ function MemberList({
     const ownerCount = ownerTeamsByEmail.get(emailKey) ?? 0;
     if (teamCount <= 1 && ownerCount === 0) return null;
     const title = ownerCount
-      ? `该邮箱在 ${teamCount} 个 Team 是成员，另在 ${ownerCount} 个 Team 是 Owner（Owner 不在本列表中）；点击只看这个邮箱`
-      : `该邮箱同时在 ${teamCount} 个 Team，点击只看这个邮箱`;
+      ? `关联 ${teamCount} 个成员 Team、${ownerCount} 个 Owner Team`
+      : `关联 ${teamCount} 个 Team`;
     return (
       <button
         type="button"
@@ -1404,7 +1403,7 @@ function MemberList({
       ),
       team: <MemberTeamInfo member={member} />,
       joinedAt: (
-        <span className="whitespace-nowrap tabular-nums text-gray-700 dark:text-ink-300" title="系统首次发现该成员的时间">
+        <span className="whitespace-nowrap tabular-nums text-gray-700 dark:text-ink-300" title="首次同步时间">
           {formatJoinedAt(member.expiry?.first_seen_at)}
         </span>
       ),
@@ -1477,8 +1476,7 @@ function MemberList({
       {focusEmail && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
           <span className="min-w-0 flex-1">
-            只看 <span className="font-medium [overflow-wrap:anywhere]">{focusEmail}</span> 在各 Team 的记录
-            <span className="text-amber-700/80 dark:text-amber-300/70">（搜索和筛选暂不生效）</span>
+            当前过滤：<span className="font-medium [overflow-wrap:anywhere]">{focusEmail}</span>
           </span>
           <button
             type="button"
@@ -1497,8 +1495,8 @@ function MemberList({
       ) : loadError && members.length === 0 ? null : filteredMembers.length === 0 ? (
         <ListState>
           {members.length === 0
-            ? '还没有成员。在「Team 列表」邀请成员，或让用户用兑换码自助加入。'
-            : '没有符合当前搜索和筛选的成员。'}
+            ? '暂无成员'
+            : '未找到匹配的成员'}
         </ListState>
       ) : (
         <>
@@ -1666,7 +1664,7 @@ export default function UserManagement() {
   );
 
   return (
-    <PageShell title="用户管理" description="所有 Team 的 Owner 和成员：调整到期时间和席位，踢出成员，复制 TG 绑定指令。">
+    <PageShell title="用户管理">
       {toasts.length > 0 && (
         <div
           aria-live="polite"
@@ -1713,7 +1711,7 @@ export default function UserManagement() {
             type="button"
             onClick={() => void handleRefreshAll()}
             disabled={refreshProgress !== null}
-            title="逐个实时刷新所有 Team 的成员数据"
+            title="同步所有 Team 成员数据"
             className={cn(BUTTON.secondary, 'h-9 gap-1.5 px-3 py-0 font-normal tabular-nums md:ml-auto')}
           >
             {refreshProgress ? (

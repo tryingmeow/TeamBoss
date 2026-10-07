@@ -124,7 +124,7 @@ export default function DashboardSortControl({
       <button
         type="button"
         onClick={() => onSortDirectionChange(nextDirection)}
-        aria-label={`切换排序方向，当前 ${directionLabel}，点击切换为 ${nextDirectionLabel}`}
+        aria-label={`切换排序方向（当前：${directionLabel}）`}
         title={`切换为 ${nextDirectionLabel}`}
         className="grid w-10 shrink-0 place-items-center text-gray-500 outline-none transition-colors hover:bg-gray-50 hover:text-blue-600 focus-visible:bg-blue-50 focus-visible:text-blue-600 dark:text-ink-400 dark:hover:bg-ink-800/60 dark:hover:text-blue-400 dark:focus-visible:bg-blue-500/10 dark:focus-visible:text-blue-400"
       >

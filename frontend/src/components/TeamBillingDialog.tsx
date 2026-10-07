@@ -89,7 +89,6 @@ export default function TeamBillingDialog({
       onOpenChange={onOpenChange}
       size="xl"
       title={`账单 · ${team.name}`}
-      description="Stripe 账单和花费，只读已同步的数据。"
       onOpenAutoFocus={(event) => {
         event.preventDefault();
         closeRef.current?.focus();
@@ -132,9 +131,6 @@ export default function TeamBillingDialog({
               )}
             </SummaryTile>
           </div>
-          <p className="mt-2 text-pretty text-xs leading-5 text-gray-500 dark:text-ink-400">
-            只把已支付的账单算进合计；作废和未支付的照常列出，不计入。
-          </p>
         </div>
       )}
 

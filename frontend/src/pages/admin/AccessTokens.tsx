@@ -109,8 +109,8 @@ function SeatPill({ seatType }: { seatType?: string | null }) {
 }
 
 const CODE_SEAT_HINT: Record<CodeSeatType, string> = {
-  default: '只用已付的 ChatGPT 空位，兑换不会加购扣费。',
-  prolite: '只用已付的 Premium 空位，兑换不会加购扣费；没有空位时兑换失败，兑换码不作废。',
+  default: '仅使用现有可用 ChatGPT 席位，不触发自动加购。',
+  prolite: '仅使用现有可用 Premium 席位；无可用席位时兑换失败且不消耗兑换码。',
 };
 
 const LABEL = 'mb-1.5 block text-sm font-medium text-gray-700 dark:text-ink-200';
@@ -177,7 +177,7 @@ function DurationField({ label, hint, presets, value, onChange, placeholder }: D
         />
         {typed && (
           <p className={cn('col-start-2 text-xs', reading ? 'text-gray-500 dark:text-ink-400' : 'text-amber-700 dark:text-amber-400')}>
-            {reading ? `= ${reading}` : '格式：数字加 d（天）、h（小时）或 m（分钟），或 never（永不）'}
+            {reading ? `= ${reading}` : '支持 d（天）、h（小时）、m（分）或 never'}
           </p>
         )}
       </div>
@@ -285,8 +285,8 @@ export default function AccessTokens() {
   const handleResolve = async (item: PendingConfirmationItem, outcome: 'success' | 'released') => {
     const question =
       outcome === 'success'
-        ? `确认 ${item.email} 已经在「${item.team_name || item.team_id}」里？兑换码保持已使用，并补上授予时长（${durationLabel(item.grant_expires_in)}）。`
-        : `确认 ${item.email} 在「${item.team_name || item.team_id}」里既没有成员也没有邀请？兑换码将退回未使用。`;
+        ? `确认 ${item.email} 已加入「${item.team_name || item.team_id}」？兑换码将置为已使用并补齐时长（${durationLabel(item.grant_expires_in)}）。`
+        : `确认 ${item.email} 未成功加入？兑换码将退回为未使用。`;
     if (!confirm(question)) return;
     setResolving(item.id);
     try {
@@ -348,13 +348,13 @@ export default function AccessTokens() {
         <div className="mb-3 flex size-10 items-center justify-center rounded-full bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400">
           <Ticket className="size-5" />
         </div>
-        <p className="font-medium text-gray-900 dark:text-gray-100">还没有兑换码</p>
+        <p className="font-medium text-gray-900 dark:text-gray-100">暂无兑换码</p>
         <p className="mt-1 max-w-sm text-sm leading-6 text-gray-500 dark:text-ink-400">
-          点击上方「生成兑换码」创建一个。用户在
+          生成兑换码后，用户可在
           <a href="/" target="_blank" rel="noreferrer" className="mx-0.5 text-blue-600 hover:underline dark:text-blue-400">
             自助页
           </a>
-          输入兑换码，即可自行加入或续期 Team。
+          自行兑换并加入 Team。
         </p>
       </div>
     );
@@ -475,7 +475,6 @@ export default function AccessTokens() {
   return (
     <PageShell
       title="兑换码"
-      description="一次性兑换码：用户在自助页输入后，自行加入或续期 Team。"
       actions={
         <>
           <button
@@ -500,7 +499,7 @@ export default function AccessTokens() {
               <div className="min-w-0">
                 <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">生成兑换码</h2>
                 <p className="mt-0.5 text-sm text-gray-500 dark:text-ink-400">
-                  每个兑换码只能兑换一次，完整兑换码只在生成后显示一次。
+                  完整兑换码仅在生成后展示一次。
                 </p>
               </div>
               <button
@@ -516,9 +515,7 @@ export default function AccessTokens() {
             </div>
 
             <div className="mt-4">
-              <div className={LABEL}>
-                席位类型 <span className={LABEL_HINT}>· 兑换后得到的席位</span>
-              </div>
+              <div className={LABEL}>席位类型</div>
               <div className="grid grid-cols-2 gap-1 rounded-lg bg-gray-100 p-1 sm:inline-grid sm:w-72 dark:bg-ink-950" role="group" aria-label="席位类型">
                 {CODE_SEAT_OPTIONS.map(({ value, label }) => (
                   <button
@@ -545,7 +542,7 @@ export default function AccessTokens() {
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <DurationField
                 label="授予时长"
-                hint="兑换后可用多久"
+                hint="可用时长"
                 presets={GRANT_PRESETS}
                 value={grant}
                 onChange={setGrant}
@@ -553,7 +550,7 @@ export default function AccessTokens() {
               />
               <DurationField
                 label="兑换有效期"
-                hint="过期未兑换即作废"
+                hint="过期失效"
                 presets={TTL_PRESETS}
                 value={ttl}
                 onChange={setTtl}
@@ -562,9 +559,7 @@ export default function AccessTokens() {
             </div>
 
             <label className="mt-4 block">
-              <span className={LABEL}>
-                备注 <span className={LABEL_HINT}>· 仅内部可见</span>
-              </span>
+              <span className={LABEL}>备注</span>
               <input
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
@@ -581,7 +576,7 @@ export default function AccessTokens() {
             {created && (
               <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-500/30 dark:bg-emerald-500/10">
                 <div className="text-sm font-medium text-emerald-800 dark:text-emerald-300">
-                  已生成，请立即复制
+                  已生成，请及时复制保存
                 </div>
                 <div className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300/80">
                   {formatSeatTypeLabel(created.seat_type)} · 授予 {durationLabel(created.grant_expires_in)} ·{' '}
@@ -614,7 +609,7 @@ export default function AccessTokens() {
                 <span className="tabular-nums">{pending.length}</span>
               </h2>
               <p className="mt-1 text-sm text-amber-800 dark:text-amber-300/80">
-                兑换时邀请结果未能确认，兑换码已锁定。请核对该邮箱在 Team 里的真实状态后再处理。
+                兑换时邀请状态未能确认，兑换码已锁定。请核对该邮箱在对应 Team 中的实际状态。
               </p>
             </div>
             <ul className="divide-y divide-gray-200 dark:divide-ink-800">

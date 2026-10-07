@@ -153,9 +153,9 @@ export default function Dashboard({
           </>
         ) : (
           <>
-            <p className="text-base font-semibold text-gray-900 dark:text-gray-100">还没有接入 Team</p>
+            <p className="text-base font-semibold text-gray-900 dark:text-gray-100">暂无接入的 Team</p>
             <p className="max-w-md text-sm text-gray-500 dark:text-ink-400">
-              用 ChatGPT Team 的 Owner 账号 Session 接入第一个 Team，之后就能在这里管理席位、成员和续费。
+              导入 ChatGPT Team Owner 账号的 Session 凭证以开始管理。
             </p>
             <button type="button" onClick={onAddTeam} className={`${BUTTON.primary} mt-2`}>
               <Plus size={16} /> 添加 Team

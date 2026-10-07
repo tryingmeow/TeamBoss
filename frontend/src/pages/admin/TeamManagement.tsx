@@ -7,6 +7,7 @@ import {
   Clock,
   CreditCard,
   Crown,
+  Info,
   Loader2,
   RefreshCw,
   Server,
@@ -16,6 +17,7 @@ import {
   Wallet,
   Zap,
 } from 'lucide-react';
+import * as Tooltip from '@radix-ui/react-tooltip';
 import {
   fetchAllMembers,
   fetchResourceUsage,
@@ -97,12 +99,16 @@ const STAT_TONES = {
   },
 } as const;
 
+const TOOLTIP_CLASS =
+  'z-50 max-w-xs rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-700 shadow-lg dark:border-ink-700 dark:bg-ink-800 dark:text-gray-200';
+
 type StatToneKey = keyof typeof STAT_TONES;
 
 function StatCard({
   title,
   value,
   detail,
+  tooltip,
   icon: Icon,
   toneKey = 'blue',
   seat,
@@ -110,7 +116,8 @@ function StatCard({
 }: {
   title: ReactNode;
   value: ReactNode;
-  detail: ReactNode;
+  detail?: ReactNode;
+  tooltip?: ReactNode;
   icon: typeof Shield;
   toneKey?: StatToneKey;
   /** Tiles about one seat type wear that seat's color (same as the Team cards). */
@@ -130,7 +137,27 @@ function StatCard({
     <div className={cn(CARD, 'group relative flex min-w-0 flex-col justify-between p-4 transition-all duration-200 hover:shadow-md sm:p-5', tone.surface, tone.borderHover)}>
       <div>
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{title}</p>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{title}</div>
+            {tooltip && (
+              <Tooltip.Root>
+                <Tooltip.Trigger asChild>
+                  <button
+                    type="button"
+                    className="shrink-0 text-gray-400 transition-colors hover:text-gray-600 dark:text-ink-500 dark:hover:text-ink-300"
+                    aria-label="说明"
+                  >
+                    <Info className="size-3.5" />
+                  </button>
+                </Tooltip.Trigger>
+                <Tooltip.Portal>
+                  <Tooltip.Content className={TOOLTIP_CLASS} sideOffset={4}>
+                    {tooltip}
+                  </Tooltip.Content>
+                </Tooltip.Portal>
+              </Tooltip.Root>
+            )}
+          </div>
           <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', tone.iconBg)}>
             <Icon className="size-4 sm:size-4.5" />
           </div>
@@ -140,7 +167,7 @@ function StatCard({
         </p>
         {children}
       </div>
-      <p className="mt-2 text-xs leading-snug text-gray-500 dark:text-ink-400">{detail}</p>
+      {detail ? <div className="mt-2 text-xs leading-snug text-gray-500 dark:text-ink-400">{detail}</div> : null}
     </div>
   );
 }
@@ -385,7 +412,6 @@ export default function TeamManagement() {
   return (
     <PageShell
       title="数据概览"
-      description="席位用量、续费支出和即将到期的成员，一页看完。"
       actions={(
         <button
           type="button"
@@ -415,7 +441,12 @@ export default function TeamManagement() {
               <StatCard
                 title="活跃 Team"
                 value={`${data.active_team} / ${data.total_team}`}
-                detail={`${data.total_team - data.active_team} 个非活跃 Team`}
+                detail={data.total_team - data.active_team > 0 ? (
+                  <span className="font-medium text-amber-600 dark:text-amber-400">
+                    {data.total_team - data.active_team} 个非活跃 Team
+                  </span>
+                ) : null}
+                tooltip="正常同步的活跃 Team 数 / 总接入数"
                 icon={Server}
                 toneKey="emerald"
               />
@@ -461,6 +492,7 @@ export default function TeamManagement() {
                     ? `已用 ${inusePremium} / ${totalPremiumPaid} · 剩余 ${freePremiumSeats}`
                     : `使用中 ${inusePremium} · 预付席位 0`
                 }
+                tooltip={seatView === 'default' ? 'ChatGPT 席位使用率与可用空位' : 'Premium 席位使用率与可用空位'}
                 icon={seatView === 'default' ? Users : Crown}
                 seat={seatView}
               >
@@ -478,52 +510,56 @@ export default function TeamManagement() {
               <StatCard
                 title="Codex 席位"
                 value={data.inuse_codex}
-                detail="使用中 · 按用量计费"
+                tooltip="使用中 · 按用量计费，不占月租席位"
                 icon={Zap}
                 seat="usage_based"
               />
               <StatCard
                 title="有空位的 Team"
                 value={data.free_team_count}
-                detail={`待接受邀请 ${data.pending_gpt_invites}`}
+                detail={data.pending_gpt_invites > 0 ? `待接受邀请 ${data.pending_gpt_invites}` : null}
+                tooltip="有空闲席位可加入的 Team 数量"
                 icon={Shield}
                 toneKey="sky"
               />
               <StatCard
                 title="月预计支出"
                 value={formatMoney(finance?.monthly_total_base, baseCurrency)}
-                detail={(
-                  <>
-                    {(finance?.premium_monthly_estimate_base_total ?? 0) > 0 && (
-                      <span className="block">
-                        另加 <span className={SEAT_STYLE.prolite.text}>Premium 估算</span>{' '}
-                        {baseCurrency.toUpperCase() === 'USD' ? '' : '≈ '}{formatMoney(finance?.premium_monthly_estimate_base_total, baseCurrency)}
-                      </span>
-                    )}
-                    {finance?.excluded_teams_count ? `未计入 ${finance.excluded_teams_count} 个异常 Team` : '只计入活跃且自动续费的 Team'}
-                  </>
-                )}
+                detail={
+                  (finance?.premium_monthly_estimate_base_total ?? 0) > 0 ? (
+                    <span className="block">
+                      另加 <span className={SEAT_STYLE.prolite.text}>Premium 估算</span>{' '}
+                      {baseCurrency.toUpperCase() === 'USD' ? '' : '≈ '}{formatMoney(finance?.premium_monthly_estimate_base_total, baseCurrency)}
+                    </span>
+                  ) : finance?.excluded_teams_count ? (
+                    <span className="font-medium text-amber-600 dark:text-amber-400">
+                      未计入 {finance.excluded_teams_count} 个异常 Team
+                    </span>
+                  ) : null
+                }
+                tooltip="只计入活跃且自动续费的 Team（已剔除异常及已取消续费的 Team）"
                 icon={Wallet}
                 toneKey="indigo"
               />
               <StatCard
                 title="闲置席位折算"
                 value={finance ? `约 ${formatMoney(idleCost, baseCurrency)}` : '—'}
-                detail={`${data.free_gpt_seats} 个空闲席位按月费分摊`}
+                tooltip={`${data.free_gpt_seats} 个空闲席位按月费分摊折算`}
                 icon={CreditCard}
                 toneKey="amber"
               />
               <StatCard
                 title="近期续费 Team"
                 value={upcomingRenewals.length}
-                detail={<>7 天内预计支出 <span className="whitespace-nowrap">{formatMoney(renewalAmountNext7, baseCurrency)}</span></>}
+                detail={renewalAmountNext7 > 0 ? <>7 天内预计支出 <span className="whitespace-nowrap">{formatMoney(renewalAmountNext7, baseCurrency)}</span></> : null}
+                tooltip={`未来 ${WINDOW_DAYS} 天内自动续费的 Team`}
                 icon={CalendarClock}
                 toneKey="rose"
               />
               <StatCard
                 title="近期到期成员"
                 value={upcomingMembers.length}
-                detail={`${WINDOW_DAYS} 天内到期，含已过期`}
+                tooltip={`${WINDOW_DAYS} 天内到期（含已过期）的成员`}
                 icon={UserRound}
                 toneKey="orange"
               />

@@ -283,19 +283,28 @@ export default function Layout() {
     const seatsUsed = teams.reduce((total, team) => total + activeChatGptSeats(team), 0);
     const seatsTotal = teams.reduce((total, team) => total + chatgptPaidSeats(team), 0);
     const attention = teams.filter((team) => needsAttention(team, syncFailures)).length;
-    return { seatsUsed, seatsTotal, attention };
+    const freeSeats = seatsTotal - seatsUsed;
+    return { seatsUsed, seatsTotal, attention, freeSeats };
   }, [teams, syncFailures]);
 
   const dashboardDescription = teams.length === 0
-    ? '每个 Team 是一个接入的 ChatGPT 工作区。点击卡片查看成员。'
+    ? '暂无接入的 Team，可通过右上角「添加 Team」开始接入。'
     : (
-      <>
-        {teams.length} 个 Team · ChatGPT 席位 {summary.seatsUsed}/{summary.seatsTotal}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs sm:text-sm text-gray-500 dark:text-ink-400">
+        <span className="inline-flex items-center gap-1.5">
+          <span className="size-1.5 rounded-full bg-blue-500" />
+          ChatGPT 席位 <span className="font-medium text-gray-700 dark:text-gray-200 tabular-nums">{summary.seatsUsed} / {summary.seatsTotal}</span>
+          <span className="text-gray-400 dark:text-ink-500">
+            {summary.freeSeats > 0 ? `（余 ${summary.freeSeats} 空位）` : summary.freeSeats === 0 ? '（已满）' : `（超员 ${-summary.freeSeats}）`}
+          </span>
+        </span>
         {summary.attention > 0 && (
-          <span className="text-amber-600 dark:text-amber-400"> · {summary.attention} 个需要处理</span>
+          <span className="inline-flex items-center gap-1.5 font-medium text-amber-600 dark:text-amber-400">
+            <span className="size-1.5 rounded-full bg-amber-500" />
+            {summary.attention} 个需处理
+          </span>
         )}
-        <span className="hidden xl:inline"> · 点击卡片查看成员</span>
-      </>
+      </div>
     );
 
   return (
@@ -422,6 +431,11 @@ export default function Layout() {
           {isDashboard ? (
             <PageShell
               title="Team 列表"
+              badge={teams.length > 0 && (
+                <span className="inline-flex items-center rounded-md bg-gray-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-gray-600 dark:bg-ink-800 dark:text-ink-300">
+                  {teams.length}
+                </span>
+              )}
               description={dashboardDescription}
               actions={
                 <div className="flex w-full items-center gap-2 md:w-auto">
@@ -504,9 +518,9 @@ export default function Layout() {
           onOpenChange={(open) => {
             if (!exporting) setExportOpen(open);
           }}
-          title="导出全部 Session？"
-          message={`将下载一个 JSON 文件，内含全部 ${teams.length} 个 Team 的 Owner 登录凭证（access token 与 session cookie）。拿到这个文件的人可以直接接管这些 Team，请只保存在安全的位置。`}
-          confirmLabel="下载文件"
+          title="导出全部 Session"
+          message={`将导出全部 ${teams.length} 个 Team 的 Owner 登录凭证（含 Access Token 与 Session Cookie），包含敏感凭据，请妥善保管。`}
+          confirmLabel="确认导出"
           loading={exporting}
           onConfirm={() => void handleExport()}
         />

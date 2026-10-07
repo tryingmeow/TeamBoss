@@ -200,20 +200,14 @@ export function seatSwitchGate(
  */
 function fullPhrase(gate: SeatGate): string {
   if (gate.over > 0) return `${gate.label} 席位已超出 ${gate.over} 个`;
-  if (gate.noSeats) return `这个 Team 还没有 ${gate.label} 席位`;
-  if (gate.capacityUnknown) return `读不到 ${gate.label} 空位，按已满处理`;
-  if (gate.free > 0) return `${gate.label} 只剩 ${gate.free} 个空位`;
+  if (gate.noSeats) return `暂无 ${gate.label} 席位`;
+  if (gate.capacityUnknown) return `未获取到 ${gate.label} 空位，按已满处理`;
+  if (gate.free > 0) return `${gate.label} 仅剩 ${gate.free} 个空位`;
   return `${gate.label} 席位已满`;
 }
 
-/**
- * "会让 ChatGPT 自动加购 N 个 Premium 席位并扣费" — but for ChatGPT seats just "会自动加购 N 个
- * ChatGPT 席位并扣费", so the sentence doesn't say ChatGPT twice.
- */
-function willBuy(label: string, count: number): string {
-  return label === SEAT_TYPES.default.label
-    ? `会自动加购 ${count} 个 ${label} 席位并扣费`
-    : `会让 ChatGPT 自动加购 ${count} 个 ${label} 席位并扣费`;
+function willBuy(_label: string, count: number): string {
+  return `自动加购 ${count} 个席位并扣费`;
 }
 
 /**
@@ -223,15 +217,14 @@ function willBuy(label: string, count: number): string {
 export function gateMessage(gate: SeatGate): string | null {
   if (gate.action === 'free') return null;
   const charge = willBuy(gate.label, gate.extra);
-  // 前半句已经以「这个 Team」开头时不再重复主语。
-  const setTo = gate.noSeats && gate.over === 0 ? '且设为' : '这个 Team 设为';
+  const setTo = gate.noSeats && gate.over === 0 ? '且设为' : '设为';
   if (gate.action === 'forbid') {
     return gate.free > 0 && !gate.capacityUnknown
       ? `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，最多再加 ${gate.free} 人。`
-      : `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，不会自动加购。要加人请先在 Team 设置里改超员策略。`;
+      : `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('forbid')}」，禁止自动加购。`;
   }
-  if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续${charge}。`;
-  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交后${charge}。`;
+  if (gate.action === 'confirm') return `${fullPhrase(gate)}，继续将${charge}（提交需确认）。`;
+  return `${fullPhrase(gate)}，${setTo}「${overagePolicyLabel('auto')}」：提交将${charge}。`;
 }
 
 /** Short hint under an option in a seat-switch menu. */
@@ -261,14 +254,14 @@ export function liveFullConfirmText({ label, teamName, count, invited, capacityU
   /** The server did not accept the confirmation sent with this email (used up or expired). */
   reconfirm?: boolean;
 }): string {
-  const team = teamName ? `「${teamName}」` : '这个 Team ';
-  const done = invited > 0 ? `已邀请 ${invited} 个。` : '';
-  const again = reconfirm ? '之前的确认已用完或失效，需要重新确认。' : '';
+  const team = teamName ? `「${teamName}」` : '';
+  const done = invited > 0 ? `已邀请 ${invited} 人。` : '';
+  const again = reconfirm ? '确认已失效，需重新确认。' : '';
   const full = capacityUnknown
-    ? `读不到${team}的 ${label} 空位，按已满处理，`
-    : `${team}${label} 席位已满（刚核对），`;
-  const who = invited > 0 ? `剩下的 ${count} 个邮箱` : count > 1 ? `这 ${count} 个邮箱` : '';
-  return `${again}${done}${full}${who}继续${willBuy(label, count)}。`;
+    ? `未获取到${team}的 ${label} 空位，按已满处理，`
+    : `${team}${label} 席位已满，`;
+  const who = invited > 0 ? `剩余 ${count} 个邮箱` : count > 1 ? `这 ${count} 个邮箱` : '';
+  return `${again}${done}${full}${who}继续将自动加购 ${count} 个席位并扣费。`;
 }
 
 /** Confirm text before switching a member into a full billed type. */
@@ -276,9 +269,9 @@ export function switchConfirmText(gate: SeatGate): string {
   const lead = gate.over > 0
     ? `${gate.label} 席位已超出 ${gate.over} 个，`
     : gate.noSeats
-      ? `这个 Team 还没有 ${gate.label} 席位，`
-      : gate.capacityUnknown ? `读不到 ${gate.label} 空位，按已满处理：` : `${gate.label} 席位已满，`;
-  return `${lead}切换过去${willBuy(gate.label, 1)}。`;
+      ? `暂无 ${gate.label} 席位，`
+      : gate.capacityUnknown ? `未获取到 ${gate.label} 空位，按已满处理：` : `${gate.label} 席位已满，`;
+  return `${lead}切换将自动加购 1 个席位并扣费。`;
 }
 
 /** "其中 22 个在「Aurora」自动加购并扣费" — the invites that made ChatGPT buy a seat. */

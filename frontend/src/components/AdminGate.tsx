@@ -71,7 +71,7 @@ export default function AdminGate({ children }: AdminGateProps) {
       <form onSubmit={handleLogin} className={`${CARD} p-6 shadow-sm sm:p-7`}>
         <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">管理员登录</h1>
         <p className="mt-1 text-sm text-gray-500 dark:text-ink-400">
-          首次登录使用部署时设置的 <code className="rounded bg-gray-100 px-1 py-0.5 text-xs text-gray-700 dark:bg-ink-800 dark:text-ink-200">AUTO_TEAM_ADMIN_PASSWORD</code>，在后台改过密码则用新密码。
+          请输入管理员密码登录（初始密码为环境变量 <code className="rounded bg-gray-100 px-1 py-0.5 text-xs text-gray-700 dark:bg-ink-800 dark:text-ink-200">AUTO_TEAM_ADMIN_PASSWORD</code>）。
         </p>
 
         <label htmlFor="admin-password" className="mt-6 mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
