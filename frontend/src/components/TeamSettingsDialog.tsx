@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeftRight, ChevronDown, Loader2 } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowLeftRight, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
 import type { OveragePolicy, Team, TeamWorkspaceSettings, WorkspaceDefaultSeatType } from '../types';
 import {
   checkProxy,
@@ -15,6 +15,7 @@ import { SEAT_PRICE_UNKNOWN_TEXT, YEARLY_PURCHASE_NOTE, formatSeatPrice, teamSea
 import ConfirmDialog from './ConfirmDialog';
 import DialogFrame from './DialogFrame';
 import { cn } from '../lib/utils';
+import { formatBeijingDateTime } from '../lib/formatDate';
 
 interface TeamSettingsDialogProps {
   open: boolean;
@@ -55,7 +56,8 @@ export default function TeamSettingsDialog({
   onTeamUpdated,
   billing,
 }: TeamSettingsDialogProps) {
-  const [settings, setSettings] = useState<TeamWorkspaceSettings | null>(null);
+  const [settings, setSettings] = useState<TeamWorkspaceSettings | null>(initialSettings ?? null);
+  const settingsRequestId = useRef(0);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -108,27 +110,31 @@ export default function TeamSettingsDialog({
     void savePolicy(next);
   };
 
-  useEffect(() => {
-    if (!open) return;
-
-    let cancelled = false;
-    if (initialSettings) {
-      setSettings({ ...initialSettings, default_seat_type: normalizeWorkspaceSeatType(initialSettings.default_seat_type) });
-    }
+  const refreshSettings = async (refresh: boolean) => {
+    const requestId = ++settingsRequestId.current;
     setLoading(true);
     setError('');
-    setSelectedProxyId(currentProxyId);
+    try {
+      const data = await fetchTeamWorkspaceSettings(teamId, refresh);
+      if (requestId !== settingsRequestId.current) return;
+      const normalized = { ...data, default_seat_type: normalizeWorkspaceSeatType(data.default_seat_type) };
+      setSettings(normalized);
+      onChanged?.(normalized);
+    } catch (err) {
+      if (requestId === settingsRequestId.current) setError(err instanceof Error ? err.message : '加载失败');
+    } finally {
+      if (requestId === settingsRequestId.current) setLoading(false);
+    }
+  };
 
-    fetchTeamWorkspaceSettings(teamId)
-      .then((data) => {
-        if (!cancelled) setSettings({ ...data, default_seat_type: normalizeWorkspaceSeatType(data.default_seat_type) });
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : '加载失败');
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+  useLayoutEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setSettings(initialSettings ?? null);
+    setLoading(false);
+    setError('');
+    setSelectedProxyId(currentProxyId);
+    if (!initialSettings) void refreshSettings(false);
 
     fetchProxies()
       .then(async (list) => {
@@ -158,14 +164,11 @@ export default function TeamSettingsDialog({
 
     return () => {
       cancelled = true;
+      ++settingsRequestId.current;
     };
-    // initialSettings 特意不放进依赖:它是 TeamCard 的 workspaceSettings state,
-    // 每次 syncTeam(含结算轮询的每一次 tick)都会给出一个内容可能完全相同的新
-    // 对象引用。放进依赖会导致弹窗打开期间只要父组件刷新就整段重新拉取,
-    // 把"查询中..."重新拍回来。只在 open/teamId/currentProxyId 变化时重新拉取,
-    // 弹窗刚打开那一次仍然用 initialSettings 做首屏内容(如果有的话)。
+    // Seed only when opening; parent refreshes must not restart an in-progress request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, teamId, currentProxyId]);
+  }, [open, teamId]);
 
   const currentSeat = useMemo<WorkspaceDefaultSeatType>(
     () => normalizeWorkspaceSeatType(settings?.default_seat_type),
@@ -222,6 +225,7 @@ export default function TeamSettingsDialog({
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
+      ++settingsRequestId.current;
       setConfirmOpen(false);
       setConfirmAutoOpen(false);
     }
@@ -348,10 +352,17 @@ export default function TeamSettingsDialog({
         <div className="flex items-center justify-between gap-3 p-3">
           <div className="min-w-0">
             <div className="text-sm font-medium text-gray-900 dark:text-gray-100">默认邀请席位</div>
+            <div className="mt-1 text-xs text-gray-500 dark:text-ink-400">
+              {settings ? (settings.cached_at ? `刷新于 ${formatBeijingDateTime(settings.cached_at)}` : '已缓存，刷新时间未知') : '尚无缓存'}
+            </div>
+            <button type="button" onClick={() => { void refreshSettings(true); }} disabled={loading || saving}
+              className="mt-1 inline-flex items-center gap-1 text-xs text-blue-600 disabled:opacity-50 dark:text-blue-400">
+              <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />{loading ? '刷新中…' : '刷新'}
+            </button>
           </div>
           <button
             type="button"
-            disabled={loading || !settings}
+            disabled={loading || saving || !settings}
             onClick={() => setConfirmOpen(true)}
             className={cn(
               'inline-flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50',
@@ -359,13 +370,13 @@ export default function TeamSettingsDialog({
               SEAT_STYLE[currentSeat].text,
               'hover:brightness-95 dark:hover:brightness-125',
             )}
-            aria-label={`默认邀请席位：${formatSeatTypeLabel(currentSeat)}，点击切换`}
+            aria-label={settings ? `默认邀请席位：${formatSeatTypeLabel(currentSeat)}，点击切换` : '默认邀请席位尚未加载'}
             title="切换"
           >
-            {loading ? (
+            {!settings ? (
               <>
                 <Loader2 size={14} className="animate-spin" />
-                查询中…
+                {loading ? '查询中…' : '未知'}
               </>
             ) : (
               <>
@@ -405,6 +416,7 @@ export default function TeamSettingsDialog({
               className="h-9 w-full cursor-pointer appearance-none truncate rounded-lg border border-gray-200 bg-white pl-7 pr-8 text-sm text-gray-700 transition-colors hover:border-gray-300 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/30 disabled:opacity-50 dark:border-ink-800 dark:bg-ink-950 dark:text-gray-200 dark:hover:border-ink-700"
             >
               <option value="">直连</option>
+              {selectedProxyId !== null && !selectedProxy && <option value={selectedProxyId}>当前代理（加载中）</option>}
               {proxies.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
@@ -414,7 +426,7 @@ export default function TeamSettingsDialog({
         </div>
       </div>
 
-      {error && <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+      {error && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </DialogFrame>
   );
 }

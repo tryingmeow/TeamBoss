@@ -60,6 +60,9 @@ interface AddMemberDialogProps {
   title?: string;
   fixedSeatType?: SeatType;
   submitLabel?: string;
+  initializing?: boolean;
+  initializationError?: string;
+  onRetryInitialization?: () => void;
   /** `meta.shownInDialog`: the dialog stays open and already shows this result (no toast needed). */
   onSuccess: (result?: unknown, meta?: { shownInDialog?: boolean }) => void;
   submitInvites?: (data: {
@@ -262,6 +265,9 @@ export default function AddMemberDialog({
   title = '添加成员',
   fixedSeatType,
   submitLabel = '确认添加',
+  initializing = false,
+  initializationError = '',
+  onRetryInitialization,
   onSuccess,
   submitInvites,
 }: AddMemberDialogProps) {
@@ -292,7 +298,7 @@ export default function AddMemberDialog({
   const emails = parseEmails(email);
   const pendingByType = useMemo(() => pendingCountsByType(pendingInvites), [pendingInvites]);
   // 单个 Team 才能事先判断：缓存的空位 + 这个 Team 的超员策略。服务端还会用实时数据再判一次。
-  const gate = teamId && team
+  const gate = !initializing && !initializationError && teamId && team
     ? seatGate(team, effectiveSeatType, pendingInvites ? pendingByType : teamPendingCounts(team), emails.length)
     : null;
   const gateText = gate ? gateMessage(gate) : null;
@@ -544,7 +550,7 @@ export default function AddMemberDialog({
       setError('请输入邮箱地址');
       return;
     }
-    if (blocked || checkingSeats) return;
+    if (initializing || initializationError || blocked || checkingSeats) return;
     setError('');
     setBatchResult(null);
     setLeftoverText('');
@@ -569,7 +575,7 @@ export default function AddMemberDialog({
   };
 
   const handleConfirmOverage = async () => {
-    if (!ask) return;
+    if (!ask || initializing || initializationError) return;
     setLoading(true);
     try {
       if (submitInvites) await submitBatch(ask.emails, true, ask.batch);
@@ -609,7 +615,7 @@ export default function AddMemberDialog({
   const checkingSeats = batchMode && usageStale;
 
   // 会花钱的说法优先：按钮上永远写着要加购几席。
-  const submitText = loading
+  const submitText = initializing ? '加载中…' : initializationError ? '加载失败' : loading
     ? '添加中…'
     : checkingSeats
       ? '核对空位中…'
@@ -645,11 +651,11 @@ export default function AddMemberDialog({
           <button
             type="button"
             onClick={() => { void handleSubmit(); }}
-            disabled={loading || blocked || checkingSeats}
+            disabled={initializing || Boolean(initializationError) || loading || blocked || checkingSeats}
             title={blocked ? gateText ?? undefined : undefined}
             className={BUTTON.primary}
           >
-            {(loading || checkingSeats) && <Loader2 size={14} className="animate-spin" />}
+            {(initializing || loading || checkingSeats) && <Loader2 size={14} className="animate-spin" />}
             {submitText}
           </button>
         </>
@@ -671,6 +677,22 @@ export default function AddMemberDialog({
       }
     >
       <div className="space-y-5">
+        {initializing && (
+          <div role="status" className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200">
+            <p className="flex items-center gap-2"><Loader2 size={14} className="animate-spin" />正在核对成员、待接受邀请与席位…</p>
+            <p className="mt-1 text-xs">可先填写邮箱，加载完成后即可提交。</p>
+            <details className="mt-2 text-xs">
+              <summary className="cursor-pointer underline decoration-dotted underline-offset-2">加载慢？</summary>
+              <p className="mt-2 leading-5">系统正在加载成员和席位信息，以核对空位和加购费用。缓存需要更新时会向 ChatGPT 同步，耗时取决于上游接口与网络响应，请稍候。</p>
+            </details>
+          </div>
+        )}
+        {initializationError && (
+          <div role="alert" className="rounded-lg border border-red-200 p-3 text-sm text-red-600 dark:border-red-500/30 dark:text-red-400">
+            <p>成员与席位加载失败，暂时无法提交：{initializationError}</p>
+            <button type="button" onClick={onRetryInitialization} className="mt-2 underline">重新加载</button>
+          </div>
+        )}
         <div>
           <label htmlFor="add-member-emails" className={LABEL}>
             {retrying ? '没加上的邮箱' : '邮箱'} <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>

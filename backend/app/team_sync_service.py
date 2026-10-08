@@ -90,6 +90,14 @@ def cached_default_seat_type(raw: str | None) -> str | None:
     return normalize_default_seat_type(settings)
 
 
+def cached_workspace_settings_at(raw: str | None) -> str | None:
+    cached_data = _decode_cached_data(raw)
+    if not isinstance(cached_data.get("workspace_settings"), dict):
+        return None
+    value = cached_data.get("workspace_settings_cached_at")
+    return value if isinstance(value, str) else None
+
+
 def _workspace_response(settings: dict[str, Any], cached_at: str | None, cached: bool) -> dict[str, Any]:
     return {
         "default_seat_type": normalize_default_seat_type(settings),

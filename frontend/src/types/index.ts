@@ -10,6 +10,7 @@ export interface Team {
   chatgpt_count: number;
   is_codex_enabled: boolean;
   default_seat_type: WorkspaceDefaultSeatType | null;
+  workspace_settings_cached_at?: string | null;
   billing_currency: string;
   billing_symbol: string | null;
   billing_period: string | null;

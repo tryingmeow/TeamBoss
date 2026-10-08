@@ -329,6 +329,7 @@ function buildTeam(spec: TeamSpec, now: number, nextPerson: () => PoolPerson): D
     chatgpt_count: 0,
     is_codex_enabled: spec.codexEnabled,
     default_seat_type: spec.defaultSeat,
+    workspace_settings_cached_at: isoAt(lastFullSync),
     billing_currency: spec.currency,
     billing_symbol: spec.symbol,
     billing_period: spec.period,

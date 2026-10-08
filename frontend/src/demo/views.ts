@@ -188,7 +188,7 @@ export function workspaceSettings(record: DemoTeam, cached = true): TeamWorkspac
     default_seat_type: seat,
     settings: { default_seat_type: seat },
     cached,
-    cached_at: record.cacheUpdatedAt,
+    cached_at: record.team.workspace_settings_cached_at ?? null,
   };
 }
 

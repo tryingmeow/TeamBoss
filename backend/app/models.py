@@ -28,6 +28,7 @@ class TeamResponse(BaseModel):
     chatgpt_count: int
     is_codex_enabled: bool = False
     default_seat_type: Optional[WorkspaceDefaultSeatTypeLiteral] = None
+    workspace_settings_cached_at: Optional[str] = None
     billing_currency: str
     billing_symbol: Optional[str] = None
     billing_period: Optional[str] = None

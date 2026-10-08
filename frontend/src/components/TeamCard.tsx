@@ -228,18 +228,10 @@ export default function TeamCard({
   const [showExactTime, setShowExactTime] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
-  const [slowAddMemberInfoOpen, setSlowAddMemberInfoOpen] = useState(false);
-  const slowInfoOpenRef = useRef(false);
-  const pendingOpenAddMemberRef = useRef(false);
+  const inviteRequestId = useRef(0);
+  const [inviteError, setInviteError] = useState('');
+  const [inviteSnapshot, setInviteSnapshot] = useState<Awaited<ReturnType<typeof syncTeam>> | null>(null);
 
-  const handleSlowInfoOpenChange = (open: boolean) => {
-    setSlowAddMemberInfoOpen(open);
-    slowInfoOpenRef.current = open;
-    if (!open && pendingOpenAddMemberRef.current) {
-      pendingOpenAddMemberRef.current = false;
-      setAddMemberOpen(true);
-    }
-  };
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [billingOpen, setBillingOpen] = useState(false);
   const [defaultSeatInfoOpen, setDefaultSeatInfoOpen] = useState(false);
@@ -447,26 +439,43 @@ export default function TeamCard({
     await handleSyncTeam(true);
   };
 
-  const handleOpenAddMember = async () => {
-    if (openingAddMember) return;
+  const initializeInvite = async () => {
+    const requestId = ++inviteRequestId.current;
+    const syncRequestId = ++latestRequestId.current;
     setOpeningAddMember(true);
-    pendingOpenAddMemberRef.current = false;
+    setInviteError('');
+    setInviteSnapshot(null);
     try {
-      await handleSyncTeam(false);
-      if (!slowInfoOpenRef.current) {
-        setAddMemberOpen(true);
-      } else {
-        pendingOpenAddMemberRef.current = true;
+      const result = await syncTeam(team.id, false);
+      if (!mountedRef.current || requestId !== inviteRequestId.current) return;
+      setInviteSnapshot(result);
+      if (syncRequestId === latestRequestId.current) {
+        setMembersData(result.members);
+        setWorkspaceSettings(result.workspace_settings);
+        onSyncSucceeded(result.team);
       }
+    } catch (err) {
+      if (!mountedRef.current || requestId !== inviteRequestId.current) return;
+      setInviteError(err instanceof Error ? err.message : '加载失败');
     } finally {
-      setOpeningAddMember(false);
+      if (mountedRef.current && requestId === inviteRequestId.current) setOpeningAddMember(false);
     }
   };
 
-  const handleOpenSettings = async () => {
-    await handleSyncTeam(false);
-    setSettingsOpen(true);
+  const handleInviteOpenChange = (open: boolean) => {
+    if (!open) {
+      ++inviteRequestId.current;
+      setOpeningAddMember(false);
+    }
+    setAddMemberOpen(open);
   };
+
+  const handleOpenAddMember = () => {
+    setAddMemberOpen(true);
+    void initializeInvite();
+  };
+
+  const handleOpenSettings = () => setSettingsOpen(true);
 
   const handleOpenRemark = () => {
     setRemarkDraft(team.remark ?? '');
@@ -895,29 +904,13 @@ export default function TeamCard({
               <button
                 type="button"
                 onClick={(e) => { e.stopPropagation(); void handleOpenAddMember(); }}
-                disabled={openingAddMember || isSubscriptionExpired}
+                disabled={isSubscriptionExpired}
                 title={isSubscriptionExpired ? '订阅已到期，不能添加成员' : undefined}
                 className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-blue-500/15 dark:text-blue-300 dark:hover:bg-blue-500/25"
               >
-                {openingAddMember ? (
-                  <Loader2 size={14} className="animate-spin" />
-                ) : (
-                  <UserPlus size={14} />
-                )}
-                {openingAddMember ? '加载中' : '添加成员'}
+                <UserPlus size={14} />
+                添加成员
               </button>
-              {openingAddMember && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleSlowInfoOpenChange(true);
-                  }}
-                  className="inline-flex items-center text-xs text-gray-400 hover:text-gray-600 dark:text-ink-400 dark:hover:text-ink-200 underline decoration-dotted underline-offset-2 transition-colors cursor-pointer"
-                >
-                  加载慢？
-                </button>
-              )}
             </div>
             <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-gray-400 transition-colors group-hover:text-blue-600 dark:text-ink-500 dark:group-hover:text-blue-400">
               {expanded ? '收起成员' : '查看成员'}
@@ -1033,48 +1026,16 @@ export default function TeamCard({
 
       <TeamBillingDialog open={billingOpen} onOpenChange={setBillingOpen} team={team} />
 
-      <DialogFrame
-        open={slowAddMemberInfoOpen}
-        onOpenChange={handleSlowInfoOpenChange}
-        size="sm"
-        title="加载慢的原因"
-        description="为什么打开添加成员需要加载？"
-        footer={
-          <button
-            type="button"
-            onClick={() => handleSlowInfoOpenChange(false)}
-            className={BUTTON.primary}
-          >
-            知道了
-          </button>
-        }
-      >
-        <div className="space-y-3 text-sm leading-6 text-gray-600 dark:text-ink-300">
-          <div className="flex items-start gap-2.5 rounded-lg bg-blue-50/70 p-3 text-blue-900 dark:bg-blue-500/10 dark:text-blue-200">
-            <RefreshCw size={16} className="mt-1 shrink-0 text-blue-600 dark:text-blue-400" />
-            <div>
-              <p className="font-semibold text-sm">邀请前实时刷新成员列表</p>
-              <p className="mt-0.5 text-xs text-blue-700/80 dark:text-blue-300/80">
-                向 ChatGPT 实时同步最新成员与席位状态
-              </p>
-            </div>
-          </div>
-          <p>
-            为确保席位计算与加购策略准确，避免多人操作产生冲突或费用误差，在打开添加成员窗口前，系统会先向 ChatGPT 实时拉取当前 Team 最新的成员与待接受邀请数据。
-          </p>
-          <p className="text-xs text-gray-400 dark:text-ink-500">
-            受 ChatGPT 上游接口及网络响应影响，通常需要 1～3 秒，请稍候。
-          </p>
-        </div>
-      </DialogFrame>
-
       <AddMemberDialog
         open={addMemberOpen}
-        onOpenChange={setAddMemberOpen}
+        onOpenChange={handleInviteOpenChange}
         teamId={team.id}
         teamName={teamDisplayName}
-        team={team}
-        pendingInvites={membersData?.pending_invites}
+        team={inviteSnapshot?.team}
+        pendingInvites={inviteSnapshot?.members.pending_invites}
+        initializing={openingAddMember}
+        initializationError={inviteError}
+        onRetryInitialization={() => { void initializeInvite(); }}
         onSuccess={startMemberSettle}
       />
 
@@ -1091,10 +1052,14 @@ export default function TeamCard({
           ...updated,
           cached_member_emails: updated.cached_member_emails ?? team.cached_member_emails ?? [],
         })}
-        initialSettings={workspaceSettings}
+        initialSettings={workspaceSettings ?? (team.default_seat_type ? {
+          default_seat_type: team.default_seat_type,
+          cached: true,
+          cached_at: team.workspace_settings_cached_at,
+        } : null)}
         onChanged={(settings) => {
           setWorkspaceSettings(settings);
-          onTeamSynced({ ...team, default_seat_type: settings.default_seat_type });
+          onTeamSynced({ ...team, default_seat_type: settings.default_seat_type, workspace_settings_cached_at: settings.cached_at });
         }}
         onProxyChanged={(proxyId) => onTeamSynced({ ...team, proxy_id: proxyId })}
       />

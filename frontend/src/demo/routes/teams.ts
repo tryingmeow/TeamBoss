@@ -151,6 +151,7 @@ function markHealthy(record: DemoTeam): void {
     sync_failing_since: null,
     sync_suspended_at: null,
     last_full_sync_at: now,
+    workspace_settings_cached_at: now,
     last_sync_partial_failures: [],
   } satisfies Partial<Team>);
   record.cacheUpdatedAt = now;
@@ -198,6 +199,7 @@ function syncTeam(ctx: DemoContext): DemoResponse {
   if (refreshed) {
     record.cacheUpdatedAt = isoAt(Date.now());
     record.team.last_full_sync_at = record.cacheUpdatedAt;
+    record.team.workspace_settings_cached_at = record.cacheUpdatedAt;
     appendLog(ctx.db, { team_id: record.team.id, action: 'sync_team', detail: 'force=true' });
   }
   return ok({
@@ -301,6 +303,7 @@ function setDefaultSeat(ctx: DemoContext): DemoResponse {
   const seat = parseWorkspaceDefault(bodyObject(ctx).seat_type);
   if (!seat) return fail(422, SEAT_INVALID);
   record.team.default_seat_type = seat;
+  record.team.workspace_settings_cached_at = isoAt(Date.now());
   record.cacheUpdatedAt = isoAt(Date.now());
   appendLog(ctx.db, { team_id: record.team.id, action: 'change_default_seat_type', detail: `seat_type=${seat}` });
   return ok(workspaceSettings(record, false));
@@ -781,7 +784,14 @@ export const teamRoutes: DemoRoute[] = [
     pattern: '/api/teams/:teamId/workspace-settings',
     handler: (ctx) => {
       const record = teamOr404(ctx);
-      return isResponse(record) ? record : ok(workspaceSettings(record));
+      if (isResponse(record)) return record;
+      const refresh = queryFlag(ctx, 'refresh');
+      if (refresh) {
+        const blocked = upstreamBlocked(record);
+        if (blocked) return blocked;
+        record.team.workspace_settings_cached_at = isoAt(Date.now());
+      }
+      return ok(workspaceSettings(record, !refresh));
     },
   },
   { method: 'POST', pattern: '/api/teams/:teamId/workspace-settings/default-seat-type', handler: setDefaultSeat },

@@ -32,6 +32,7 @@ from ..services.user_display_names import attach_display_names
 from ..team_sync_service import (
     TEAM_CACHE_TTL_SECONDS,
     cached_default_seat_type,
+    cached_workspace_settings_at,
     fetch_and_cache_workspace_settings,
     get_cached_workspace_settings,
     member_emails_from_members_data,
@@ -132,6 +133,7 @@ def _team_row_to_response(row, pending_json=_READ_FROM_DB, invoice_count=_READ_F
     )
     d["is_codex_enabled"] = bool(d.get("is_codex_enabled", 0))
     d["default_seat_type"] = cached_default_seat_type(d.get("cached_data"))
+    d["workspace_settings_cached_at"] = cached_workspace_settings_at(d.get("cached_data"))
     d["days_remaining"] = _compute_days_remaining(d.get("active_until"))
     d["overage_policy"] = normalize_overage_policy(d.get("overage_policy"))
     d["seat_capacity"] = cached_seat_capacity(d.get("seat_capacity_json"))
