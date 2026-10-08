@@ -152,7 +152,7 @@ class UnavailableTeamMembershipBlocksRedemptionTest(_RedeemFlowTest):
         self.assertEqual([u["result"] for u in uses], ["failed"])
         # 拒绝前要先实时扫描可用 Team（人若在其中就该走选择提示而不是拒绝），所以这次
         # 尝试像其他实时查询之后的拒绝一样计入预算。没有可用 Team 时的纯本地拒绝仍全额
-        # 退回，见 test_final_fix_g1_redeem。
+        # 退回，见 test_redeem_unavailable_team。
         self.assertEqual(len(self.budget._per_code_hits.get(token_id, [])), 1)
         self.assertEqual(len(self.budget._global_hits), 1)
 

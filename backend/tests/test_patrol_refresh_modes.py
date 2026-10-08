@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import HTTPException  # noqa: I001  (_isolation first)
 
 from test_premium_patrol import RecordingClient, _member
-from test_review2_patrol import PROD_OWNER, _Fixture, _outsider
+from test_patrol_overage_kick import PROD_OWNER, _Fixture, _outsider
 
 from app.routes import patrol as patrol_routes
 from app.services import patrol
