@@ -30,9 +30,9 @@ Docker 发布端口的规则可能绕过 UFW / firewalld 的宿主机过滤链�
    }
    ```
 
-   这段配置需放在已有证书的 HTTPS 站点内。若宿主机前面还有 CDN / 负载均衡，也需先按其实际来源配置可信代理，不能直接相信访客自带的头。
+   这段配置需放在已有证书的 HTTPS 站点内。Caddy 默认会透传访客自带的 `X-Real-IP`，需在 `reverse_proxy` 中加上 `header_up X-Real-IP {remote_host}` 覆盖它。若宿主机前面还有 CDN / 负载均衡，也需先按其实际来源配置可信代理，不能直接相信访客自带的头。
 
-2. **容器内 Nginx**：在 [`docker/nginx.conf`](../docker/nginx.conf) 中启用 `set_real_ip_from` 和 `real_ip_header X-Real-IP`，将前者设为上一层反代的实际连接来源 IP / 网段。不要照抄示例网段；Docker 转发后的来源可能是网桥网关。修改后重建前端容器使配置生效。
+2. **容器内 Nginx**：保持 `AUTO_TEAM_BIND` 为回环地址（默认）时，容器启动时会自动采信来自私有网段的 `X-Real-IP`。此时能连到容器的只有宿主机本地进程（经 Docker 网桥网关转发），所以宿主机反代必须按上一步**覆盖**这个头。`AUTO_TEAM_BIND` 改成其他地址后默认不采信任何来源；若前面确实还有一层反代，用 `AUTO_TEAM_REAL_IP_FROM` 填它的实际连接来源 IP / CIDR（逗号分隔，`none` 表示都不信），改完需重建前端容器。生成逻辑见 [`docker/real-ip.sh`](../docker/real-ip.sh)。
 3. **后端**：`AUTO_TEAM_TRUSTED_PROXIES` 只填写可信反代的连接来源 IP / CIDR。后端只采信这些来源发来的 IP 头。裸机 API 没有反代、直接接受客户端连接时，应设为空。
 
 如果容器没有正确恢复客户端 IP，所有访客可能都显示成同一个网桥地址。后端会记录共享身份 warning，并采用全站冷却；这不能替代正确的代理配置，管理员也可能需要等冷却。
