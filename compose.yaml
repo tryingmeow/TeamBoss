@@ -33,6 +33,10 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    environment:
+      # docker/real-ip.sh 据此决定是否采信宿主机反代传来的 X-Real-IP，见 docker/nginx.conf。
+      AUTO_TEAM_BIND: ${AUTO_TEAM_BIND:-127.0.0.1}
+      AUTO_TEAM_REAL_IP_FROM: ${AUTO_TEAM_REAL_IP_FROM:-}
     ports:
       # 默认只绑回环：全链路是明文 HTTP，直接挂公网等于把管理员密码和 API Key 裸奔。
       # 正确做法是在宿主机上用 Nginx/Caddy 配好 TLS 再反代到这个端口。
