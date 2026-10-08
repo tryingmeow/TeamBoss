@@ -30,7 +30,7 @@ from app.routes import access_tokens
 from app.routes import teams as teams_routes
 from app.utils.durations import expiry_from_duration
 
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 TEAM = "team-t"
 OTHER_TEAM = "team-u"
 ABSENT = {"members": [], "pending_invites": []}
@@ -226,7 +226,7 @@ class LoggedOutTeamTest(_DeleteTeamCase):
         self.assertIn("Team T 登录已失效", detail)
         self.assertIn("重新导入恢复登录", detail)
         self.assertIn("直接确认成功", detail)
-        self.assertIn("确认成功把这条记录收尾，再给客户换发一张同面额的新码", detail)
+        self.assertIn("确认成功把这条记录收尾，再给成员换发一张同规格的新码", detail)
 
         # 确认失败 needs the live list of T and is refused while T is logged out.
         with self.assertRaises(HTTPException) as caught:
@@ -250,7 +250,7 @@ class LoggedOutTeamTest(_DeleteTeamCase):
 
         self.assertIn(f"#{token_use_id}", detail)
         self.assertIn("Team T 的成员名单已读不到（同步已暂停）", detail)
-        self.assertIn("确认成功把这条记录收尾，再给客户换发一张同面额的新码", detail)
+        self.assertIn("确认成功把这条记录收尾，再给成员换发一张同规格的新码", detail)
         self.assertNotIn("手动邀请", detail)
 
     def test_active_team_refusal_has_no_login_clause(self):

@@ -308,7 +308,7 @@ class SnapshotWritersTest(_Fixture):
 
 
 
-# ═══ K2：TeamBoss 以前拉过 / 卖过席位的人重新出现，不踢、只提醒 ═══════════════════
+# ═══ K2：TeamBoss 以前拉过 / 分配过席位的人重新出现，不踢、只提醒 ═══════════════════
 
 class ManagedHistoryVetoTest(_Fixture):
     def _history_row(self, team_id, email, user_id, *, source, kicked, created_at, kicked_at,
@@ -375,7 +375,7 @@ class ManagedHistoryVetoTest(_Fixture):
                                          rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
         conn.close()
         self.assertFalse(ok)
-        self.assertIn("placed or sold a seat", reason)
+        self.assertIn("placed or assigned a seat", reason)
         self.assertEqual(self._calls("remove_member"), [])
 
     def test_every_teamboss_record_shape_blocks_the_kick(self):
@@ -404,7 +404,7 @@ class ManagedHistoryVetoTest(_Fixture):
 
     def test_kick_audit_row_and_refunded_redemption_do_not_block(self):
         # 踢人时没有记录补写的审计行（system、kicked=1、kicked_at = created_at）不是 TeamBoss
-        # 拉的人；退回的兑换（failed）没卖出席位。这两样都不挡踢人。
+        # 拉的人；退回的兑换（failed）没分配出席位。这两样都不挡踢人。
         team_id = "team-k2-none"
         member = _member("x@example.com", "u-x", seat_type="prolite")
         self._history_row(team_id, "x@example.com", "u-x", source="system", kicked=1,
@@ -572,14 +572,14 @@ class OverQuotaHistoryAndGuardTest(_Fixture):
         ok, reason = patrol._patrol_kick(conn, RecordingClient(), "team-oq-k2", payer)
         conn.close()
         self.assertFalse(ok)
-        self.assertIn("placed or sold a seat", reason)
+        self.assertIn("placed or assigned a seat", reason)
         self.assertEqual(self._calls("remove_member"), [])
 
     def test_redemption_alone_keeps_a_member_out_of_over_quota_candidates(self):
         team_id = "team-oq-k2-redeem"
-        buyer = _member("buyer@example.com", "u-buy", first_seen_at="2026-08-02T00:00:00+00:00")
-        self._redemption(team_id, "buyer@example.com", result="pending")
-        self._armed_team(team_id, [OWNER, KEEPER, buyer], seats_entitled=1)
+        redeemer = _member("redeemer@example.com", "u-buy", first_seen_at="2026-08-02T00:00:00+00:00")
+        self._redemption(team_id, "redeemer@example.com", result="pending")
+        self._armed_team(team_id, [OWNER, KEEPER, redeemer], seats_entitled=1)
 
         result = self._patrol(dry_run=True)
 

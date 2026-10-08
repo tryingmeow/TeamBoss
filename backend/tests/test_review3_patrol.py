@@ -294,7 +294,7 @@ class RedemptionProtectionEndsTest(_R3Fixture):
                 self.assertEqual(self._calls("remove_member"), [("remove_member", self.USER_ID)])
 
     def test_premium_code_use_ends_with_the_service(self):
-        # Premium 兑换码卖出的席位：到期之后从外面回来占 Premium，是普通外部成员。
+        # Premium 兑换码分配出的席位：到期之后从外面回来占 Premium，是普通外部成员。
         team_id = "team-f6-code-expired"
         member = _member(self.EMAIL, self.USER_ID, seat_type="prolite")
         self._redeem(team_id, self.EMAIL, REDEEMED, seat_type="prolite")

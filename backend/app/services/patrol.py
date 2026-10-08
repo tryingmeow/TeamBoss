@@ -979,7 +979,7 @@ def _patrol_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id: str,
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
         if _teamboss_managed_history_sync(conn, team_id, cached_email, cached_user_id):
-            reason = "rejected: TeamBoss placed or sold a seat to this member before"
+            reason = "rejected: TeamBoss placed or assigned a seat to this member before"
             _log_operation_sync(team_id, "patrol_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
 
@@ -1655,7 +1655,7 @@ def _premium_kick_veto_sync(conn: sqlite3.Connection, team_id: str, email: str, 
     if _teamboss_seat_record_sync(conn, team_id, email, user_id):
         return "TeamBoss has a seat or invite record for this member"
     if _teamboss_managed_history_sync(conn, team_id, email, user_id):
-        return "TeamBoss placed or sold a seat to this member before"
+        return "TeamBoss placed or assigned a seat to this member before"
     return None
 
 
@@ -2258,7 +2258,7 @@ def run_patrol(
                             "premium_count": len(premium_outsiders), "team_size": len(members),
                         })
                         premium_outsiders = []
-                    # TeamBoss 有记录的人（改过他的席位 / 邀请过他、卖过还在保护期的 Premium、还在管或因
+                    # TeamBoss 有记录的人（改过他的席位 / 邀请过他、分配过还在保护期的 Premium、还在管或因
                     # 不在名单才没在管、兑换还在保护期）不进候选，交给席位提醒。
                     premium_candidates = [
                         c for c in premium_outsiders

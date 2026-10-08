@@ -300,7 +300,7 @@ class BackfillResolvesOrphanedBarrierTest(_TempDbTest):
 
 class FallbackBackfillAddsDurationTest(_TempDbTest):
     def test_further_out_existing_expiry_still_gains_the_purchased_duration(self):
-        """原先取 max(行内到期, 现有到期)：现有到期更远时，这次买的时长凭空蒸发，
+        """原先取 max(行内到期, 现有到期)：现有到期更远时，这次授予的时长凭空蒸发，
         而兑换还被置成 success，用户和管理员都看不到任何异常。
         """
         token_use_id = self._new_token_use()

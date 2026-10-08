@@ -2,7 +2,7 @@
 
 1. Local evidence of membership in an unavailable Team (token_expired, login
    rejected) must only stop a redemption whose next step would be a new invite.
-   A customer who picks a live Team they belong to is renewed there; a customer
+   A member who picks a live Team they belong to is renewed there; a member
    who picks nothing gets the multi-Team prompt with the dead Team listed as not
    renewable.
 2. Turning a pending invite into "uncertain" and arming its patrol barrier is
@@ -33,7 +33,7 @@ from app import database as app_database
 from app.routes import access_tokens
 from app.utils.durations import utc_now
 
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 CREATED = "2026-09-01T00:00:00+00:00"
 FUTURE = "2027-01-01T00:00:00+00:00"
 LATER = "2027-02-01T00:00:00+00:00"
@@ -163,7 +163,7 @@ class _RedeemFlowTest(unittest.IsolatedAsyncioTestCase):
 class DeadTeamOnlyBlocksNewInvitesTest(_RedeemFlowTest):
     async def asyncSetUp(self):
         await super().asyncSetUp()
-        # The customer's old membership sits in a Team whose login expired; the
+        # The member's old membership sits in a Team whose login expired; the
         # admin has since moved them to the live team-a.
         await self._team("team-a")
         await self._team("team-x", status="token_expired")

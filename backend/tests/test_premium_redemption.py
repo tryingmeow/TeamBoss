@@ -27,7 +27,7 @@ from app.services import seat_capacity as seat_capacity_module
 from app.services import team_locks
 from app.services.team_locks import reserve_seat, reserved_seats
 
-EMAIL = "premium.buyer@example.com"
+EMAIL = "premium.redeemer@example.com"
 OTHER = "someone.else@example.com"
 CREATED = "2026-09-01T00:00:00+00:00"
 FUTURE = (datetime.now(timezone.utc) + timedelta(days=10)).replace(microsecond=0).isoformat()
@@ -558,7 +558,7 @@ class RenewalSeatTypeTest(_FlowBase):
     ):
         await self._member("team-a", member_seat_type, kind=kind)
         token_id = await self._token(raw, code_seat_type)
-        # 客户看到的（HTTP 答复）是第二人称。
+        # 成员看到的（HTTP 答复）是第二人称。
         await self._assert_refused(raw, detail)
         self.assertEqual(self.invites, [])
         self.assertEqual(await self._expiry(), FUTURE)
@@ -570,7 +570,7 @@ class RenewalSeatTypeTest(_FlowBase):
         # 管理员看的操作日志说明是第三人称。
         self.assertEqual(logs[0]["error_message"], log_message)
         self.assertNotIn("你", logs[0]["error_message"])
-        # 公开兑换记录（给客户自己看）保持第二人称，与 HTTP 答复一致。
+        # 公开兑换记录（给成员自己看）保持第二人称，与 HTTP 答复一致。
         use = (await self._rows(
             "SELECT error_message FROM access_token_uses WHERE token_id = ?", (token_id,)
         ))[0]

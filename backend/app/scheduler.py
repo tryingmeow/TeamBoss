@@ -605,7 +605,7 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
             elif purchased is not None:
                 # 按 extend_member_expiry 的语义追加：max(现有到期, 现在) + 时长
                 # （detected + NULL 没有已购时长，从现在起算）。只取 max(行内到期,
-                # 现有到期) 会让一个到期时间更远的成员把这次购买的时长整个吃掉，
+                # 现有到期) 会让一个到期时间更远的成员把这次授予的时长整个吃掉，
                 # 而兑换还被置成 success——用户和管理员都看不到任何异常。
                 resolved_expires = _credit_purchased_duration(
                     existing["expires_at"], purchased, now

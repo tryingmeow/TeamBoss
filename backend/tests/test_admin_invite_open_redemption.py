@@ -2,12 +2,12 @@
 
 一张 30 天码的邀请结果不明：兑换锁成 uncertain、钉在原 Team，码锁着。管理员这时
 对同一个邮箱在同一个 Team 邀请或重发 30 天，到期记成 now+30；之后对账确认那笔
-兑换，又在上面累加 30 天，客户拿到 60 天。现在管理员接口在 team_invite_lock 和
+兑换，又在上面累加 30 天，成员拿到 60 天。现在管理员接口在 team_invite_lock 和
 成员操作占用之内、发任何上游请求之前，先查这个邮箱上对账日后还会记账的兑换，
 有就 409，什么都不写。
 
 结果不明的兑换钉在别的 Team 时，邀请同样要拒：对账日后在原 Team 看见人就确认，
-管理员若已把人邀进这个 Team，客户就凭一张码占了两个席位。
+管理员若已把人邀进这个 Team，成员就凭一张码占了两个席位。
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -471,12 +471,12 @@ class AdminExpiryEditOpenRedemptionTest(_OpenRedemptionCase):
 class OpenRedemptionDetailTest(unittest.TestCase):
     """被拒说明不能把管理员引向手动补授予。
 
-    退码后码的 used_count 归零，客户还能用同一张码再兑换一次；管理员若按旧说明
-    "另行邀请"、设置到期或续期去补，客户再兑换又拿一份，一张码两次授予。
+    退码后码的 used_count 归零，成员还能用同一张码再兑换一次；管理员若按旧说明
+    "另行邀请"、设置到期或续期去补，成员再兑换又拿一份，一张码两次授予。
     """
 
     OPERATIONS = ("invite", "batch_invite", "set_expiry", "extend_expiry")
-    REDEEM_AGAIN = "请让客户用同一兑换码重新兑换"
+    REDEEM_AGAIN = "请让成员用同一兑换码重新兑换"
     NO_MANUAL_GRANT = "不要用手动邀请、设置到期或续期来补"
     UNCERTAIN = {
         "token_use_id": 41, "result": "uncertain", "action": "invite_pending",
@@ -552,7 +552,7 @@ class OpenRedemptionDetailTest(unittest.TestCase):
                 detail = open_redemptions.open_redemption_detail(
                     dict(self.UNCERTAIN, **state), operation="invite"
                 )
-                self.assertIn("确认成功把这条记录收尾，再给客户换发一张同面额的新码", detail)
+                self.assertIn("确认成功把这条记录收尾，再给成员换发一张同规格的新码", detail)
                 self.assertNotIn("{", detail)
         suspended = open_redemptions.open_redemption_detail(
             dict(self.UNCERTAIN, team_sync_suspended_at="2026-10-01T00:00:00+00:00"),
@@ -562,7 +562,7 @@ class OpenRedemptionDetailTest(unittest.TestCase):
         healthy = open_redemptions.open_redemption_detail(
             dict(self.UNCERTAIN, team_sync_suspended_at=None), operation="invite"
         )
-        self.assertNotIn("换发一张同面额的新码", healthy.split("确认成功则")[0])
+        self.assertNotIn("换发一张同规格的新码", healthy.split("确认成功则")[0])
 
     def test_pending_detail_quotes_the_reconciler_timings(self):
         # 说明里的分钟数和对账任务用的是同一组常量。

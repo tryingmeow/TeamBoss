@@ -107,7 +107,7 @@ def parse_seat_capacity(subscription: Any) -> dict[str, dict[str, Any]] | None:
 
     字段缺失或不是列表 → None（整体未知）。单个条目结构不对（type 不是非空字符串、
     paid / available 不是非负整数）就丢掉那一条，那个类型按未知处理。
-    同一类型出现多次时取 available 更小的那条（宁可少卖）。
+    同一类型出现多次时取 available 更小的那条（宁可少分配）。
     """
     if not isinstance(subscription, dict):
         return None
@@ -238,7 +238,7 @@ def occupancy_bounded_free_seats(
     ``pending`` = 待接受的 T 类邀请加上没带类型的邀请。取两个值里更小的：
     ``seat_capacity[T].available − pending``，和按占用自己算的
     ``paid − 在用 T（seat_type_counts） − pending``。只信 available 一个上游字段的话，
-    它没扣到的占用就会被再卖一次。任何一块缺失（没有 T 条目、seat_type_counts 里
+    它没扣到的占用就会被再分配一次。任何一块缺失（没有 T 条目、seat_type_counts 里
     没有 T）= 0。
     """
     if entry is None or in_use is None:
@@ -395,7 +395,7 @@ def _pending_items(pending_data: Any) -> list[dict[str, Any]]:
     """取出待接受邀请列表。没有可用的列表、条目不是对象 = 占用未知，抛 SeatCapacityFetchError。
 
     ``{"items": []}`` 是空名单；``{}``、``{"items": null}``、非对象响应是「没拿到名单」，
-    绝不能当成 0 个待接受邀请——那会把已经被邀请占着的空位再卖一次。
+    绝不能当成 0 个待接受邀请——那会把已经被邀请占着的空位再分配一次。
     """
     if not isinstance(pending_data, dict):
         raise SeatCapacityFetchError("pending invites response is not an object")
@@ -419,7 +419,7 @@ def pending_invite_seat_type(item: dict[str, Any]) -> str | None:
 def pending_count_from_api(pending_data: dict[str, Any], seat_type: str) -> int:
     """占着 ``seat_type`` 的待接受邀请个数：类型就是它的，加上没带类型的。
 
-    没带类型的邀请不知道占的是哪一种，对**每个**计费类型都算一份（宁可少卖）。
+    没带类型的邀请不知道占的是哪一种，对**每个**计费类型都算一份（宁可少分配）。
     名单缺失或结构不对抛 SeatCapacityFetchError。
     """
     items = _pending_items(pending_data)

@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from app import database as app_database
 from app.routes import access_tokens
 
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 CREATED = "2026-09-01T00:00:00+00:00"
 FUTURE = "2027-01-01T00:00:00+00:00"
 

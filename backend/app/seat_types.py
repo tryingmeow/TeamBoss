@@ -15,7 +15,7 @@ from typing import Any, Literal, get_args
 SeatTypeLiteral = Literal["default", "usage_based", "prolite"]
 # 工作区「默认邀请席位」只允许这两种：Premium 很贵，不能成为默认值。
 WorkspaceDefaultSeatTypeLiteral = Literal["default", "usage_based"]
-# 兑换码可选的席位类型（Codex 按量计费，不卖码）。
+# 兑换码可选的席位类型（Codex 按量计费，不发兑换码）。
 CodeSeatTypeLiteral = Literal["default", "prolite"]
 
 DEFAULT_SEAT_TYPE = "default"

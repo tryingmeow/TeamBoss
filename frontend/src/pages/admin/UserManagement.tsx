@@ -1166,7 +1166,7 @@ function MemberList({
 }) {
   const extensionRequestIds = useRef(new ExpiryExtensionRequestIds());
   const [members, setMembers] = useState<AdminMemberRow[]>([]);
-  // Owner 行不进表格（表格是"成员"视图），但必须参与多车队角标的统计：
+  // Owner 行不进表格（表格是"成员"视图），但必须参与多 Team 角标的统计：
   // 一个邮箱在 A 队是成员、在 B 队是 Owner，正是最需要人工确认的那种情况。
   const [ownerTeamsByEmail, setOwnerTeamsByEmail] = useState<Map<string, number>>(new Map());
   // 角标点开的是"就这一个邮箱"，不是把邮箱塞进全文搜索——后者会把
@@ -1207,7 +1207,7 @@ function MemberList({
           owners.set(email, (owners.get(email) ?? 0) + 1);
         });
         setOwnerTeamsByEmail(owners);
-        // 拉不到缓存的车队会被服务端跳过。不说出来的话，多车队角标会少算，
+        // 拉不到缓存的 Team 会被服务端跳过。不说出来的话，多 Team 角标会少算，
         // 而管理员看到的是一个"完整"的列表。
         const failed = (res.errors ?? []) as Array<{ team_name?: string | null; team_id?: string }>;
         if (failed.length) {
@@ -1237,8 +1237,8 @@ function MemberList({
     setRefreshTrigger((v) => v + 1);
   };
 
-  // 一个邮箱同时在多个车队时，每个车队各自一行、各自的到期时间。行按到期排序会
-  // 把同一个人的几行拆得很远，所以这里算一个"在册车队数"，在行上给个可点的角标。
+  // 一个邮箱同时在多个 Team 时，每个 Team 各自一行、各自的到期时间。行按到期排序会
+  // 把同一个人的几行拆得很远，所以这里算一个"在册 Team 数"，在行上给个可点的角标。
   const memberTeamCounts = useMemo(() => {
     const teamsByEmail = new Map<string, Set<string>>();
     members.forEach((member) => {
@@ -1259,7 +1259,7 @@ function MemberList({
   const filteredMembers = useMemo(() => {
     const matched = members.filter((member) => {
       // 角标下钻：精确到这一个邮箱，并且跳过席位/状态筛选——角标上的数字是
-      // 这个邮箱在册的车队数，点开却被筛掉几行的话，数字和行数对不上。
+      // 这个邮箱在册的 Team 数，点开却被筛掉几行的话，数字和行数对不上。
       if (focusEmail) {
         return (member.email || '').trim().toLowerCase() === focusEmail;
       }
@@ -1361,7 +1361,7 @@ function MemberList({
   };
 
   const multiTeamBadge = (member: AdminMemberRow) => {
-    // 已踢出的行不挂角标：角标数的是"当前在册"的车队数，
+    // 已踢出的行不挂角标：角标数的是"当前在册"的 Team 数，
     // 挂在一条已经不在册的行上只会两边对不上。
     if (member.status === 'kicked') return null;
     const emailKey = (member.email || '').trim().toLowerCase();

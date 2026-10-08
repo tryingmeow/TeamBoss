@@ -30,7 +30,7 @@ from app.services.member_expiry import (
     record_confirmed_invite_extension,
 )
 
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 
 
 class _TempDbTest(unittest.TestCase):
@@ -599,7 +599,7 @@ _UNRECOGNIZED_PAGES = {
     "string items": [{"items": "nope"}],
     "list body": [[]],
     "null body": [None],
-    "non-object entry": [{"items": ["buyer@example.com"]}],
+    "non-object entry": [{"items": ["redeemer@example.com"]}],
     "truncated before total": [dict(_full_page(), total=250), {"items": [], "total": 250}],
 }
 
@@ -648,10 +648,10 @@ class AutoKickLookupFailsClosedTest(unittest.TestCase):
             self.assertEqual(
                 _find_member_user_id_by_email(
                     _PagedClient(members_pages=[_full_page(),
-                                                {"items": [{"id": "u-buyer", "email": EMAIL}]}]),
+                                                {"items": [{"id": "u-redeemer", "email": EMAIL}]}]),
                     EMAIL,
                 ),
-                ("u-buyer", None),
+                ("u-redeemer", None),
             )
 
     def test_pending_lookup_reports_unrecognized_replies_as_errors(self):

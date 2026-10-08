@@ -802,7 +802,7 @@ export type RedeemAccessTokenResult =
       message: string;
     }
   | {
-      // 同一邮箱在多个车队：续期落到哪个队必须由用户点，不能替他猜。
+      // 同一邮箱在多个 Team：续期落到哪个队必须由用户点，不能替他猜。
       // 兑换码在这一步没有被消耗，用户带上 team_id 重新提交即可。
       status: 'team_selection_required';
       action: null;

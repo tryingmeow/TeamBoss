@@ -105,7 +105,7 @@ class _RedeemLookupBudget:
     两层是否都有余量，都有才同时记账——否则一张已被单码上限挡住的码还能继续消耗全站
     额度，一张码就能把所有人的兑换堵死。码的消耗时机和规则完全不受影响。
 
-    以服务端/上游故障（5xx）结尾的尝试，事后用 ``refund_code`` 退回单码的那一次：客户在
+    以服务端/上游故障（5xx）结尾的尝试，事后用 ``refund_code`` 退回单码的那一次：成员在
     上游故障期间反复重试，不该把自己的码锁一小时。「请选择 Team」提示（正常兑换的第一步）
     用 ``refund_prompt`` 退，但每张码每小时最多退 2 次，之后照常计数。
     全站那一次不退——这些尝试照样实时拉了上游，全站上限本来就是给上游兜底的。
@@ -182,7 +182,7 @@ class _RedeemLookupBudget:
 
 
 # 每张码每小时 10 次（5xx 和前 2 次选择提示不算）：选错 Team、没空位后重试都够用；
-# 全站每 10 分钟 60 次：正常售卖远低于此，被挡的人码不消耗，稍后重试即可。
+# 全站每 10 分钟 60 次：正常兑换远低于此，被挡的人码不消耗，稍后重试即可。
 _redeem_lookup_budget = _RedeemLookupBudget(
     per_code=10, per_code_window=3600, global_limit=60, global_window=600
 )
@@ -214,7 +214,7 @@ _INVALID_CODE_SEAT_TYPE_DETAIL = "这张兑换码的席位类型无效，暂不�
 _UNKNOWN_MEMBER_SEAT_TYPE_DETAIL = "你当前的席位类型不能用兑换码续期。兑换码未使用，如需处理请联系管理员。"
 # 告诉管理员 Premium 码没位置时，最多列出这么多个 Team 的原因。
 _NOTICE_MAX_TEAMS = 8
-# 同一个码「Premium 没位置」的 Telegram 通知一小时最多一条（客户可能反复重试）；日志每次都写。
+# 同一个码「Premium 没位置」的 Telegram 通知一小时最多一条（成员可能反复重试）；日志每次都写。
 _PREMIUM_NOTICE_WINDOW_SECONDS = 3600
 _premium_notice_sent: dict[Any, float] = {}
 
@@ -246,7 +246,7 @@ def _seat_type_mismatch_detail(code_seat_type: str, member_seat_type: Any, reaso
 
 
 def _seat_type_mismatch_log_message(code_seat_type: str, member_seat_type: Any, reason: str) -> str:
-    """同一次拒绝写进操作日志的说明：读者是管理员，用第三人称（客户看到的是
+    """同一次拒绝写进操作日志的说明：读者是管理员，用第三人称（成员看到的是
     _seat_type_mismatch_detail，第二人称）。"""
     if reason == "unknown_member_seat_type":
         return (
@@ -277,7 +277,7 @@ class _SeatTypeMismatch(Exception):
         self.code_seat_type = normalize_seat_type(code_seat_type)
         self.member_seat_type = normalize_seat_type(member_seat_type)
         self.reason = reason
-        # detail 给客户（HTTP 答复、公开兑换记录）；log_message 给管理员（操作日志）。
+        # detail 给成员（HTTP 答复、公开兑换记录）；log_message 给管理员（操作日志）。
         self.detail = _seat_type_mismatch_detail(code_seat_type, member_seat_type, reason)
         self.log_message = _seat_type_mismatch_log_message(code_seat_type, member_seat_type, reason)
 
@@ -393,7 +393,7 @@ class RedeemAccessTokenResponse(BaseModel):
 
 
 class ResolvePendingConfirmationRequest(BaseModel):
-    # "success"：管理员已核实原 Team 确实有这个成员/邀请，兑换按面额补齐期限，码保持已用。
+    # "success"：管理员已核实原 Team 确实有这个成员/邀请，兑换按码的授予时长补齐期限，码保持已用。
     # "released"：管理员已核实原 Team 里既没有成员也没有邀请，把码退回未使用。
     outcome: Literal["success", "released"]
     note: Optional[str] = None
@@ -598,7 +598,7 @@ async def _history_proof_accepted(email: str, raw_token: Optional[str]) -> bool:
     """出示的兑换码在这个邮箱名下是否有使用记录。
 
     ``/status`` 和 ``/query`` 是匿名接口：只给一个邮箱地址就能拿到该邮箱最近的
-    兑换记录（动作、结果、Team、码前缀、面额、到期时间、报错原文、时间戳），等于
+    兑换记录（动作、结果、Team、码前缀、授予时长、到期时间、报错原文、时间戳），等于
     任何人猜中邮箱就能看别人的消费流水。成员身份和到期时间照旧公开（用户要靠它
     自查），历史则要求出示凭据：这张码必须存在，且这张码的使用记录就落在这个邮箱
     名下。
@@ -752,7 +752,7 @@ async def _fail_and_release_token_use(
     ``pending``/``uncertain``——那两个值代表"结果未定、码仍被锁"，会让查询接口
     把一张已退回的码显示成"结果确认中"。
 
-    ``clear_expires_at`` 把这行的名义到期抹掉。名义到期是"这张码的面额"，只有
+    ``clear_expires_at`` 把这行的名义到期抹掉。名义到期是"这张码的授予时长"，只有
     真正授出去时才有意义；提示行留着它会在历史里显示一个从未发生过的到期时间。
 
     这里不撤 pending_invite_reconciliations：pending 的兑换名下没有行——屏障和
@@ -1591,7 +1591,7 @@ async def _invite_to_available_team(
                     )
             # Premium：不管刷新后的名单里看不看得见这个邀请，都占住一个 Premium 空位
             # （进程内 15 分钟 + 库里到下一次完整快照对账）。上游的 available 要是还没扣掉
-            # 它，只靠名单就会把这个空位再卖一次、触发自动加购；多占一会儿最多少卖一单。
+            # 它，只靠名单就会把这个空位再分配一次、触发自动加购；多占一会儿最多少分配一个席位。
             # ChatGPT 照旧：名单里还看不见时才占（进程内 15 分钟）。
             if premium or not _snapshot_contains_email(snapshot, email):
                 try:
@@ -2150,7 +2150,7 @@ async def resolve_pending_confirmation(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
                     f"这笔兑换（兑换记录 #{token_use_id}）已被退码，未记入任何时长。"
-                    "请让客户用同一兑换码重新兑换，不要手动邀请或设置到期。"
+                    "请让成员用同一兑换码重新兑换，不要手动邀请或设置到期。"
                 ),
             )
         await log_operation(
@@ -2280,7 +2280,7 @@ async def _report_no_premium_seat(
 ) -> None:
     """Premium 码没位置：记一条 ``redeem_no_premium_seat`` 日志，并发 Telegram 通知管理员。
 
-    best-effort：日志或 Telegram 失败都不影响给客户的答复。通知里邮箱脱敏，码只给前缀。
+    best-effort：日志或 Telegram 失败都不影响给成员的答复。通知里邮箱脱敏，码只给前缀。
     """
     reasons = "; ".join(f"{team_id}: {reason}" for team_id, reason in no_seat.reasons)
     try:
@@ -2302,11 +2302,11 @@ async def _report_no_premium_seat(
         checked.append(f"另有 {len(no_seat.checked) - _NOTICE_MAX_TEAMS} 个 Team 同样没有空位")
     rows = [
         f"兑换码：{token_row.get('token_prefix') or '?'}…",
-        f"客户：{mask_email_for_notice(email)}",
+        f"成员：{mask_email_for_notice(email)}",
         *(checked or ["没有可用的 Team"]),
         (
             "兑换码未消耗。要接这单：先在某个 Team 买好 Premium 席位，在面板里同步这个 Team"
-            "（或等下一次自动同步），再让客户用同一个码重试。"
+            "（或等下一次自动同步），再让成员用同一个码重试。"
             if released
             else "兑换码状态待核对，请在兑换记录里查看这笔兑换。"
         ),
@@ -2381,9 +2381,9 @@ async def _redeem_valid_token(
 ) -> dict[str, Any]:
     """一张已通过校验和尝试预算的码的兑换流程：占用 → 查上游 → 续期/邀请。"""
     grant_duration = _duration_or_400(token_row["grant_expires_in"], allow_never=True)
-    # 这只是这张码的"面额"（从现在起算的名义到期），仅用于失败记录/审计展示。
+    # 这只是这张码的"授予时长"（从现在起算的名义到期），仅用于失败记录/审计展示。
     # 真正落库的到期时间由 extend_member_expiry 按 max(现有到期, now) + 时长 算出来，
-    # 绝不能拿这个值直接覆盖成员现有的到期时间——那会把客户已购时长清零。
+    # 绝不能拿这个值直接覆盖成员现有的到期时间——那会把成员已有时长清零。
     nominal_expires_at = expiry_from_duration(grant_duration)
     nominal_expires_iso = nominal_expires_at.isoformat() if nominal_expires_at else None
 
@@ -2826,7 +2826,7 @@ def _public_expiry_state(hit: dict[str, Any]) -> str:
     有到期时间 = dated；没有时看本地到期记录的 source：detected = external（面板外
     加入，巡逻可能移出），无记录 = unrecorded，其余 = permanent（记录里没设到期时间）。
     permanent 也包括巡逻启用时系统补登的老成员，并不都是管理员有意设成的永久，所以
-    客户页面对它只说「未设置到期时间」，不承诺永久。
+    自助页面对它只说「未设置到期时间」，不承诺永久。
     """
     if hit.get("expires_at"):
         return "dated"

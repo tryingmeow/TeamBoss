@@ -29,7 +29,7 @@ from app.services.member_expiry import (
     record_uncertain_invite,
 )
 
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 
 
 class _BarrierTest(unittest.TestCase):
