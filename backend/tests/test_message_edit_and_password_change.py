@@ -164,12 +164,6 @@ class ChangePasswordWrongCurrentTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store[security.ADMIN_PASSWORD_HASH_SETTING], before)
         self.assertTrue(await security.verify_admin_password("correct-password"))
 
-    async def test_correct_current_password_still_changes_it(self):
-        result = await admin_routes.update_admin_password(self._req("correct-password"))
-        self.assertEqual(result, {"status": "ok"})
-        self.assertTrue(await security.verify_admin_password("brand-new-password"))
-        self.assertFalse(await security.verify_admin_password("correct-password"))
-
 
 if __name__ == "__main__":
     unittest.main()

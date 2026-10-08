@@ -196,14 +196,16 @@ export default function SettingsDialog({
       return;
     }
     try {
-      await changeAdminPassword({
+      const result = await changeAdminPassword({
         current_password: currentPassword,
         new_password: newPassword,
       });
+      setStoredAdminApiKey(result.api_key);
+      setAccount({ api_key: result.api_key, api_key_prefix: result.api_key_prefix });
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      showStatus('密码已更新');
+      showStatus('密码已更新，API Key 已同步更换，其他地方保存的旧 Key 已失效');
     } catch (err) {
       setErrorText(err instanceof Error ? err.message : '更新失败');
     }
