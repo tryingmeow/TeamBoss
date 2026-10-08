@@ -15,7 +15,6 @@ import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, SEAT_TYPES, formatSeatTypeLabel, pa
 import { formatBeijingDateTime } from '../lib/formatDate';
 import { formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
-import { currentPeriodStart, formatPeriodRange } from '../lib/billingPeriod';
 
 interface TeamCardProps {
   team: Team;
@@ -257,7 +256,6 @@ export default function TeamCard({
   const isSubscriptionExpired = team.subscription_status === 'expired';
   const isSubscriptionStale = team.subscription_status === 'stale';
   const isNonRenewing = team.subscription_status === 'nonrenewing';
-  const periodStart = currentPeriodStart(team.active_start, team.active_until, team.billing_period);
   const isWarning = (isNonRenewing || (team.days_remaining !== null && team.days_remaining <= 3))
     && !authBlocked
     && !isSubscriptionExpired;
@@ -771,7 +769,10 @@ export default function TeamCard({
                 {renewalLabel}{isNonRenewing && !isSubscriptionExpired ? ' · 不续费' : ''}
               </dt>
               <dd className={`mt-0.5 flex min-w-0 items-center gap-1 text-sm font-medium ${renewalTone}`}>
-                <span className="truncate">
+                <span
+                  className={`truncate ${team.active_until ? 'cursor-pointer hover:opacity-80' : ''}`}
+                  onClick={team.active_until ? (e) => { e.stopPropagation(); setShowExactTime((v) => !v); } : undefined}
+                >
                   {formatShortDate(team.active_until)}
                   {renewalWhen && <span className="font-normal text-gray-500 dark:text-ink-400"> · {renewalWhen}</span>}
                 </span>
@@ -831,11 +832,8 @@ export default function TeamCard({
               </dd>
             </div>
             {showExactTime && team.active_until && (
-              <div className="col-span-2 -mt-1 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500 dark:bg-ink-950/60 dark:text-ink-400">
-                {periodStart
-                  ? `本期 ${formatPeriodRange(periodStart, team.active_until)}`
-                  : `订阅自 ${formatShortDate(team.active_start)}`}
-                {' · '}{isNonRenewing || isSubscriptionExpired ? '到期' : '续费'}于 {formatBeijingDateTime(team.active_until)}
+              <div className="col-span-2 -mt-1 rounded-lg bg-gray-50 px-3 py-2 text-xs tabular-nums text-gray-500 dark:bg-ink-950/60 dark:text-ink-400">
+                {formatBeijingDateTime(team.active_until, false)}
               </div>
             )}
             <div className="min-w-0">
