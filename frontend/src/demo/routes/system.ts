@@ -23,8 +23,11 @@ function changePassword(ctx: DemoContext): DemoResponse {
   if (bodyString(ctx, 'new_password').length < 8) {
     return fail(422, [{ msg: 'String should have at least 8 characters' }]);
   }
-  appendLog(ctx.db, { action: 'change_admin_password' });
-  return ok();
+  const key = `demo-key-${String(nextId(ctx.db)).padStart(6, '0')}`;
+  ctx.db.adminApiKey = key;
+  const prefix = `${key.slice(0, 8)}...${key.slice(-4)}`;
+  appendLog(ctx.db, { action: 'change_admin_password', detail: `api_key_rotated prefix=${prefix}` });
+  return ok({ status: 'ok', api_key: key, api_key_prefix: prefix });
 }
 
 function rotateApiKey(ctx: DemoContext): DemoResponse {

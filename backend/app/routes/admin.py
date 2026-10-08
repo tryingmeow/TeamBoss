@@ -443,15 +443,30 @@ async def get_admin_account():
     return {"api_key": api_key, "api_key_prefix": _api_key_prefix(api_key)}
 
 
-@router.patch("/password", dependencies=[Depends(require_admin)])
+@router.patch(
+    "/password",
+    response_model=RotateAdminApiKeyResponse,
+    dependencies=[Depends(require_admin)],
+)
 async def update_admin_password(req: ChangeAdminPasswordRequest):
     try:
-        await change_admin_password(req.current_password, req.new_password)
-        await log_operation(None, "change_admin_password", None, None, "success")
-        return {"status": "ok"}
+        api_key = await change_admin_password(req.current_password, req.new_password)
     except Exception as e:
         await log_operation(None, "change_admin_password", None, None, "failed", str(e))
         raise
+    try:
+        await log_operation(
+            None,
+            "change_admin_password",
+            None,
+            f"api_key_rotated prefix={_api_key_prefix(api_key)}",
+            "success",
+        )
+    except Exception:
+        # 密码和新 Key 已经提交，旧 Key 已失效。审计日志写失败不能变成 500，
+        # 否则前端拿不到新 Key，只能重新登录。
+        logger.exception("failed to write audit log after admin password change")
+    return {"status": "ok", "api_key": api_key, "api_key_prefix": _api_key_prefix(api_key)}
 
 
 @router.post(

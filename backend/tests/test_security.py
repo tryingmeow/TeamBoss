@@ -94,5 +94,65 @@ class AdminApiKeyRotationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.status_code, 401)
 
 
+class AdminPasswordChangeRotatesKeyTest(unittest.IsolatedAsyncioTestCase):
+    """改密码同时换 Key：拿到过旧 Key 的人改完密码后进不了后台，也没有 10 分钟宽限。"""
+
+    async def test_password_change_revokes_old_key_immediately(self):
+        from app.routes import admin as admin_routes
+
+        old_key = "atk_old_key_with_enough_entropy"
+        grace_key = "atk_grace_key_from_an_earlier_rotation"
+        with tempfile.TemporaryDirectory() as data_dir, patch.dict(
+            os.environ, {"AUTO_TEAM_DATA_DIR": data_dir}, clear=False
+        ), patch.object(admin_routes, "log_operation", new=AsyncMock()) as log:
+            await init_database()
+            await security._write_setting(security.ADMIN_PASSWORD_HASH_SETTING, security._password_hash("correct-password"))
+            await security._write_setting(security.ADMIN_API_KEY_SETTING, old_key)
+            await security._write_setting(security.ADMIN_PREVIOUS_API_KEY_SETTING, grace_key)
+            await security._write_setting(
+                security.ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING,
+                (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+            )
+
+            result = await admin_routes.update_admin_password(
+                admin_routes.ChangeAdminPasswordRequest(
+                    current_password="correct-password", new_password="brand-new-password"
+                )
+            )
+
+            new_key = result["api_key"]
+            self.assertEqual(result["status"], "ok")
+            self.assertTrue(new_key.startswith("atk_"))
+            self.assertNotIn(new_key, (old_key, grace_key))
+            self.assertEqual(result["api_key_prefix"], admin_routes._api_key_prefix(new_key))
+            self.assertEqual(await security.get_admin_api_key(), new_key)
+            await security.require_admin(x_api_key=new_key)
+            for revoked in (old_key, grace_key):
+                with self.assertRaises(HTTPException) as raised:
+                    await security.require_admin(x_api_key=revoked)
+                self.assertEqual(raised.exception.status_code, 401)
+            self.assertTrue(await security.verify_admin_password("brand-new-password"))
+            self.assertFalse(await security.verify_admin_password("correct-password"))
+            # 审计日志只记前缀，不记完整 Key。
+            detail = log.await_args.args[3]
+            self.assertIn("api_key_rotated", detail)
+            self.assertNotIn(new_key, detail)
+
+    async def test_wrong_current_password_keeps_key(self):
+        old_key = "atk_old_key_with_enough_entropy"
+        with tempfile.TemporaryDirectory() as data_dir, patch.dict(
+            os.environ, {"AUTO_TEAM_DATA_DIR": data_dir}, clear=False
+        ):
+            await init_database()
+            await security._write_setting(security.ADMIN_PASSWORD_HASH_SETTING, security._password_hash("correct-password"))
+            await security._write_setting(security.ADMIN_API_KEY_SETTING, old_key)
+
+            with self.assertRaises(HTTPException) as raised:
+                await security.change_admin_password("wrong-password", "brand-new-password")
+            self.assertEqual(raised.exception.status_code, 400)
+            self.assertEqual(await security.get_admin_api_key(), old_key)
+            await security.require_admin(x_api_key=old_key)
+
+
 if __name__ == "__main__":
     unittest.main()

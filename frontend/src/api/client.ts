@@ -307,11 +307,12 @@ export async function verifyStoredAdminKey(): Promise<AdminAccount> {
   return request<AdminAccount>('/api/admin/account', undefined, { redirectOnUnauthorized: false });
 }
 
+/** Changing the password also replaces the admin API key; the old key stops working at once. */
 export async function changeAdminPassword(data: {
   current_password: string;
   new_password: string;
-}): Promise<void> {
-  return request<void>('/api/admin/password', {
+}): Promise<RotateAdminApiKeyResult> {
+  return request<RotateAdminApiKeyResult>('/api/admin/password', {
     method: 'PATCH',
     body: JSON.stringify(data),
   });

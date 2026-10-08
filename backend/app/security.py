@@ -176,7 +176,13 @@ async def verify_admin_password(password: str) -> bool:
     return await _password_hash_matches_async(password, password_hash)
 
 
-async def change_admin_password(current_password: str, new_password: str) -> None:
+async def change_admin_password(current_password: str, new_password: str) -> str:
+    """改密码并同时换掉 API Key，返回新 Key。
+
+    登录拿到的就是这个长期 Key，改密码通常是因为怀疑泄露；只换密码不换 Key，
+    拿到过 Key 的人照样能进后台。旧 Key 立即失效、不留宽限：响应若丢在半路，
+    管理员用新密码重新登录即可。
+    """
     # 不能用 401：前端 client 对带管理员 key 的 401 会清 key 并跳登录页，改密码填错
     # 当前密码会把管理员踢出登录。这是表单校验失败，用 400。
     if not await verify_admin_password(current_password):
@@ -186,11 +192,39 @@ async def change_admin_password(current_password: str, new_password: str) -> Non
     if len(new_password) < 8:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="新密码至少 8 位")
 
-    await _write_setting(ADMIN_PASSWORD_HASH_SETTING, _password_hash(new_password))
+    password_hash = await asyncio.to_thread(_password_hash, new_password)
+    new_api_key = _new_admin_api_key()
+    now = _now_iso()
+    # 密码、新 Key 和清掉的宽限 Key 一次提交：不会出现密码换了、Key 没换的中间状态。
+    async with get_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        for key, value in (
+            (ADMIN_PASSWORD_HASH_SETTING, password_hash),
+            (ADMIN_API_KEY_SETTING, new_api_key),
+            (ADMIN_PREVIOUS_API_KEY_SETTING, ""),
+            (ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING, ""),
+        ):
+            await _upsert_setting(db, key, value, now)
+        await db.commit()
+    return new_api_key
+
+
+def _new_admin_api_key() -> str:
+    return "atk_" + secrets.token_urlsafe(32)
+
+
+async def _upsert_setting(db, key: str, value: str, updated_at: str) -> None:
+    await db.execute(
+        """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at""",
+        (key, value, updated_at),
+    )
 
 
 async def rotate_admin_api_key() -> str:
-    new_api_key = "atk_" + secrets.token_urlsafe(32)
+    new_api_key = _new_admin_api_key()
     now = datetime.now(timezone.utc)
     expires_at = (now + ADMIN_API_KEY_GRACE_PERIOD).isoformat()
 
@@ -213,13 +247,7 @@ async def rotate_admin_api_key() -> str:
             (ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING, expires_at),
             (ADMIN_API_KEY_SETTING, new_api_key),
         ):
-            await db.execute(
-                """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET
-                       value = excluded.value,
-                       updated_at = excluded.updated_at""",
-                (key, value, now.isoformat()),
-            )
+            await _upsert_setting(db, key, value, now.isoformat())
         await db.commit()
     return new_api_key
 
