@@ -2,7 +2,7 @@
 
 从首次启动到接入 Team、配置自动化和发放兑换码，按本指南逐步操作。HTTPS、存储和登录排障见[部署与运维](deployment.md)。
 
-开始前请阅读[免责声明](disclaimer.md)和[生产测试范围](../README.md#production-test-scope)。只想看界面时，可使用[离线演示](development.md#离线演示)：不需要 Owner 或 ChatGPT 账号，任意密码登录，不访问真实 API。
+开始前请阅读[免责声明](disclaimer.md)和[生产测试范围](../README.zh.md#production-test-scope)。只想看界面时，可使用[离线演示](development.md#离线演示)：不需要 Owner 或 ChatGPT 账号，任意密码登录，不访问真实 API。
 
 ---
 
@@ -176,7 +176,7 @@ http://127.0.0.1:8080/admin
 - **「默认邀请席位」不能是 Premium。** 卡片齿轮「Team 设置」里的「默认邀请席位」只能选 ChatGPT 或 Codex。
 - **不认识的席位类型**（ChatGPT 以后新加的类型，例如 `automation`）显示成灰色的「其他（原值）」。TeamBoss 不把它们算作空位，不会邀请、切换或用兑换码续期这种席位，到期踢人和巡逻也都会跳过这些人。
 
-> **生产测试范围见 [README 顶部红色提示](../README.md#production-test-scope)。** Premium 是 Beta 功能；邀请、切换席位、Premium 兑换码（[5](#5-让成员自己兑换)）及巡逻移除 Premium 外部成员（[4.2](#42-巡逻自动踢人--它会真的把人移出你的工作区)）需先在一个不重要的 Team 上自己试一遍。只读价格或报价查询成功不代表实际加购、扣款或成员变更成功。
+> **生产测试范围见 [README 顶部红色提示](../README.zh.md#production-test-scope)。** Premium 是 Beta 功能；邀请、切换席位、Premium 兑换码（[5](#5-让成员自己兑换)）及巡逻移除 Premium 外部成员（[4.2](#42-巡逻自动踢人--它会真的把人移出你的工作区)）需先在一个不重要的 Team 上自己试一遍。只读价格或报价查询成功不代表实际加购、扣款或成员变更成功。
 
 ### 3.2 超员策略：满了之后怎么办
 
@@ -485,7 +485,7 @@ docker compose logs --tail=100 backend
 
 ## 还想看什么
 
-- [README](../README.md) —— 项目介绍与生产测试范围
+- [README](../README.zh.md) —— 项目介绍与生产测试范围
 - [部署与运维](deployment.md) —— HTTPS、配置、数据安全和登录恢复
 - [本地开发与离线演示](development.md) —— 开发启动及验证
 - [免责声明](disclaimer.md)
