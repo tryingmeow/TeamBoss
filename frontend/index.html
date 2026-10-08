@@ -6,20 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>TeamBoss</title>
-    <script>
-      // Apply the theme before first paint so there is no flash of the wrong one.
-      // Keep in sync with src/lib/theme.ts (same storage key and rule).
-      (function () {
-        var dark = false;
-        try {
-          var stored = localStorage.getItem('teamboss.theme');
-          dark = stored === 'dark' || (stored !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-        } catch (e) {
-          dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-        }
-        if (dark) document.documentElement.classList.add('dark');
-      })();
-    </script>
+    <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>
