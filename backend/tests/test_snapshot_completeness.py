@@ -13,7 +13,7 @@
 累加器本身的规则在 test_snapshot_pages.py。上游一律是只记录调用的假客户端，绝不触网。
 """
 
-from test_review2_holds import (  # noqa: I001  (_isolation first, via the support module)
+from test_seat_holds_snapshot import (  # noqa: I001  (_isolation first, via the support module)
     EMAIL,
     TEAM,
     USER_ID,
@@ -24,8 +24,8 @@ from test_review2_holds import (  # noqa: I001  (_isolation first, via the suppo
 )
 from test_premium_overage_support import direct_call
 from test_premium_patrol import OLD, RecordingClient, _live, _member
-from test_review_fix_premium_patrol import _Fixture as _PatrolFixture
-from test_review_fix_premium_capacity import (
+from test_premium_patrol_kick import _Fixture as _PatrolFixture
+from test_premium_redeem_capacity import (
     NO_CHATGPT_SEAT,
     PagedClient,
     _filler,

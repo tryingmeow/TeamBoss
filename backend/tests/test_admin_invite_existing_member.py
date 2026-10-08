@@ -1,6 +1,6 @@
 """管理员拉人与邀请结果分类的回归测试。
 
-1. 管理员（网页 / Telegram /invite）对已在该 Team 的邮箱再发邀请，会把成员已买
+1. 管理员（网页 / Telegram /invite）对已在该 Team 的邮箱再发邀请，会把成员已有
    的时长覆盖成这次填的有效期（剩 300 天 → 30 天；永久 → 30 天并装上自动踢）。
    现在邀请前在 team_invite_lock 里实时拉一次成员 + 待接受邀请：已是成员则 409，
    待接受的邀请按重发处理（到期只合并不缩短），拉不到则失败关闭；批量 GPT 拉人同理，不能拿缓存快照当"不在"的证据。
@@ -180,7 +180,7 @@ class AdminReinviteGuardTest(_TempDb, unittest.TestCase):
         self.assertEqual(self._expiry_rows(), before)
 
     def test_pending_invite_is_resent_without_shortening(self):
-        """待接受的邀请直接重发；详细用例见 test_final_fix_g3_invite。"""
+        """待接受的邀请直接重发；详细用例见 test_admin_invite_resend_pending。"""
         self._insert_expiry(self.future)
         before = self._expiry_rows()
 

@@ -29,7 +29,7 @@ from test_premium_patrol import (  # noqa: I001  (_isolation first)
     RecordingClient,
     _member,
 )
-from test_review2_patrol import PROD_OWNER, _Fixture, _outsider
+from test_patrol_overage_kick import PROD_OWNER, _Fixture, _outsider
 
 from app import tg_bot
 from app.routes import patrol as patrol_routes
