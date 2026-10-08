@@ -444,7 +444,7 @@ def _credit_purchased_duration(current_expires_at, purchased, now):
 
     与 member_expiry.extend_member_expiry 是同一条续期规则：现有到期还在未来就从它
     往后加；已经过去、无法解析、或者根本没有（没有记录 / detected 未授权）就从现在
-    起算。兜底行从落盘到被同步看到可能拖了好几天，这段时间不能算进买家的时长里。
+    起算。兜底行从落盘到被同步看到可能拖了好几天，这段时间不能算进成员的时长里。
     永久授权（已授权来源 + NULL）由调用方先挡掉，绝不走到这里。
     """
     base = _parse_datetime(now) or datetime.now(timezone.utc)
@@ -590,7 +590,7 @@ def _reconcile_pending_invites_sync(conn, team_id, members, pending_invites, now
             (team_id, live_user_id, live_user_id, live_email, live_email),
         ).fetchone()
         # kind='extend'：这行代表一次"买到的时长"，不是一个到期时刻。行内的
-        # expires_at 是落盘那一刻的 now + 时长；照抄它，兜底拖了几天买家就少几天。
+        # expires_at 是落盘那一刻的 now + 时长；照抄它，兜底拖了几天成员就少几天。
         purchased = _purchased_duration(row)
         if existing:
             pending_expires = _parse_datetime(row["expires_at"])

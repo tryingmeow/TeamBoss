@@ -241,7 +241,7 @@ async def _pending_invite_or_refuse_member(team_id: str, client, email: str) -> 
     * 已有待接受的邀请 → 返回那条邀请，调用方按"重发"处理：上游 ``resend_emails``
       重发邮件；本地到期经 ``record_confirmed_invite`` 合并，只延长、不缩短、不把
       永久变成有限。不能让管理员"先撤销再邀请"：撤销会把本地记录标成 kicked，
-      已付时长 / 永久授权随之丢失，重新邀请只剩这次填的有效期。
+      已授予时长 / 永久授权随之丢失，重新邀请只剩这次填的有效期。
     * 不在 → 返回 None，按新邀请处理。
 
     必须在 team_invite_lock 和该邮箱的成员操作占用之内现拉：缓存可能是几分钟前的，
