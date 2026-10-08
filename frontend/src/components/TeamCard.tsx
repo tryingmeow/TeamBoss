@@ -833,7 +833,7 @@ export default function TeamCard({
             </div>
             {showExactTime && team.active_until && (
               <div className="col-span-2 -mt-1 rounded-lg bg-gray-50 px-3 py-2 text-xs tabular-nums text-gray-500 dark:bg-ink-950/60 dark:text-ink-400">
-                {formatBeijingDateTime(team.active_until, false)}
+                {formatBeijingDateTime(team.active_until)}
               </div>
             )}
             <div className="min-w-0">

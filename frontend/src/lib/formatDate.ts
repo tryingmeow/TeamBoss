@@ -28,5 +28,5 @@ export function formatBeijingDateTime(value: string | Date | null | undefined, i
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   }).format(date);
   const formatted = parts.replace(/\//g, '-');
-  return includeSuffix ? `${formatted} 北京时间` : formatted;
+  return includeSuffix ? `${formatted} 北京时间（UTC+8）` : formatted;
 }
