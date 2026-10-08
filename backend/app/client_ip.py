@@ -142,7 +142,7 @@ def _note_identity_sample(peer: str, ip: str, collapsed: bool) -> None:
         "5 次起逐次翻倍延迟，封顶 15 分钟，避免把所有访客连同管理员一起锁死），"
         "但请检查 docker/nginx.conf 的 set_real_ip_from "
         "是否覆盖了实际的反代来源，以及 compose.yaml 的端口绑定方式"
-        "（README『部署』一节有说明）。",
+        "（docs/deployment.md「让后端收到真实访客 IP」一节有说明）。",
         _collapse_samples,
         peer,
         ip,

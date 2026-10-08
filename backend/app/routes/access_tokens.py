@@ -1656,7 +1656,7 @@ async def _invite_to_available_team(
 
 # 本进程里还在跑的兑换（token_use_id）。_redeem_valid_token 占用成功后登记、整个
 # 请求结束（含 finally 里的退码）后才移除。对账任务在调度器线程里读它：set 的
-# add/discard/in 在 GIL 下是原子的；后端规定单进程运行（README），所以"不在这里"
+# add/discard/in 在 GIL 下是原子的；后端规定单进程运行（docs/deployment.md），所以"不在这里"
 # 就等于"处理它的那个请求已经不在了"（被杀、或带着异常结束）。
 _inflight_token_uses: set[int] = set()
 

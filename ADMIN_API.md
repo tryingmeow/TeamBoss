@@ -36,7 +36,7 @@ Content-Type: application/json
 - `grant_expires_in`：成员使用此码后的有效期时长，格式如 `7d` / `30d` / `360d` / `never`，必填
 - `token_ttl`：兑换码本身的有效期，默认 `7d`，可选。过期后无法使用
 - `note`：可选备注，方便管理员标记码的用途
-- `seat_type`：兑换后得到的席位类型，可选，默认 `default`。只接受两个值：`default`（ChatGPT 码）和 `prolite`（Premium 码，**Beta，验证范围见[生产测试范围](README.md#production-test-scope)**）；Codex 不出码，传其他值会被参数校验拒绝。两种码都只用已付费的空位，不管 Team 的超员策略是什么都不会加购席位；Premium 码没有空位时兑换失败、码不消耗。完整的兑换规则见 [上手指南第 5 节](docs/getting-started.md#5-让成员自己兑换)。
+- `seat_type`：兑换后得到的席位类型，可选，默认 `default`。只接受两个值：`default`（ChatGPT 码）和 `prolite`（Premium 码，**Beta，验证范围见[生产测试范围](README.zh.md#production-test-scope)**）；Codex 不出码，传其他值会被参数校验拒绝。两种码都只用已付费的空位，不管 Team 的超员策略是什么都不会加购席位；Premium 码没有空位时兑换失败、码不消耗。完整的兑换规则见 [上手指南第 5 节](docs/getting-started.md#5-让成员自己兑换)。
 
 **响应（200 OK）：**
 ```json
@@ -145,4 +145,4 @@ X-API-Key: {admin_api_key}
 
 三个接口按来源 IP 限流，反代需按[部署说明](docs/deployment.md#让后端收到真实访客-ip)传递真实客户端 IP。有效兑换码的兑换尝试另有限额：每张码每小时 10 次、全站每 10 分钟 60 次，超限返回 429，码不消耗。「请选择 Team」及服务端 / 上游 5xx 故障不占该码的次数。
 
-[返回项目介绍](README.md) · [部署与运维](docs/deployment.md) · [本地开发](docs/development.md)
+[返回项目介绍](README.zh.md) · [部署与运维](docs/deployment.md) · [本地开发](docs/development.md)
