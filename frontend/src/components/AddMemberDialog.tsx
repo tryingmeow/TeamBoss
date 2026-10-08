@@ -671,7 +671,6 @@ export default function AddMemberDialog({
       }
     >
       <div className="space-y-5">
-        <SeatProductionWarning />
         <div>
           <label htmlFor="add-member-emails" className={LABEL}>
             {retrying ? '没加上的邮箱' : '邮箱'} <span className="font-normal text-gray-400 dark:text-ink-500">每行一个</span>
@@ -717,6 +716,9 @@ export default function AddMemberDialog({
                   : `${SEAT_TYPES[effectiveSeatType].label} 按用量计费，不占付费席位。`}
               </p>
             )}
+            <div className="mt-2">
+              <SeatProductionWarning compact />
+            </div>
           </div>
         )}
 
