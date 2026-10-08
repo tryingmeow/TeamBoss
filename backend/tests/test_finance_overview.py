@@ -127,7 +127,7 @@ class FinanceOverviewTest(unittest.TestCase):
         result = asyncio.run(get_overview())
 
         alerts = [a for a in result["alerts"] if a["type"] == "low_balance"]
-        self.assertEqual([a["detail"] for a in alerts], ["Credit 余额为负 · -$300"])
+        self.assertEqual([a["detail"] for a in alerts], ["Credit 余额为负 · -300"])
 
     def test_low_but_non_negative_balance_keeps_threshold_wording(self):
         self._insert_team(
@@ -154,7 +154,7 @@ class FinanceOverviewTest(unittest.TestCase):
         result = asyncio.run(get_overview())
 
         details = [a["detail"] for a in result["alerts"] if a["type"] == "low_balance"]
-        self.assertEqual(details, ["Credit 余额 $0 低于阈值 $10"])
+        self.assertEqual(details, ["Credit 余额 0 低于阈值 10"])
 
     def test_missing_currency_balance_and_renewal_are_not_fabricated(self):
         self._insert_team(

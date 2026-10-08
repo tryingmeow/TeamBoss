@@ -12,8 +12,8 @@ import { useMembers } from '../hooks/useMembers';
 import { deleteTeam, syncTeam, updateTeamRemark, TeamAuthRejectedError } from '../api/client';
 import { billedSeatSummary, chatgptPaidSeats, premiumSeatUsage, teamPendingCounts } from '../lib/seatCapacity';
 import { OVERAGE_POLICY_OPTIONS, SEAT_STYLE, SEAT_TYPES, formatSeatTypeLabel, parseOveragePolicy } from '../lib/seatType';
-import { formatBeijingDateTime } from '../lib/formatDate';
-import { formatMoney } from '../lib/money';
+import { formatBeijingDateTime, formatDateSafe } from '../lib/formatDate';
+import { formatCredit, formatMoney } from '../lib/money';
 import { BUTTON, INPUT, PILL, TONE } from './ui';
 
 interface TeamCardProps {
@@ -175,7 +175,7 @@ function monthlyFeeTitle(team: Team, total: number, premiumPaid: number, unit: s
 
 function promoLabel(team: Team): string {
   if (team.discount_expires_at && !Number.isNaN(Date.parse(team.discount_expires_at))) {
-    return `优惠至 ${formatShortDate(team.discount_expires_at)}`;
+    return `优惠至 ${formatDateSafe(team.discount_expires_at, 'yyyy-MM-dd')}`;
   }
   return '优惠中';
 }
@@ -865,7 +865,7 @@ export default function TeamCard({
             <div className="min-w-0">
               <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">Credit</dt>
               <dd className="mt-0.5 truncate text-sm font-medium tabular-nums text-gray-900 dark:text-gray-100" title="账户 Credit">
-                {formatMoney(team.balance, unit)}
+                {formatCredit(team.balance)}
               </dd>
             </div>
             <div className="min-w-0">

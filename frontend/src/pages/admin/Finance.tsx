@@ -36,7 +36,7 @@ import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
 import { differenceInCalendarDays, parseISO } from 'date-fns';
 import { formatDateSafe, formatBeijingDateTime } from '../../lib/formatDate';
-import { formatMoney, sameCurrency, teamUnit } from '../../lib/money';
+import { formatCredit, formatMoney, sameCurrency, teamUnit } from '../../lib/money';
 import { cn } from '../../lib/utils';
 import CostTrendChart from '../../components/CostTrendChart';
 import { InvoiceSubTable } from '../../components/InvoiceTable';
@@ -1303,7 +1303,7 @@ export default function Finance() {
                             />
                           </td>
                           <td className="whitespace-nowrap px-3 py-3.5 text-right tabular-nums text-gray-600 dark:text-ink-300">
-                            {formatMoney(team.balance, sym)}
+                            {formatCredit(team.balance)}
                           </td>
                           <td className="px-3 py-3.5 last:pr-4 sm:last:pr-6">
                             {team.active_until ? (

@@ -1158,6 +1158,7 @@ export async function refreshFxRates(): Promise<RefreshFxRatesResult> {
 
 export interface PatrolStatusResponse {
   kick_enabled: boolean;
+  strict_mode_enabled: boolean;
   baseline_at: string | null;
   sync_interval_minutes: number;
   exempt_team_ids: string[];
@@ -1232,6 +1233,7 @@ export async function fetchPatrolStatus(): Promise<PatrolStatusResponse> {
 
 export async function updatePatrolSettings(body: {
   kick_enabled?: boolean;
+  strict_mode_enabled?: boolean;
   exempt_team_ids?: string[];
 }): Promise<void> {
   return request<void>('/api/patrol/settings', {

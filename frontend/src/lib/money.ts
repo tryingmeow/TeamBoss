@@ -29,6 +29,11 @@ export function formatMoney(value: number | string | null | undefined, unit: str
   return `${sign}${symbol}${body}`;
 }
 
+/** Credit is shown as a unitless balance, with the same sign and decimal handling as amounts. */
+export function formatCredit(value: number | string | null | undefined): string {
+  return formatMoney(value, '');
+}
+
 /** Currency codes compare case-insensitively; a missing code never matches. */
 export function sameCurrency(a: string | null | undefined, b: string | null | undefined): boolean {
   return Boolean(a && b && a.trim().toUpperCase() === b.trim().toUpperCase());

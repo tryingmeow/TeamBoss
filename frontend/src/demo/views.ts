@@ -24,7 +24,7 @@ import type {
 } from '../api/client';
 import type { DemoDb, DemoInvite, DemoMember, DemoTeam } from './db';
 import { FX_RATES, TEAM_SPECS, teamIdFor } from './seed';
-import { formatMoney } from '../lib/money';
+import { formatCredit } from '../lib/money';
 import { DAY, HOUR, dateOnly, isoAt, shanghaiLocal } from './time';
 
 // ── Teams & members ──
@@ -700,7 +700,9 @@ export function financeOverview(db: DemoDb): FinanceOverview & {
     if (balance !== null && Number.isFinite(balance) && balance < threshold) {
       alerts.push({
         type: 'low_balance', team_id: team.id, team_name: team.name,
-        detail: `Credit 余额 ${formatMoney(balance, team.billing_symbol || team.billing_currency)} 低于阈值 ${formatMoney(threshold, team.billing_symbol || team.billing_currency)}`,
+        detail: balance < 0
+          ? `Credit 余额为负 · ${formatCredit(balance)}`
+          : `Credit 余额 ${formatCredit(balance)} 低于阈值 ${formatCredit(threshold)}`,
       });
     }
     if (team.discount_expires_at) {

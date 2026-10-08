@@ -296,7 +296,6 @@ async def get_overview():
         team_name = team["name"]
 
         # Low balance alert
-        unit = team.get("billing_symbol") or team.get("billing_currency") or ""
         try:
             balance_float = (
                 float(team["balance"])
@@ -312,11 +311,11 @@ async def get_overview():
                 "team_id": team_id,
                 "team_name": team_name,
                 "detail": (
-                    f"Credit 余额为负 · {format_money(balance_float, unit)}"
+                    f"Credit 余额为负 · {format_money(balance_float, '')}"
                     if balance_float < 0
                     else (
-                        f"Credit 余额 {format_money(balance_float, unit)} "
-                        f"低于阈值 {format_money(float(low_balance_threshold), unit)}"
+                        f"Credit 余额 {format_money(balance_float, '')} "
+                        f"低于阈值 {format_money(float(low_balance_threshold), '')}"
                     )
                 ),
             })

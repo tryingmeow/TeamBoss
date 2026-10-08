@@ -40,6 +40,7 @@ interface ToastMessage {
 
 interface PatrolStatus {
   kick_enabled: boolean;
+  strict_mode_enabled: boolean;
   baseline_at: string | null;
   sync_interval_minutes: number;
   exempt_team_ids: string[];
@@ -96,10 +97,10 @@ type ToastType = 'success' | 'error';
  * 踢人规则只写一遍，卡片和确认弹窗共用——两处各写一份会各自漂移。
  * 巡逻只处理同步刚刷新成功的 Team，同步失败或已挂起的 Team 这一轮完全不碰。
  */
-function patrolRuleText(intervalMinutes: number): ReactNode {
+function patrolRuleText(intervalMinutes: number, strictMode: boolean): ReactNode {
   return (
     <>
-      每 {intervalMinutes} 分钟巡逻一次未豁免 Team：超出席位时清理外部成员；占用 <span className="inline-flex items-center gap-1 whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 的外部成员无论是否超出均自动清理。
+      每 {intervalMinutes} 分钟巡逻一次未豁免 Team：{strictMode ? '严格模式下，符合条件的 ChatGPT / Codex 外部成员即使未超员也会被清理，Codex Team 不再自动豁免。' : '未开启 Codex 的 Team 超出席位时清理 ChatGPT 外部成员。'}未开启 Codex 的 Team 中，占用 <span className="inline-flex items-center gap-1 whitespace-nowrap">Premium <SeatBetaBadge seatType="prolite" /></span> 的外部成员无论是否超出均自动清理。
     </>
   );
 }
@@ -385,6 +386,8 @@ function PatrolSection() {
   const [dryRunReport, setDryRunReport] = useState<DryRunReport | null>(null);
   const [activating, setActivating] = useState(false);
   const [showKickConfirm, setShowKickConfirm] = useState(false);
+  const [showStrictConfirm, setShowStrictConfirm] = useState(false);
+  const [savingStrict, setSavingStrict] = useState(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
@@ -439,6 +442,24 @@ function PatrolSection() {
     } catch (err) {
       console.error(err);
       showToast('更新踢人设置失败', 'error');
+    }
+  };
+
+  const saveStrictMode = async (enabled: boolean) => {
+    if (savingStrict) return;
+    try {
+      setSavingStrict(true);
+      await updatePatrolSettings({ strict_mode_enabled: enabled });
+      setStatus((current) => current ? { ...current, strict_mode_enabled: enabled } : current);
+      setDryRunReport(null);
+      setShowStrictConfirm(false);
+      showToast(enabled
+        ? status?.kick_enabled ? '严格模式已开启，下次巡逻按严格规则处理' : '严格模式已开启；自动踢人关闭期间仅作演练'
+        : '严格模式已关闭，恢复普通巡逻规则');
+    } catch (err) {
+      showToast(`严格模式保存失败：${errorText(err)}`, 'error');
+    } finally {
+      setSavingStrict(false);
     }
   };
 
@@ -518,7 +539,7 @@ function PatrolSection() {
   };
 
   const requestToggleExempt = (team: PatrolStatus['teams'][number]) => {
-    if (team.codex_enabled) return;
+    if (team.codex_enabled && !status?.strict_mode_enabled) return;
     setPendingExempt({ team, willExempt: !selectedTeams.has(team.team_id) });
   };
 
@@ -566,7 +587,7 @@ function PatrolSection() {
     );
   }
 
-  const exemptCount = status.teams.filter((t) => t.codex_enabled || selectedTeams.has(t.team_id)).length;
+  const exemptCount = status.teams.filter((t) => (t.codex_enabled && !status.strict_mode_enabled) || selectedTeams.has(t.team_id)).length;
 
   return (
     <div className="space-y-6">
@@ -584,7 +605,7 @@ function PatrolSection() {
             }
             description={
               <>
-                {patrolRuleText(status.sync_interval_minutes)}
+                {patrolRuleText(status.sync_interval_minutes, status.strict_mode_enabled)}
                 {status.baseline_at && (
                   <span className="mt-1 block text-xs">
                     上次保护现有成员：{formatDateSafe(status.baseline_at, 'MM-dd HH:mm:ss')}
@@ -596,8 +617,36 @@ function PatrolSection() {
               <Switch
                 checked={status.kick_enabled}
                 onChange={handleToggleKickEnabled}
-                disabled={activating}
+                disabled={activating || savingStrict}
                 aria-label="巡逻自动踢人"
+              />
+            }
+          />
+          <SettingRow
+            title={
+              <>
+                严格模式
+                <span className={cn(PILL, status.strict_mode_enabled ? TONE.warning : TONE.neutral)}>
+                  {savingStrict ? '保存中…' : status.strict_mode_enabled ? '已开启' : '已关闭'}
+                </span>
+              </>
+            }
+            description={
+              <>
+                不论是否超员，清理符合条件的 ChatGPT / Codex 外部成员；Codex Team 也纳入，手动豁免仍有效。
+                <span className="mt-1 block text-xs">
+                  仅处理保护基线后发现、非 Owner、非系统邀请且无到期记录的成员。等待时间从首次发现起算，沿用到期踢人延迟设置；执行前实时刷新复核。
+                  疑似陌生成员超过 3 人或团队人数的一半时，该 Team 本轮严格清理暂停并告警。Premium 沿用原有清理规则。
+                </span>
+                {!status.kick_enabled && <span className="mt-1 block text-xs">自动踢人当前已关闭，严格模式仅影响演练规则。</span>}
+              </>
+            }
+            control={
+              <Switch
+                checked={status.strict_mode_enabled}
+                onChange={() => status.strict_mode_enabled ? void saveStrictMode(false) : setShowStrictConfirm(true)}
+                disabled={savingStrict || activating || savingExempt || !!dryRunPhase}
+                aria-label="巡逻严格模式"
               />
             }
           />
@@ -606,8 +655,8 @@ function PatrolSection() {
             description="按当前规则预览待清理成员，不执行实际操作。支持使用缓存数据或实时同步。"
             control={
               <div className="flex flex-wrap items-center gap-2">
-                <DryRunSourceToggle value={dryRunSource} onChange={setDryRunSource} disabled={!!dryRunPhase} />
-                <button onClick={handleRunDryRun} disabled={!!dryRunPhase} className={cn(BUTTON.secondary, 'tabular-nums')}>
+                <DryRunSourceToggle value={dryRunSource} onChange={setDryRunSource} disabled={!!dryRunPhase || savingStrict} />
+                <button onClick={handleRunDryRun} disabled={!!dryRunPhase || savingStrict} className={cn(BUTTON.secondary, 'tabular-nums')}>
                   {dryRunPhase && <Loader2 className="size-4 animate-spin" aria-hidden />}
                   {!dryRunPhase
                     ? '演练空跑'
@@ -634,7 +683,9 @@ function PatrolSection() {
       <section className={cn(CARD, 'p-4 sm:p-6')}>
         <SectionHeader
           title="Team 豁免"
-          description="豁免的 Team 不执行自动踢人，检测到异常时仅发送通知。已开启 Codex 的 Team 默认自动豁免。"
+          description={status.strict_mode_enabled
+            ? '手动豁免的 Team 不执行巡逻自动踢人。严格模式下 Codex 不再自动豁免，可点击 Team 手动加入豁免。'
+            : '豁免的 Team 不执行巡逻自动踢人，检测到异常时仅发送通知。已开启 Codex 的 Team 自动豁免。'}
           aside={
             <span className="shrink-0 whitespace-nowrap pt-0.5 text-xs tabular-nums text-gray-500 dark:text-ink-400">
               已豁免 {exemptCount} / {status.teams.length}
@@ -644,7 +695,8 @@ function PatrolSection() {
         <div className="mt-4 flex flex-wrap gap-2">
           {status.teams.map((team) => {
             const exempt = selectedTeams.has(team.team_id);
-            const isProtected = team.codex_enabled || exempt;
+            const autoExempt = team.codex_enabled && !status.strict_mode_enabled;
+            const isProtected = autoExempt || exempt;
             const cls = isProtected
               ? 'border-emerald-500 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300'
               : team.risk === 'over'
@@ -652,7 +704,7 @@ function PatrolSection() {
                 : team.risk === 'watch'
                   ? 'border-amber-500 text-amber-700 hover:bg-amber-500/10 dark:text-amber-300'
                   : 'border-gray-300 text-gray-700 hover:bg-gray-100 dark:border-ink-700 dark:text-ink-200 dark:hover:bg-ink-800';
-            const state = team.codex_enabled
+            const state = autoExempt
               ? 'Codex 自动豁免'
               : `席位 ${team.active_chatgpt}/${team.seats_entitled}${team.over_by > 0 ? ` · 超额 +${team.over_by}` : ''} · ${
                   exempt ? '已豁免' : team.risk === 'over' ? '超员风险' : team.risk === 'watch' ? '观察' : '正常'
@@ -661,7 +713,7 @@ function PatrolSection() {
               <button
                 key={team.team_id}
                 type="button"
-                disabled={team.codex_enabled}
+                disabled={autoExempt || savingStrict || savingExempt}
                 aria-pressed={isProtected}
                 onClick={() => requestToggleExempt(team)}
                 title={`${team.team_id.slice(0, 8)}… · ${state}`}
@@ -680,13 +732,38 @@ function PatrolSection() {
           })}
         </div>
         <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-ink-400">
-          <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-emerald-500" />已豁免 / Codex</span>
+          <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-emerald-500" /> {status.strict_mode_enabled ? '已手动豁免' : '已豁免 / Codex'}</span>
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-gray-300 dark:border-ink-600" />正常</span>
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-amber-500" />观察</span>
           <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span className="size-2.5 rounded-full border-2 border-red-500" />超员风险</span>
           <span className="whitespace-nowrap">数值：已用席位 / 总席位</span>
         </div>
       </section>
+
+      <Dialog.Root open={showStrictConfirm} onOpenChange={(open) => !savingStrict && setShowStrictConfirm(open)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className={DIALOG_OVERLAY} />
+          <Dialog.Content className={DIALOG_CONTENT}>
+            <Dialog.Title className={cn(DIALOG_TITLE, 'flex items-center gap-2')}>
+              <AlertTriangle className="size-5 shrink-0 text-amber-500" />
+              开启严格模式
+            </Dialog.Title>
+            <Dialog.Description className={DIALOG_TEXT}>
+              开启后，未超员的 Team 和 Codex Team 中符合条件的 ChatGPT / Codex 外部成员也会被自动移除。手动豁免、现有成员保护、踢人延迟及批量保护仍有效。
+              <span className="mt-2 block">
+                不会重新保护现有成员，也不会重置等待时间；已满等待期的候选可能在下次巡逻被移除。
+                {status.kick_enabled ? '自动踢人当前已开启。' : '自动踢人当前已关闭，开启总开关后才会实际处理。'}
+              </span>
+            </Dialog.Description>
+            <div className={DIALOG_ACTIONS}>
+              <button onClick={() => setShowStrictConfirm(false)} disabled={savingStrict} className={BUTTON.secondary}>取消</button>
+              <button onClick={() => void saveStrictMode(true)} disabled={savingStrict} className={BUTTON.primary}>
+                {savingStrict ? '保存中…' : '确认开启严格模式'}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
 
       <Dialog.Root open={showKickConfirm} onOpenChange={setShowKickConfirm}>
         <Dialog.Portal>
@@ -699,7 +776,7 @@ function PatrolSection() {
             <Dialog.Description className={DIALOG_TEXT}>
               确认后将同步各 Team 成员与待处理邀请作为受保护基线，并开启自动踢人。之后的外部非受管成员将按规则处理。
               <span className="mt-2 block">
-                {patrolRuleText(status.sync_interval_minutes)}
+                {patrolRuleText(status.sync_interval_minutes, status.strict_mode_enabled)}
               </span>
             </Dialog.Description>
             <div className={DIALOG_ACTIONS}>
