@@ -578,18 +578,18 @@ def strict_mode_may_act_on_seat_type(seat_type: Any) -> bool:
     return is_known_seat_type(seat) and seat != PREMIUM_SEAT_TYPE
 
 
-def select_strict_kick_candidates(members: Any) -> list[dict]:
+def select_strict_kick_candidates(members: Any, owner_email: Any = None) -> list[dict]:
     """严格模式真正可能动手的候选 = select_strict_outsiders 里、席位类型严格模式允许动手的人
     （ChatGPT、Codex）。Premium 外部成员由 Premium 路径处理（不重复踢），注册表外的类型谁都不碰。
     顺序与 select_strict_outsiders 相同。
     """
     return [
-        m for m in select_strict_outsiders(members)
+        m for m in select_strict_outsiders(members, owner_email)
         if strict_mode_may_act_on_seat_type(m.get("seat_type"))
     ]
 
 
-def select_strict_outsiders(members: Any) -> list[dict]:
+def select_strict_outsiders(members: Any, owner_email: Any = None) -> list[dict]:
     """严格模式眼里的疑似陌生成员（不看席位类型 / 超员判定 / Codex 豁免），只要求：
 
     - 非 owner
@@ -608,7 +608,7 @@ def select_strict_outsiders(members: Any) -> list[dict]:
     for m in members:
         if not isinstance(m, dict):
             continue
-        if m.get("is_owner") is not False:
+        if m.get("is_owner") is not False or _is_team_owner_email(m, owner_email):
             continue
         if m.get("source") != "detected":
             continue
@@ -1116,6 +1116,10 @@ def _patrol_revoke_invite(conn: sqlite3.Connection, client: ChatGPTClient, team_
         reason = f"rejected: seat_type={cached_invite.get('seat_type')!r} is not a TeamBoss seat type"
         _log_operation_sync(team_id, "patrol_revoke_invite", email, reason, "failed", "safety gate rejected")
         return False, reason
+    if cached_invite.get("expires_at"):
+        reason = "rejected: cached invite has an expiry record"
+        _log_operation_sync(team_id, "patrol_revoke_invite", email, reason, "failed", "safety gate rejected")
+        return False, reason
 
     reconciliation_reject = _pending_invite_reconciliation_reject(
         conn, team_id, email=email
@@ -1141,6 +1145,15 @@ def _patrol_revoke_invite(conn: sqlite3.Connection, client: ChatGPTClient, team_
         reason = "rejected: persisted source is not detected"
         _log_operation_sync(team_id, "patrol_revoke_invite", email, reason, "failed", "safety gate rejected")
         return False, reason
+    # An invitation ID is not a member user ID: pending authorization is matched by email only.
+    pending_identity = {"email": email}
+    protection_reject = _patrol_target_protection_reject_sync(conn, team_id, pending_identity)
+    if protection_reject:
+        _log_operation_sync(
+            team_id, "patrol_revoke_invite", email,
+            protection_reject, "failed", "safety gate rejected",
+        )
+        return False, protection_reject
 
     with member_operation_claim_sync(
         conn,
@@ -1162,6 +1175,13 @@ def _patrol_revoke_invite(conn: sqlite3.Connection, client: ChatGPTClient, team_
             reason = "rejected: invite was authorized before destructive action"
             _log_operation_sync(team_id, "patrol_revoke_invite", email, reason, "failed", "safety gate rejected")
             return False, reason
+        protection_reject = _patrol_target_protection_reject_sync(conn, team_id, pending_identity)
+        if protection_reject:
+            _log_operation_sync(
+                team_id, "patrol_revoke_invite", email,
+                protection_reject, "failed", "safety gate rejected",
+            )
+            return False, protection_reject
 
         result = run_chatgpt_call_sync(client.revoke_invite, email)
         if isinstance(result, dict) and "error" in result:
@@ -1346,6 +1366,13 @@ def _patrol_strict_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id
 
     cached_user_id = cached_member.get("id") or cached_member.get("user_id") or ""
     cached_email = (cached_member.get("email") or "").strip().lower()
+    protection_reject = _patrol_target_protection_reject_sync(conn, team_id, cached_member)
+    if protection_reject:
+        _log_operation_sync(
+            team_id, "patrol_strict_kick", cached_email or email,
+            protection_reject, "failed", "safety gate rejected",
+        )
+        return False, protection_reject
     reconciliation_reject = _pending_invite_reconciliation_reject(
         conn, team_id, cached_user_id, cached_email
     )
@@ -1412,6 +1439,13 @@ def _patrol_strict_kick(conn: sqlite3.Connection, client: ChatGPTClient, team_id
             reason = "rejected: member was authorized before destructive action"
             _log_operation_sync(team_id, "patrol_strict_kick", email, reason, "failed", "safety gate rejected")
             return False, reason
+        protection_reject = _patrol_target_protection_reject_sync(conn, team_id, cached_member)
+        if protection_reject:
+            _log_operation_sync(
+                team_id, "patrol_strict_kick", email,
+                protection_reject, "failed", "safety gate rejected",
+            )
+            return False, protection_reject
 
         result = run_chatgpt_call_sync(client.remove_member, user_id)
         if isinstance(result, dict) and "error" in result:
@@ -1657,6 +1691,40 @@ def _premium_kick_veto_sync(conn: sqlite3.Connection, team_id: str, email: str, 
     if _teamboss_managed_history_sync(conn, team_id, email, user_id):
         return "TeamBoss placed or assigned a seat to this member before"
     return None
+
+
+def _patrol_target_protection_reject_sync(
+    conn: sqlite3.Connection, team_id: str, target: dict
+) -> Optional[str]:
+    """Strict removal and pending revoke preserve normal patrol's Team-scoped authorization."""
+    if _is_team_owner_email(target, _team_owner_email_sync(conn, team_id)):
+        return "rejected: target email is the Team owner_email"
+    email = (target.get("email") or "").strip().lower()
+    user_id = target.get("id") or target.get("user_id") or ""
+    if _teamboss_managed_history_sync(conn, team_id, email, user_id):
+        return "rejected: TeamBoss placed or assigned a seat to this member before"
+    return None
+
+
+def select_invite_revoke_candidates_sync(
+    conn: sqlite3.Connection, team_id: str, pending: Any
+) -> list[dict]:
+    """Preview and live revoke share expiry, owner and email-only authorization protection."""
+    return [
+        invite for invite in select_invite_revoke_candidates(pending)
+        if not invite.get("expires_at")
+        and not _patrol_target_protection_reject_sync(conn, team_id, {"email": invite.get("email")})
+    ]
+
+
+def select_strict_kick_candidates_sync(
+    conn: sqlite3.Connection, team_id: str, members: Any
+) -> list[dict]:
+    """Exclude owners and authorized history from strict candidates while preserving the raw batch guard."""
+    return [
+        member for member in select_strict_kick_candidates(members)
+        if not _patrol_target_protection_reject_sync(conn, team_id, member)
+    ]
 
 
 def select_over_quota_kick_candidates_sync(
@@ -2399,7 +2467,7 @@ def run_patrol(
             # 建立基线时该保护的邀请早已被 grandfather 成 source='system'，
             # 所以这里不需要再单独判断时间戳。
             if team_baseline_ready:
-                invite_candidates = select_invite_revoke_candidates(pending)
+                invite_candidates = select_invite_revoke_candidates_sync(conn, team_id, pending)
                 if invite_candidates:
                     if is_exempt:
                         rows = [
@@ -2466,8 +2534,8 @@ def run_patrol(
             if strict_mode_enabled and team_baseline_ready:
                 # 护栏按全部疑似陌生成员计数（不分席位类型，和以前一样）；只从允许动手的
                 # 席位类型里挑候选。Premium 外部成员走上面的 Premium 路径，未知类型只进席位提醒。
-                strict_outsiders = select_strict_outsiders(members)
-                strict_candidates = select_strict_kick_candidates(members)
+                strict_outsiders = select_strict_outsiders(members, _team_owner_email_sync(conn, team_id))
+                strict_candidates = select_strict_kick_candidates_sync(conn, team_id, members)
                 team_size = len(members)
 
                 if strict_candidates and is_exempt:
@@ -2571,8 +2639,10 @@ def run_patrol(
                                     fresh_members = json.loads(fresh_row["members_json"]) if fresh_row and fresh_row["members_json"] else []
                                 except Exception:
                                     fresh_members = []
-                                fresh_outsiders = select_strict_outsiders(fresh_members)
-                                fresh_candidates = select_strict_kick_candidates(fresh_members)
+                                fresh_outsiders = select_strict_outsiders(
+                                    fresh_members, _team_owner_email_sync(conn, team_id)
+                                )
+                                fresh_candidates = select_strict_kick_candidates_sync(conn, team_id, fresh_members)
                                 fresh_now = datetime.now(timezone.utc)
                                 fresh_ready = [
                                     c for c in fresh_candidates
