@@ -4,9 +4,11 @@
 
 [![CI](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml/badge.svg)](https://github.com/tryingmeow/TeamBoss/actions/workflows/ci.yml)
 
-**One self-hosted admin panel for seats, members, expiry dates and billing across multiple ChatGPT Team / Business workspaces.**
+**One self-hosted admin panel for one-click workspace import, member management, scheduled member sync, billing statistics, expiry auto-removal and automatic patrol across multiple ChatGPT Team / Business workspaces.**
 
 TeamBoss is for admins who already run workspaces and need to invite members in bulk and manage how long each member keeps access. Before deploying, you need your own **Owner account and a workspace with purchased seats**.
+
+**Keywords:** ChatGPT Team / ChatGPT Business management · self-hosted admin panel · one-click Session import · multi-workspace management · member management · bulk invitations · seat allocation · ChatGPT / Codex / Premium seats · scheduled member sync · member-change tracking · expiry management · automatic member removal · automatic patrol · dry-run previews · Team exemptions · overage policies · redemption codes · self-service renewal · billing statistics · invoice history · multi-currency costs · renewal reminders · Telegram bot · per-Team proxies · automatic token refresh · backup and restore · Docker Compose · admin API.
 
 > [!NOTE]
 > The admin UI and the detailed guides under `docs/` are currently in Chinese. This README covers what TeamBoss does and how to get it running.
@@ -20,11 +22,17 @@ Screenshots use fictional demo data. [More screenshots](docs/screenshots.md) · 
 
 ## Features
 
-- **Multi-Team overview**: seat usage, members, subscriptions and billing in one place, so you can see free seats and upcoming renewals at a glance.
-- **Bulk invites**: paste a list of emails and TeamBoss spreads them across the free ChatGPT seats in each Team. Individual members can be managed too.
-- **Member self-service**: members join or renew with their email and a one-time redemption code, and can look up their own expiry date. Redemptions only use seats you have already paid for; they never buy extra seats.
-- **Expiry management**: give members an access period and remove them automatically when it ends. Patrol can clean up members who joined outside TeamBoss, following rules you set.
-- **Notifications and audit log**: get status and incident alerts in Telegram, and review every operation in the admin log.
+- **One-click workspace import**: paste the Owner account’s complete Session JSON to connect a workspace. Reimport a session without losing member expiry dates, remarks or management records; access tokens refresh automatically while the session remains valid.
+- **Multi-Team and seat overview**: see workspace subscriptions, free seats, ChatGPT / Codex / Premium seat usage and upcoming renewals in one place.
+- **Member management and bulk invites**: invite members individually or in bulk, distribute bulk ChatGPT invites across available Teams, manage pending invitations, switch seat types and remove members.
+- **Seat types and overage policies**: manage ChatGPT, Codex and Premium (Beta) seats; set the default invitation seat to ChatGPT or Codex, and choose whether full paid seats block an invite, require purchase confirmation or allow automatic purchase.
+- **Scheduled member-change tracking**: periodically sync members, pending invitations and seat usage, and check whether invitations and removals have taken effect.
+- **Expiry management and automatic removal**: set or extend access periods, send renewal reminders and automatically remove expired members according to your settings.
+- **Automatic patrol and member removal**: after activation, patrol can remove outside members and revoke unfamiliar invitations according to your rules. Preview changes in a dry run and exempt Teams before enabling enforcement.
+- **Billing statistics and invoices**: review estimated monthly spending, cumulative and recent payments, invoice status and renewal costs; group billing by Team or payment card and compare currencies.
+- **Redemption codes and member self-service**: issue one-time codes with an access duration and redemption deadline; members join, renew and query expiry dates themselves. Redemptions use purchased seats and never buy extra seats.
+- **Telegram bot and audit logs**: receive status, incident and renewal reminders, use bot commands for administrative tasks, and review operation logs.
+- **Per-Team proxies and self-hosted operations**: configure a separate proxy for each workspace, deploy with Docker Compose, back up and restore the database and sessions with the bundled scripts, and automate redemption-code management through the admin API.
 
 <a id="production-test-scope"></a>
 
