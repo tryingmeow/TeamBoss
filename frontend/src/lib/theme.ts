@@ -2,7 +2,7 @@ import { useCallback, useSyncExternalStore } from 'react';
 
 /**
  * Theme = an explicit choice saved in localStorage, or (no saved choice) the OS preference.
- * index.html applies the same rule inline before first paint; keep the two in sync.
+ * public/theme-init.js applies the same rule before first paint; keep the two in sync.
  */
 const STORAGE_KEY = 'teamboss.theme';
 type StoredTheme = 'light' | 'dark';
