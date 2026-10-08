@@ -286,7 +286,7 @@ export const REMARKS: Record<string, string> = {
 /** More remarks, handed out across teams at seed time so every team has a few. */
 export const REMARK_POOL = [
   '小王 · 设计', '财务 · 李姐', '前端组', '市场部', '实习生', '外包 · 数据标注', '客服组',
-  '老客户 · 续费 3 次', '运营 · 小美', '临时 · 一周', '销售 · 华东', '测试号', '法务',
+  '老成员 · 续期 3 次', '运营 · 小美', '临时 · 一周', '销售 · 华东', '测试号', '法务',
 ];
 
 /** Remark on a pending invite, so the invite row's "remark · 待接受" layout shows up. */

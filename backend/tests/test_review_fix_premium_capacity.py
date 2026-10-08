@@ -1,7 +1,7 @@
-"""兑换卖座的两处空位算多的回归测试（review S1 / S2）。
+"""兑换分配席位时的两处空位算多的回归测试（review S1 / S2）。
 
 S1：现拉容量只读了第一页待接受邀请，名单缺失 / 结构不对时按 0 个算。空位其实已经被
-    第二页上的邀请占着，或者藏在一份读坏了的回复后面，就会被再卖一次。现在待接受邀请
+    第二页上的邀请占着，或者藏在一份读坏了的回复后面，就会被再分配一次。现在待接受邀请
     分页拉全，拉不全 = 占用未知 = 没有空位，兑换拒绝且不消耗码。
 S2：Premium 空位只看上游一个字段；没带 seat_type 的待接受邀请被当成 ChatGPT，藏住了
     Premium 占用；Premium 的预留只在内存里，重启就丢。现在 Premium 空位 =
@@ -37,8 +37,8 @@ from app.services.seat_capacity import (
 )
 from app.services.team_locks import reserve_default_seat, reserve_seat, reserved_seats
 
-EMAIL = "premium.buyer@example.com"
-OTHER = "second.buyer@example.com"
+EMAIL = "premium.redeemer@example.com"
+OTHER = "second.redeemer@example.com"
 CREATED = "2026-09-01T00:00:00+00:00"
 NO_CHATGPT_SEAT = "没有可用 ChatGPT 席位，请联系管理员"
 

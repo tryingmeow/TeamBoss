@@ -193,7 +193,7 @@ class RedeemAttemptBudgetRouteTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self._used_count(token_id), 0)
 
     async def test_upstream_failures_do_not_spend_the_codes_attempts(self):
-        # A customer retrying through an upstream outage must not lock their own code.
+        # A member retrying through an upstream outage must not lock their own code.
         raw = "atm_budget_upstream_down"
         token_id = await self._make_token(raw)
         down = AsyncMock(side_effect=HTTPException(status_code=503, detail="暂时无法确认全部 Team 的成员状态，请稍后重试"))
@@ -243,7 +243,7 @@ class RedeemAttemptBudgetRouteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._used_count(token_id), 0)
 
     async def test_refused_attempts_still_count_against_the_code(self):
-        # Outcomes the customer cannot fix by retrying (here: no free seat) keep
+        # Outcomes the member cannot fix by retrying (here: no free seat) keep
         # counting, so a valid code still cannot be replayed without limit.
         raw = "atm_budget_no_seat"
         token_id = await self._make_token(raw)

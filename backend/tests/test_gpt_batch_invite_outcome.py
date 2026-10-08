@@ -233,7 +233,7 @@ class RetryFailedSkipsUnresolvedInviteTest(_BatchInviteHarness):
 
     async def test_open_redemption_barrier_points_to_the_redemption_not_a_manual_invite(self):
         """屏障属于一笔未结兑换时，说明不能再让管理员"确认没送达就单独邀请"：
-        退码后手动补发，客户还能拿退回的码再兑换一次。"""
+        退码后手动补发，成员还能拿退回的码再兑换一次。"""
         await self._start()
         conn = self._conn()
         token_id = conn.execute(
@@ -258,14 +258,14 @@ class RetryFailedSkipsUnresolvedInviteTest(_BatchInviteHarness):
         self.assertEqual(result["added"], [])
         error = result["failed"][0]["error"]
         self.assertIn(f"#{token_use_id}", error)
-        self.assertIn("请让客户用同一兑换码重新兑换", error)
+        self.assertIn("请让成员用同一兑换码重新兑换", error)
         self.assertNotIn("单独邀请", error)
         self.assertEqual(clients[TEAM_A].invites, [])
         self.assertEqual(clients[TEAM_B].invites, [])
 
     async def test_settled_redemption_row_points_to_redeeming_again_not_a_manual_invite(self):
         """挡住批量的行挂着一笔已退码的兑换（修复前的确认兜底会在退码之后留下这种
-        'extend' 行）：说明同样不能让管理员到原 Team 单独邀请，客户还拿着能用的码。"""
+        'extend' 行）：说明同样不能让管理员到原 Team 单独邀请，成员还拿着能用的码。"""
         await self._start()
         conn = self._conn()
         token_id = conn.execute(
@@ -302,7 +302,7 @@ class RetryFailedSkipsUnresolvedInviteTest(_BatchInviteHarness):
         error = result["failed"][0]["error"]
         self.assertIn(f"#{token_use_id}", error)
         self.assertIn("已退码", error)
-        self.assertIn("请让客户用同一兑换码重新兑换", error)
+        self.assertIn("请让成员用同一兑换码重新兑换", error)
         self.assertNotIn("单独邀请", error)
         self.assertEqual(clients[TEAM_A].invites, [])
         self.assertEqual(clients[TEAM_B].invites, [])

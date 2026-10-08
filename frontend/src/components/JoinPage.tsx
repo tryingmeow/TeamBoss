@@ -94,7 +94,7 @@ function choiceExpiryText(choice: RedeemTeamChoice): string {
 
 function choiceBlockedText(choice: RedeemTeamChoice): string | null {
   // 只在后端明确说了"不能续"时才禁用。字段缺失（前端已更新、后端还没重启的
-  // 那几秒）必须按可续处理，否则会把所有车队按钮一起变灰，谁都续不了。
+  // 那几秒）必须按可续处理，否则会把所有 Team 按钮一起变灰，谁都续不了。
   if (choice.renewable !== false) return null;
   if (choice.blocked_reason === 'permanent_membership') return '不能使用兑换码续期，请联系管理员';
   return '该 Team 暂不支持续期';
@@ -238,7 +238,7 @@ export default function JoinPage() {
   const [error, setError] = useState('');
   const [redeemResult, setRedeemResult] = useState<RedeemAccessTokenResult | null>(null);
   const [statusResult, setStatusResult] = useState<MembershipStatusResult | null>(null);
-  // 车队选择提示是针对某一对（邮箱, 兑换码）算出来的。之后用户可能在输入框里
+  // Team 选择提示是针对某一对（邮箱, 兑换码）算出来的。之后用户可能在输入框里
   // 把邮箱改了，所以提交选择时必须用生成这份列表时的那对值，不能读当前表单。
   const [promptContext, setPromptContext] = useState<{ email: string; token: string } | null>(null);
   const [pendingTeamId, setPendingTeamId] = useState<string | null>(null);
@@ -252,9 +252,9 @@ export default function JoinPage() {
   };
 
   const submitRedeem = async (teamId?: string) => {
-    // 选车队的提交必须先校验、再发请求，全程保留已有的 choices：这份列表只存在
+    // 选 Team 的提交必须先校验、再发请求，全程保留已有的 choices：这份列表只存在
     // 于 redeemResult 里，提前清掉的话任何一次失败（409/429/503）都会让用户连
-    // 可点的车队都没有了，只能把整个表单重填一遍。
+    // 可点的 Team 都没有了，只能把整个表单重填一遍。
     const submitEmail = (teamId && promptContext ? promptContext.email : email).trim();
     const submitToken = (teamId && promptContext ? promptContext.token : token).trim();
 
@@ -309,7 +309,7 @@ export default function JoinPage() {
     setQueryLoading(true);
     try {
       // 兑换记录属于隐私数据，后端只在调用方能出示本人的一张兑换码时才返回。
-      // 不填也能查到车队和到期时间，只是记录那一段会是空的。
+      // 不填也能查到 Team 和到期时间，只是记录那一段会是空的。
       const proof = token.trim();
       const data = await queryMembershipStatus({
         query: email.trim(),
@@ -599,7 +599,7 @@ export default function JoinPage() {
                               </Detail>
                             )}
                             {/* 只有真正授出去的那次才有"到期"可言。失败/提示行里的
-                                到期是这张码的名义面额，显示出来等于给用户一个从
+                                到期是这张码的名义时长，显示出来等于给用户一个从
                                 未发生过的到期时间。成功且为空则是真的永久。 */}
                             {(item.result === 'success' || item.expires_at) && (
                               <Detail label="到期">{formatExpiresAt(item.expires_at)}</Detail>

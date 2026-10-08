@@ -192,7 +192,7 @@ async def _build_gpt_invite_candidates(
             codex_count=codex_count,
             active_chatgpt=chatgpt_count,
             pending_default=_pending_default_count(cache),
-            # 缓存的分类型容量也参与取小：两种算法不一致时按空位少的那个算，宁可少卖。
+            # 缓存的分类型容量也参与取小：两种算法不一致时按空位少的那个算，宁可少分配。
             seat_capacity=cached_seat_capacity(team.get("seat_capacity_json")),
         )
         reserved = await reserved_default_seats(team["id"])
@@ -629,7 +629,7 @@ async def invite_gpt_member_any_team(
     if unresolved is not None:
         label = unresolved.get("name") or unresolved["id"]
         # 这行若挂着兑换凭据（屏障 / 兜底行），"确认没送达请单独邀请"会让管理员在退码
-        # 之后手动补发，客户还能拿退回的码再兑换一次。这时改用兑换自己的说明：兑换
+        # 之后手动补发，成员还能拿退回的码再兑换一次。这时改用兑换自己的说明：兑换
         # 未结用 open_redemption_detail，已结束用 settled_redemption_row_detail。只有
         # 管理员邀请留下的行（不挂凭据）才让管理员到原 Team 单独邀请。
         open_redemption = await find_open_redemption(

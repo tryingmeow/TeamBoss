@@ -35,7 +35,7 @@ from app.services.team_locks import reserved_seats
 TEAM = "rf-prem-team"
 OTHER_TEAM = "rf-other-team"
 ABSENT = {"members": [], "pending_invites": []}
-EMAILS = [f"buyer{i}@example.com" for i in range(4)]
+EMAILS = [f"redeemer{i}@example.com" for i in range(4)]
 
 
 def _confirmation(seat_limit, *, seat_type="default", cid="admin-confirm-0001"):

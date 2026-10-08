@@ -32,7 +32,7 @@ from app.services.member_expiry import extend_member_expiry
 
 TEAM = "team-1"
 OTHER_TEAM = "team-2"
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 
 
 class _TempDbTest(unittest.TestCase):

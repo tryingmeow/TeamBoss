@@ -34,7 +34,7 @@ export const WORKSPACE_DEFAULT_SEAT_OPTIONS: Array<SeatTypeInfo & { value: Works
   { ...SEAT_TYPES.usage_based, value: 'usage_based' },
 ];
 
-/** Redemption codes sell paid seats only (Codex is pay-as-you-go). */
+/** Redemption codes grant paid seats only (Codex is pay-as-you-go). */
 export const CODE_SEAT_OPTIONS: Array<SeatTypeInfo & { value: CodeSeatType }> = [
   { ...SEAT_TYPES.default, value: 'default' },
   { ...SEAT_TYPES.prolite, value: 'prolite' },

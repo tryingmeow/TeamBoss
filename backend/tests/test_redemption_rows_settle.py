@@ -33,7 +33,7 @@ from app.utils.durations import expiry_from_duration
 
 UTC = timezone.utc
 TEAM = "team-1"
-EMAIL = "buyer@example.com"
+EMAIL = "redeemer@example.com"
 OTHER_EMAIL = "other@example.com"
 PRESENT = {"members": [{"id": "u1", "email": EMAIL}], "pending_invites": []}
 ABSENT = {"members": [], "pending_invites": []}

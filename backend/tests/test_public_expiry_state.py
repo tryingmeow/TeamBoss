@@ -1,4 +1,4 @@
-"""公开自助查询必须告诉客户到期时间为空的真实含义，不能让他们以为是永久。"""
+"""公开自助查询必须告诉成员到期时间为空的真实含义，不能让他们以为是永久。"""
 
 import _isolation  # noqa: F401  must precede any app import
 import sys
@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.routes import access_tokens
 
-EMAIL = "customer@example.com"
+EMAIL = "redeemer@example.com"
 TEAM = {"id": "team-a", "name": "Team A", "access_token": "t", "device_id": "d", "proxy_id": None}
 
 

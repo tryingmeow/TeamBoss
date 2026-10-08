@@ -404,7 +404,7 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         # failed 会在公开兑换历史里给一次成功的续期挂上一条红色失败记录。
         self.assertEqual(use_row["result"], "notice")
         self.assertIsNone(use_row["error_message"])
-        # 名义到期是这张码的面额，这次并没有授出去；留着它历史里就会显示一个
+        # 名义到期是这张码的授予时长，这次并没有授出去；留着它历史里就会显示一个
         # 从未发生过的到期时间。
         self.assertIsNone(use_row["expires_at"])
         self.assertEqual(claim_count, 0)

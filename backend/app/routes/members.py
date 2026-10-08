@@ -195,7 +195,7 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
     pending 的兑换不论落在哪个 Team 都拒（它还会换 Team）。uncertain 的兑换钉在原
     Team，按操作区分：
     * 邀请 / 重发看所有 Team：对账日后在原 Team 看见人就确认成功，管理员这时把人
-      邀进另一个 Team，客户就凭一张码占了两个席位。
+      邀进另一个 Team，成员就凭一张码占了两个席位。
     * 设置到期 / 续期只看这个 Team：对账只给原 Team 的到期记录记账，别的 Team 的
       uncertain 叠不到这条记录上。
 
@@ -206,7 +206,7 @@ async def _refuse_if_open_redemption(team_id: str, email: str, *, operation: str
     * 对账任务（兑换对账、调度器回填、管理员收尾）只结算检查时已经是
       pending/uncertain 的兑换，那些在这里已经看得见、已经拒绝。
     * 检查之后才发起的兑换，最早也要等本次写完到期才能在这个 Team 上记账，按累加
-      语义加在管理员这次的记录之上，与"管理员先邀请、客户后兑换"的串行顺序结果
+      语义加在管理员这次的记录之上，与"管理员先邀请、成员后兑换"的串行顺序结果
       相同：两笔都是真实授予，不是同一笔被记两次。
 
     续期、设置到期、移除和撤邀请均在成员操作占用之内调用，防止检查后并发记账。
@@ -368,7 +368,7 @@ def _must_reserve(seat_type: str, *, shown: bool) -> bool:
 
     * ChatGPT：刷新后的名单还没反映出来时才占（与以前相同）。
     * Premium：总是占。上游的待接受邀请万一不带 seat_type，会按 ChatGPT 计数，
-      不再占着那个 Premium 席位；宁可 15 分钟内少卖一个，也不让下一个人触发加购。
+      不再占着那个 Premium 席位；宁可 15 分钟内少分配一个，也不让下一个人触发加购。
     """
     if seat_type == PREMIUM_SEAT_TYPE:
         return True
