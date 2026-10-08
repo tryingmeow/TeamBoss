@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _seat_fixtures import NOW, OUT_OF_WINDOW, _capacity, _renewal_team as _team
+
 from app import database as app_database
 from app.routes.teams import get_team, list_teams
 from app.services import renewal_reminders, team_health_alerts
@@ -20,39 +22,6 @@ from app.services.renewal_reminders import (
     run_renewal_idle_seat_reminders_sync,
 )
 from app.services.seat_capacity import cached_seat_capacity, parse_seat_capacity
-
-NOW = datetime(2026, 10, 21, 6, 0, tzinfo=timezone.utc)
-IN_WINDOW = "2026-10-24T06:00:00Z"  # 正好 3 天后：窗口含右端
-OUT_OF_WINDOW = "2026-10-24T06:00:01Z"
-
-
-def _capacity(**entries):
-    """_capacity(default=(paid, available[, renewal_requested]))"""
-    out = {}
-    for seat_type, values in entries.items():
-        entry = {"paid": values[0], "available": values[1]}
-        if len(values) > 2:
-            entry["renewal_requested"] = values[2]
-        out[seat_type] = entry
-    return json.dumps(out)
-
-
-def _team(**overrides):
-    team = {
-        "id": "t1",
-        "name": "Lab",
-        "owner_email": "owner.long@example.com",
-        "active_until": IN_WINDOW,
-        "will_renew": 1,
-        "billing_period": "monthly",
-        "price_per_seat": 780.0,
-        "billing_currency": "THB",
-        "seat_capacity_json": _capacity(default=(2, 1, 2), prolite=(0, 0, 0)),
-        "seat_type_counts_json": json.dumps({"default": 1, "prolite": 0, "usage_based": 1}),
-        "sync_suspended_at": None,
-    }
-    team.update(overrides)
-    return team
 
 
 class RenewalIdleSeatsTest(unittest.TestCase):

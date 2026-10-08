@@ -25,11 +25,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from test_premium_patrol import (  # noqa: I001  (_isolation first)
+from _patrol_fixtures import (  # noqa: I001  (_isolation first)
+    PROD_OWNER,
+    PatrolHistoryCase,
     RecordingClient,
     _member,
+    _outsider,
 )
-from test_patrol_overage_kick import PROD_OWNER, _Fixture, _outsider
 
 from app import tg_bot
 from app.routes import patrol as patrol_routes
@@ -37,7 +39,7 @@ from app.services import patrol, team_health_alerts
 from app.services.gpt_invites import EMAIL_ALREADY_IN_TEAM
 
 
-class _R3Fixture(_Fixture):
+class _R3Fixture(PatrolHistoryCase):
     _token_seq = 0
 
     def _owner_email(self, team_id, owner_email):

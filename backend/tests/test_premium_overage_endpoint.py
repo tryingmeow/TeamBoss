@@ -4,7 +4,8 @@
 非法值 422、不存在的 Team 404。全局 skip_overage_confirmation 照收不报错，但不再生效。
 """
 
-from test_premium_overage_support import TempDbMixin  # noqa: I001  (_isolation first)
+import _isolation  # noqa: F401  must precede any app import
+from _seat_fixtures import TempDbMixin
 
 import asyncio
 import unittest

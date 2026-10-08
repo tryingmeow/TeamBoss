@@ -9,8 +9,16 @@ import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from test_patrol_overage_kick import LIVE_PROD_OWNER, PROD_OWNER, _Fixture
-from test_premium_patrol import OLD, RecordingClient, _live, _member, _pending
+from _patrol_fixtures import (
+    LIVE_PROD_OWNER,
+    OLD,
+    PROD_OWNER,
+    PatrolHistoryCase,
+    RecordingClient,
+    _live,
+    _member,
+    _pending,
+)
 
 from app import scheduler
 from app.services import patrol
@@ -131,7 +139,7 @@ class _AuthorizationCases:
         self._assert_no_action()
 
 
-class StrictAuthorizationProtectionTest(_AuthorizationCases, _Fixture):
+class StrictAuthorizationProtectionTest(_AuthorizationCases, PatrolHistoryCase):
     PATH = "strict"
     WOULD_KEY = "strict_would_kick"
     DONE_KEY = "strict_kicked"
@@ -246,7 +254,7 @@ class StrictAuthorizationProtectionTest(_AuthorizationCases, _Fixture):
         self.assertEqual(self._calls("remove_member"), [])
 
 
-class PendingAuthorizationProtectionTest(_AuthorizationCases, _Fixture):
+class PendingAuthorizationProtectionTest(_AuthorizationCases, PatrolHistoryCase):
     PATH = "pending"
     WOULD_KEY = "invites_would_revoke"
     DONE_KEY = "invites_revoked"

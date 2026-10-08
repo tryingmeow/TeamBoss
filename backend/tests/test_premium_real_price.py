@@ -5,15 +5,17 @@ year 桶（按订阅的计费周期），带上 price_period 存；财务总览�
 价格用的是公开的泰铢定价（ChatGPT「管理席位」里写的 标准 ฿780 + 税费/月、高级版 ฿3,900 + 税费/月；
 年付方案的月价 630 / 3150，一年 = 月价 × 12，按公开定价推断）。
 """
-from test_premium_overage_invite import (  # noqa: I001  (_isolation first)
-    EMAIL,
-    TEAM,
-    _InviteHarness,
+import _isolation  # noqa: F401  must precede any app import
+from _seat_fixtures import (
+    INVITE_TEAM as TEAM,
+    NOW,
+    BatchHarness,
+    InviteHarness,
+    _capacity,
     _full_default_client,
+    _renewal_team as _reminder_team,
+    capacity_entries,
 )
-from test_premium_overage_batch import _BatchHarness
-from test_premium_overage_support import capacity_entries
-from test_renewal_reminders import NOW, _capacity, _team as _reminder_team
 
 import asyncio
 import json
@@ -626,7 +628,7 @@ class SeatPriceTextTest(unittest.TestCase):
         )
 
 
-class OverageConfirmationPriceTest(_InviteHarness):
+class OverageConfirmationPriceTest(InviteHarness):
     def setUp(self):
         super().setUp()
         self.insert_team(TEAM, policy="confirm")
@@ -693,7 +695,7 @@ class OverageConfirmationPriceTest(_InviteHarness):
         self.assertNotIn("฿", detail["message"])
 
 
-class BatchConfirmationPriceTest(_BatchHarness):
+class BatchConfirmationPriceTest(BatchHarness):
     def test_plan_and_totals_carry_the_price(self):
         self.team("t-confirm", policy="confirm", created_at="2026-10-02")
         conn = self._conn()

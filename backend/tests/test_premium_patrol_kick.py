@@ -14,7 +14,6 @@
 """
 
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import contextlib
 import json
 import sys
@@ -26,15 +25,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from test_premium_patrol import (  # noqa: I001  (_isolation first)
+from _patrol_fixtures import (  # noqa: I001  (_isolation first)
     OWNER,
+    PatrolSnapshotCase,
     RecordingClient,
-    _Base,
     _live,
     _member,
+    _now,
 )
 
-from app import member_cache_service
 from app import scheduler as app_scheduler
 from app.services import patrol
 
@@ -44,72 +43,9 @@ LIVE_KEEPER = _live("keeper@example.com", "u-k", "default")
 FUTURE_START = "2999-01-01T00:00:00.000000+00:00"
 
 
-def _now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-async def _direct_call(fn, *args, **kwargs):
-    return fn(*args, **kwargs)
-
-
-class _Fixture(_Base):
-    def _cache_row(self, team_id):
-        conn = self._conn()
-        row = conn.execute(
-            "SELECT members_json, updated_at, fetch_started_at FROM member_cache WHERE team_id = ?",
-            (team_id,),
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-
-    def _cached_seat(self, team_id, user_id):
-        row = self._cache_row(team_id)
-        for m in json.loads(row["members_json"]):
-            if m.get("id") == user_id:
-                return m.get("seat_type")
-        return None
-
-    def _log(self, team_id, action, target_email, detail, result, created_at=None):
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO operation_logs (team_id, action, target_email, detail, result,
-                                           trigger_type, created_at)
-               VALUES (?, ?, ?, ?, ?, 'manual', ?)""",
-            (team_id, action, target_email, detail, result, created_at or _now()),
-        )
-        conn.commit()
-        conn.close()
-
-    def _team_row(self, team_id):
-        conn = self._conn()
-        row = conn.execute("SELECT * FROM teams WHERE id = ?", (team_id,)).fetchone()
-        conn.close()
-        return row
-
-    def _hold(self, team_id, email, *, age=timedelta(hours=1)):
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO seat_holds (team_id, email, seat_type, source, created_at)
-               VALUES (?, ?, 'prolite', 'test', ?)""",
-            (team_id, email, (datetime.now(timezone.utc) - age).isoformat()),
-        )
-        conn.commit()
-        conn.close()
-
-    def _holds(self, team_id):
-        conn = self._conn()
-        rows = conn.execute("SELECT email FROM seat_holds WHERE team_id = ?", (team_id,)).fetchall()
-        conn.close()
-        return {r["email"] for r in rows}
-
-    def _async_refresh(self, team_id, client):
-        with patch.object(member_cache_service, "run_chatgpt_call", _direct_call):
-            return asyncio.run(member_cache_service._fetch_and_cache_members_impl(team_id, client))
-
-
 # ═══ K1：快照按开始拉取的时间定先后 ═══════════════════════════════════════════
 
-class StaleRefreshTest(_Fixture):
+class StaleRefreshTest(PatrolSnapshotCase):
     def _premium_outsider_team(self, team_id):
         outsider = _member("outsider@example.com", "u-p", seat_type="prolite")
         # 早一个小时的一份快照：外部成员在 Premium 上。
@@ -194,7 +130,7 @@ class StaleRefreshTest(_Fixture):
         self.assertEqual(self._calls("remove_member"), [])
 
 
-class SnapshotWritersTest(_Fixture):
+class SnapshotWritersTest(PatrolSnapshotCase):
     """每个写完整快照的地方：记下开始时间；库里的快照开始得更晚时不覆盖；随快照对账席位占用。"""
 
     def _run_async_writer(self, team_id):
@@ -310,7 +246,7 @@ class SnapshotWritersTest(_Fixture):
 
 # ═══ K2：TeamBoss 以前拉过 / 分配过席位的人重新出现，不踢、只提醒 ═══════════════════
 
-class ManagedHistoryVetoTest(_Fixture):
+class ManagedHistoryVetoTest(PatrolSnapshotCase):
     def _history_row(self, team_id, email, user_id, *, source, kicked, created_at, kicked_at,
                      expires_at=None, kick_source="detected"):
         conn = self._conn()
@@ -445,7 +381,7 @@ class ManagedHistoryVetoTest(_Fixture):
 
 # ═══ K3：护栏数全部外部成员；Premium + 超员合计封顶 ══════════════════════════════
 
-class PremiumRoundLimitsTest(_Fixture):
+class PremiumRoundLimitsTest(PatrolSnapshotCase):
     def test_guard_counts_every_detected_outsider_with_strict_mode_off(self):
         # 6 人队阈值 = 3。外部 Premium 成员只有 1 个，但外部成员一共 4 个（含一个带到期时间的），
         # 严格模式关着（生产就是这样）：这份名单按异常处理，一个 Premium 成员都不踢。
@@ -529,7 +465,7 @@ class PremiumRoundLimitsTest(_Fixture):
 
 # ═══ 超员踢人套用 K2 的记录否决，不套 K3 的异常护栏 ═══════════════════════════════
 
-class OverQuotaHistoryAndGuardTest(_Fixture):
+class OverQuotaHistoryAndGuardTest(PatrolSnapshotCase):
     _history_row = ManagedHistoryVetoTest._history_row
     _redemption = ManagedHistoryVetoTest._redemption
 

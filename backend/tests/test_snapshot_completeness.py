@@ -13,24 +13,22 @@
 累加器本身的规则在 test_snapshot_pages.py。上游一律是只记录调用的假客户端，绝不触网。
 """
 
-from test_seat_holds_snapshot import (  # noqa: I001  (_isolation first, via the support module)
-    EMAIL,
-    TEAM,
-    USER_ID,
-    _Db,
+import _isolation  # noqa: F401  must precede any app import
+from _fixtures import direct_call
+from _patrol_fixtures import OLD, PatrolSnapshotCase, RecordingClient, _live, _member
+from _seat_fixtures import (
+    HOLDS_EMAIL as EMAIL,
+    HOLDS_TEAM as TEAM,
+    HOLDS_USER_ID as USER_ID,
+    NO_CHATGPT_SEAT,
+    PagedClient,
+    RedeemFlowCase,
+    SeatHoldsCase,
+    _filler,
     _ListClient,
     _iso,
     _patched,
-)
-from test_premium_overage_support import direct_call
-from test_premium_patrol import OLD, RecordingClient, _live, _member
-from test_premium_patrol_kick import _Fixture as _PatrolFixture
-from test_premium_redeem_capacity import (
-    NO_CHATGPT_SEAT,
-    PagedClient,
-    _filler,
     _premium_subscription,
-    _RedeemFlow,
 )
 
 import asyncio
@@ -101,7 +99,7 @@ class _SyncClient:
         return self._page(type(self).invite_pages, offset, limit)
 
 
-class _SnapshotCase(_Db):
+class _SnapshotCase(SeatHoldsCase):
     """一个 Team：缓存里有 EMAIL、一条未关的 member_expiry、一小时前占下的 prolite 席位。
 
     一份**完整**且 EMAIL 不在里面的名单会关掉那条 member_expiry、放掉那个占用；
@@ -330,7 +328,7 @@ class EmptyMemberListTest(_SnapshotCase):
                 self.assertEqual(require_items, "users" in keys)
 
 
-class StrictRefreshEmptyMemberListTest(_PatrolFixture):
+class StrictRefreshEmptyMemberListTest(PatrolSnapshotCase):
     """严格模式：一个早过了等待期的 ChatGPT 外部成员，刷新成功就会被踢。"""
 
     TEAM_ID = "team-r3-empty"
@@ -444,7 +442,7 @@ class CapacityPendingReadTest(unittest.TestCase):
         self.assertEqual(capacity.available, 0)
 
 
-class RedeemFailsClosedOnShiftingInvitesTest(_RedeemFlow):
+class RedeemFailsClosedOnShiftingInvitesTest(RedeemFlowCase):
     async def test_premium_seat_is_not_sold(self):
         await self._team()
         self._premium_upstream(paid=1, available=1, pages=SHIFTED_INVITE_PAGES)

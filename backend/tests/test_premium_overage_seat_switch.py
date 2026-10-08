@@ -5,12 +5,9 @@
 上游 change_seat_type 是唯一的写操作，被拒时绝不能发。
 """
 
-from test_premium_overage_support import (  # noqa: I001  (_isolation first)
-    FakeTeamClient,
-    TempDbMixin,
-    capacity_entries,
-    direct_call,
-)
+import _isolation  # noqa: F401  must precede any app import
+from _fixtures import direct_call
+from _seat_fixtures import FakeTeamClient, TempDbMixin, capacity_entries
 
 import asyncio
 import unittest

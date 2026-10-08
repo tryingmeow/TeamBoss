@@ -23,90 +23,27 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from test_premium_patrol import (  # noqa: I001  (_isolation first)
+from _patrol_fixtures import (  # noqa: I001  (_isolation first)
+    LIVE_PROD_OWNER,
     OLD,
+    PROD_OWNER,
+    PatrolHistoryCase,
     RecordingClient,
-    _Base,
     _live,
     _member,
+    _outsider,
 )
 
 from app.services import patrol
-
-# 生产形状：Owner 的成员条目没有席位类型，没有来源记录。
-PROD_OWNER = _member("owner@example.com", "u-owner", seat_type=None, is_owner=True, source=None)
-LIVE_PROD_OWNER = {"id": "u-owner", "email": "owner@example.com", "role": "account-owner"}
 
 
 def _iso(delta=timedelta()):
     return (datetime.now(timezone.utc) + delta).isoformat()
 
 
-def _outsider(n, *, seat_type="default", day=10):
-    return _member(f"out{n}@example.com", f"u-out{n}", seat_type=seat_type,
-                   first_seen_at=f"2026-07-{day:02d}T00:00:00+00:00")
-
-
-class _Fixture(_Base):
-    def _closed_row(self, team_id, email, user_id, *, kick_source, source="system",
-                    expires_at="2026-08-01T00:00:00+00:00"):
-        """TeamBoss 以前管过这个人、后来关掉的 member_expiry 行。"""
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO member_expiry
-               (team_id, user_id, email, expires_at, auto_kick, kicked, kicked_at, kick_source,
-                first_seen_at, source, created_at)
-               VALUES (?, ?, ?, ?, 1, 1, '2026-08-02T00:00:00+00:00', ?,
-                       '2026-07-01T00:00:00+00:00', ?, '2026-07-01T00:00:00+00:00')""",
-            (team_id, user_id, email, expires_at, kick_source, source),
-        )
-        conn.commit()
-        conn.close()
-
-    def _open_row(self, team_id, email, user_id, *, source="system"):
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO member_expiry
-               (team_id, user_id, email, expires_at, auto_kick, kicked, first_seen_at, source, created_at)
-               VALUES (?, ?, ?, '2026-12-01T00:00:00+00:00', 1, 0,
-                       '2026-07-01T00:00:00+00:00', ?, '2026-07-01T00:00:00+00:00')""",
-            (team_id, user_id, email, source),
-        )
-        conn.commit()
-        conn.close()
-
-    def _seat_log(self, team_id, action, target_email, detail, result, created_at):
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO operation_logs (team_id, action, target_email, detail, result,
-                                           trigger_type, created_at)
-               VALUES (?, ?, ?, ?, ?, 'manual', ?)""",
-            (team_id, action, target_email, detail, result, created_at),
-        )
-        conn.commit()
-        conn.close()
-
-    def _cache_row(self, team_id):
-        conn = self._conn()
-        row = conn.execute(
-            "SELECT members_json, pending_json, updated_at, fetch_started_at FROM member_cache "
-            "WHERE team_id = ?",
-            (team_id,),
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-
-    def _kick(self, team_id, member, rule=patrol.KICK_RULE_OVER_QUOTA):
-        conn = self._conn()
-        try:
-            return patrol._patrol_kick(conn, RecordingClient(), team_id, member, rule=rule)
-        finally:
-            conn.close()
-
-
 # ═══ P1：超员踢人不套外部成员过多护栏（生产形状的小 Team） ═══════════════════════
 
-class OverQuotaSmallTeamTest(_Fixture):
+class OverQuotaSmallTeamTest(PatrolHistoryCase):
     def _two_seat_team(self, team_id):
         # 2 个席位；Owner（没有席位类型，按 ChatGPT 计）+ 2 个外部成员 = 3 个 ChatGPT 席位，超 1 个。
         older, newer = _outsider(1, day=10), _outsider(2, day=20)
@@ -192,7 +129,7 @@ class OverQuotaSmallTeamTest(_Fixture):
 
 # ═══ P2：受保护者的名额不往后补 ═══════════════════════════════════════════════
 
-class OverQuotaVetoSlotTest(_Fixture):
+class OverQuotaVetoSlotTest(PatrolHistoryCase):
     def _veto_team(self, team_id, *, keepers=3):
         # Owner + 若干 TeamBoss 成员 + 一个老外部成员 + 一个最新的付费老用户（记录被同步因缺席关掉，
         # 回来后是新的 detected 行）。席位比人数少 1：超 1 个，最新的 1 个就是付费老用户。
@@ -262,7 +199,7 @@ class OverQuotaVetoSlotTest(_Fixture):
 
 # ═══ P3：只有在管 / 因缺席才没在管 / 兑换过的人受保护 ════════════════════════════
 
-class ManagedHistoryNarrowTest(_Fixture):
+class ManagedHistoryNarrowTest(PatrolHistoryCase):
     def _redemption(self, team_id, email, result):
         conn = self._conn()
         token_id = conn.execute(
@@ -347,7 +284,7 @@ class ManagedHistoryNarrowTest(_Fixture):
 
 # ═══ P4：管理员动过他的席位，就不踢 Premium、改走提醒 ═══════════════════════════════
 
-class PremiumSeatRecordTest(_Fixture):
+class PremiumSeatRecordTest(PatrolHistoryCase):
     def test_switch_to_chatgpt_logged_before_the_snapshot_blocks_the_kick(self):
         # 管理员把 Premium 外部成员切到 ChatGPT：成功日志先落库，之后开始的一次刷新里上游还列着
         # Premium。快照开始时间晚于日志，"快照之后改过席位"挡不住；有改席位记录就不能踢，交给提醒。
@@ -420,7 +357,7 @@ class PremiumSeatRecordTest(_Fixture):
 
 # ═══ H2：严格模式动手前的强制刷新只认完整名单 ═══════════════════════════════════
 
-class StrictRefreshPagingTest(_Fixture):
+class StrictRefreshPagingTest(PatrolHistoryCase):
     def _strict_team(self, team_id):
         # 严格模式：一个早就过了等待期的 ChatGPT 外部成员，刷新成功就会被踢。
         plain = _member("plain@example.com", "u-d", first_seen_at=OLD)

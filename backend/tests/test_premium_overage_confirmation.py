@@ -11,11 +11,9 @@
 上游一律是记录调用的替身，不碰 ChatGPT。
 """
 
-from test_premium_overage_support import (  # noqa: I001  (_isolation first)
-    FakeTeamClient,
-    TempDbMixin,
-    direct_call,
-)
+import _isolation  # noqa: F401  must precede any app import
+from _fixtures import direct_call
+from _seat_fixtures import FakeTeamClient, TempDbMixin
 
 import asyncio
 import re

@@ -21,8 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import HTTPException  # noqa: I001  (_isolation first)
 
-from test_premium_patrol import RecordingClient, _member
-from test_patrol_overage_kick import PROD_OWNER, _Fixture, _outsider
+from _patrol_fixtures import PROD_OWNER, PatrolHistoryCase, RecordingClient, _member
 
 from app.routes import patrol as patrol_routes
 from app.services import patrol
@@ -89,7 +88,7 @@ class _UpstreamMocks:
         )
 
 
-class _ModesFixture(_Fixture):
+class _ModesFixture(PatrolHistoryCase):
     def _over_quota_team(self, team_id, *, updated_at=None, baseline=True):
         """1 个席位：Owner + 1 个外部成员 = 超 1 个，空跑会点名这个外部成员。"""
         outsider = _member(f"out@{team_id}.com", f"u-out-{team_id}",

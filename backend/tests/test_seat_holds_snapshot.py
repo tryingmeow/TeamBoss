@@ -11,11 +11,17 @@
 上游一律是只记录调用的假客户端，绝不触网。
 """
 
-from test_premium_overage_support import (  # noqa: I001  (_isolation first)
-    FakeTeamClient,
-    TempDbMixin,
+import _isolation  # noqa: F401  must precede any app import
+from _fixtures import direct_call
+from _seat_fixtures import (
+    HOLDS_EMAIL as EMAIL,
+    HOLDS_TEAM as TEAM,
+    HOLDS_USER_ID as USER_ID,
+    SeatHoldsCase,
+    _ListClient,
+    _iso,
+    _patched,
     capacity_entries,
-    direct_call,
 )
 
 import asyncio
@@ -32,18 +38,11 @@ from app import scheduler as app_scheduler
 from app.models import ChangeSeatRequest
 from app.routes import members
 from app.services import patrol as patrol_service
-from app.services import seat_capacity, seat_holds, team_health_alerts, team_locks, tg_notify, tg_summary
+from app.services import seat_capacity, seat_holds, team_health_alerts, tg_notify, tg_summary
 
-TEAM = "r2-holds-team"
-USER_ID = "user-switch"
-EMAIL = "switch.member@example.com"
 OTHER = "other.member@example.com"
 SNAPSHOT_START = "2026-10-06T12:00:00.000000+00:00"
 GRACE = timedelta(seconds=seat_holds.HOLD_ABSENT_GRACE_SECONDS)
-
-
-def _iso(dt: datetime) -> str:
-    return dt.isoformat(timespec="microseconds")
 
 
 def _at(base: str, delta: timedelta) -> str:
@@ -52,74 +51,6 @@ def _at(base: str, delta: timedelta) -> str:
 
 def _live(email, user_id, seat_type, *, role="standard-user"):
     return {"id": user_id, "email": email, "seat_type": seat_type, "role": role}
-
-
-class _Db(TempDbMixin, unittest.TestCase):
-    def setUp(self):
-        self._start_db()
-        team_locks._reservations.clear()
-        self.addCleanup(team_locks._reservations.clear)
-
-    def put_hold(self, email, seat_type, created_at, team_id=TEAM):
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO seat_holds (team_id, email, seat_type, source, created_at)
-               VALUES (?, ?, ?, 'test', ?)""",
-            (team_id, email, seat_type, created_at),
-        )
-        conn.commit()
-        conn.close()
-
-    def holds(self, team_id=TEAM):
-        conn = self._conn()
-        rows = conn.execute(
-            "SELECT email, seat_type, created_at FROM seat_holds WHERE team_id = ? ORDER BY email",
-            (team_id,),
-        ).fetchall()
-        conn.close()
-        return [tuple(row) for row in rows]
-
-    def cache_row(self, team_id=TEAM):
-        conn = self._conn()
-        row = conn.execute(
-            "SELECT members_json, pending_json, updated_at, fetch_started_at FROM member_cache "
-            "WHERE team_id = ?",
-            (team_id,),
-        ).fetchone()
-        conn.close()
-        return dict(row) if row else None
-
-
-class _ListClient(FakeTeamClient):
-    """读接口按 offset 回预设的成员 / 邀请分页；change_seat_type 超时（结果不明）。"""
-
-    def __init__(self, *, member_pages=None, invite_pages=None, **kwargs):
-        super().__init__(**kwargs)
-        self.member_pages = member_pages if member_pages is not None else []
-        self.invite_pages = invite_pages if invite_pages is not None else [{"items": [], "total": 0}]
-        self.switch_result = {"error": "Request timed out"}
-
-    @staticmethod
-    def _page(pages, offset, limit):
-        index = offset // limit
-        if index < len(pages):
-            return json.loads(json.dumps(pages[index]))
-        return {"items": []}
-
-    def get_members(self, offset=0, limit=100):
-        self.reads.append("get_members")
-        return self._page(self.member_pages, offset, limit)
-
-    def get_pending_invites(self, offset=0, limit=100):
-        self.reads.append("get_pending_invites")
-        return self._page(self.invite_pages, offset, limit)
-
-    def change_seat_type(self, user_id, seat_type):
-        self.mutations.append(("change_seat_type", user_id, seat_type))
-        return dict(self.switch_result)
-
-    def show(self, *people):
-        self.member_pages = [{"items": list(people), "total": len(people)}]
 
 
 def _upstream_patches(client):
@@ -134,20 +65,9 @@ def _upstream_patches(client):
     ]
 
 
-@contextlib.contextmanager
-def _patched(patches):
-    for p in patches:
-        p.start()
-    try:
-        yield
-    finally:
-        for p in reversed(patches):
-            p.stop()
-
-
 # ═══ H1：只有带着被占类型出现才放，否则走 15 分钟规则 ═══════════════════════════
 
-class SwitchTimeoutHoldTest(_Db):
+class SwitchTimeoutHoldTest(SeatHoldsCase):
     """一次 Codex → Premium 切换超时，留下一个 Premium 占用，之后的完整快照怎么处理它。"""
 
     def setUp(self):
@@ -213,7 +133,7 @@ class SwitchTimeoutHoldTest(_Db):
         self.assertEqual(self.holds(), [])
 
 
-class ReleaseRuleTest(_Db):
+class ReleaseRuleTest(SeatHoldsCase):
     """契约第 3 节逐条：对一份完整快照（拉取开始 S），一行占用 (T, C) 放不放。"""
 
     def _reconcile(self, members_list, pending_list):
@@ -285,7 +205,7 @@ class ReleaseRuleTest(_Db):
 
 # ═══ H3：只删选中的那个版本 ═══════════════════════════════════════════════════════
 
-class VersionExactDeleteTest(_Db):
+class VersionExactDeleteTest(SeatHoldsCase):
     def test_hold_seat_returns_the_stored_version(self):
         async def scenario():
             first = await seat_holds.hold_seat(TEAM, EMAIL.upper(), "prolite", source="test")
@@ -392,7 +312,7 @@ INCOMPLETE_MEMBER_PAGES = {
 }
 
 
-class AsyncRefreshRejectsIncompleteSnapshotTest(_Db):
+class AsyncRefreshRejectsIncompleteSnapshotTest(SeatHoldsCase):
     PREVIOUS_START = "2026-10-01T00:00:00.000000+00:00"
 
     def setUp(self):
@@ -479,7 +399,7 @@ class _SyncClient:
         return self._page(type(self).invite_pages, offset, limit)
 
 
-class SchedulerRejectsIncompleteSnapshotTest(_Db):
+class SchedulerRejectsIncompleteSnapshotTest(SeatHoldsCase):
     SEEDED_AT = "2026-09-01T00:00:00+00:00"
 
     def setUp(self):
@@ -592,7 +512,7 @@ class SchedulerRejectsIncompleteSnapshotTest(_Db):
 
 # ═══ H4：到期时间的就地修改不盖掉更新的快照 ══════════════════════════════════════
 
-class ExpiryEditRaceTest(_Db):
+class ExpiryEditRaceTest(SeatHoldsCase):
     OLD_START = "2026-10-06T10:00:00.000000+00:00"
     NEW_START = "2026-10-06T10:05:00.000000+00:00"
 

@@ -6,86 +6,21 @@
 * 哪里都去不了：failed 里写「没位置，未邀请」，并列在 no_place_emails。
 """
 
-from test_premium_overage_support import (  # noqa: I001  (_isolation first)
-    FakeTeamClient,
-    TempDbMixin,
-    direct_call,
-)
+import _isolation  # noqa: F401  must precede any app import
+from _fixtures import direct_call
+from _seat_fixtures import ABSENT, BatchHarness
 
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
-
-from app.routes import gpt_members
-from app.services import gpt_invites, seat_capacity
+from app.services import gpt_invites
 
 
-ABSENT = {"members": [], "pending_invites": []}
 NO_PLACE = "没位置，未邀请"
 
 
-def _members(n, prefix):
-    return [{"email": f"{prefix}{i}@example.com", "seat_type": "default", "status": "active"} for i in range(n)]
-
-
-class _BatchHarness(TempDbMixin, unittest.TestCase):
-    def setUp(self):
-        self._start_db()
-        self.clients: dict[str, FakeTeamClient] = {}
-
-    def team(self, team_id, *, policy, seats=1, used=1, created_at, live_used=None, **kwargs):
-        """缓存里 ``used`` 个 ChatGPT 成员；现拉时 ``live_used``（默认同缓存）个。"""
-        self.insert_team(
-            team_id, policy=policy, seats_entitled=seats, members=_members(used, team_id),
-            created_at=created_at, **kwargs,
-        )
-        live = used if live_used is None else live_used
-        self.clients[team_id] = FakeTeamClient(
-            seats_entitled=seats, counts={"default": live, "usage_based": 0}
-        )
-
-    def submit(self, emails, *, allow_overage=False, overage_team_ids=None, overage_seat_limit=None):
-        for team_id in self.clients:
-            for email in emails:
-                self.track_reservation(team_id, email)
-        patches = [
-            patch.object(gpt_invites, "get_team_client", new=AsyncMock(side_effect=lambda t: self.clients[t])),
-            patch.object(gpt_invites, "fetch_and_cache_members", new=AsyncMock(return_value=ABSENT)),
-            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
-            patch.object(seat_capacity, "run_chatgpt_call", new=direct_call),
-            patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
-            patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),
-        ]
-        for p in patches:
-            p.start()
-        try:
-            return asyncio.run(
-                gpt_members.invite_gpt_members(
-                    gpt_members.InviteGptMembersRequest(
-                        emails=emails,
-                        expires_in="30d",
-                        allow_overage=allow_overage,
-                        **({} if overage_team_ids is None else {"overage_team_ids": overage_team_ids}),
-                        **({} if overage_seat_limit is None else {"overage_seat_limit": overage_seat_limit}),
-                    )
-                )
-            ), None
-        except HTTPException as exc:
-            return None, exc
-        finally:
-            for p in patches:
-                p.stop()
-
-    def invited(self, team_id):
-        return [m[1] for m in self.clients[team_id].mutations if m[0] == "invite_member"]
-
-    def all_mutations(self):
-        return {t: c.mutations for t, c in self.clients.items() if c.mutations}
-
-
-class AutoTeamTest(_BatchHarness):
+class AutoTeamTest(BatchHarness):
     def test_auto_team_is_overfilled_without_asking(self):
         self.team("t-auto", policy="auto", created_at="2026-10-02")
         self.team("t-forbid", policy="forbid", created_at="2026-10-01")
@@ -115,7 +50,7 @@ class AutoTeamTest(_BatchHarness):
         self.assertEqual(self.invited("t-auto"), [])
 
 
-class ConfirmTeamTest(_BatchHarness):
+class ConfirmTeamTest(BatchHarness):
     def setUp(self):
         super().setUp()
         self.team("t-confirm-new", policy="confirm", created_at="2026-10-03")
@@ -270,7 +205,7 @@ class ConfirmTeamTest(_BatchHarness):
         self.assertEqual(self.all_mutations(), {})
 
 
-class SeatCountBindingTest(_BatchHarness):
+class SeatCountBindingTest(BatchHarness):
     """确认绑定个数：问完之后空位被占了，确认后的请求最多加购确认过的个数，剩下的重新问。"""
 
     def setUp(self):
@@ -345,7 +280,7 @@ class SeatCountBindingTest(_BatchHarness):
         self.assertEqual(self.invited("t-confirm"), [])
 
 
-class ForbidOnlyTest(_BatchHarness):
+class ForbidOnlyTest(BatchHarness):
     def setUp(self):
         super().setUp()
         self.team("t-forbid-1", policy="forbid", created_at="2026-10-01")
@@ -366,7 +301,7 @@ class ForbidOnlyTest(_BatchHarness):
                 self.assertEqual(self.all_mutations(), {})
 
 
-class OverfillRereadsPolicyUnderLockTest(_BatchHarness):
+class OverfillRereadsPolicyUnderLockTest(BatchHarness):
     def test_policy_changed_to_forbid_after_candidates_were_loaded_is_respected(self):
         self.team("t-flip", policy="forbid", created_at="2026-10-01")
         stale_candidate = {"id": "t-flip", "name": "t-flip-name", "overage_policy": "confirm"}
@@ -393,7 +328,7 @@ class OverfillRereadsPolicyUnderLockTest(_BatchHarness):
         self.assertIn("reason=overage_forbidden", log["detail"])
 
 
-class CachedMinRuleTest(_BatchHarness):
+class CachedMinRuleTest(BatchHarness):
     def test_cached_per_type_capacity_wins_when_smaller(self):
         # 旧公式 2 − 1 = 1 个空位；缓存的分类型容量说 default 已经 0 个：不算空位。
         self.team("t-min", policy="forbid", seats=2, used=1, created_at="2026-10-01",
