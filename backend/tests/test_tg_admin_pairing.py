@@ -1,8 +1,6 @@
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,23 +10,14 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app import tg_bot
 
 
 class TelegramAdminPairingTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.db_dir_patch = patch.object(
-            app_database,
-            "get_db_dir",
-            return_value=self.tmpdir.name,
-        )
-        self.db_dir_patch.start()
-        self.addCleanup(self.db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
         self.path_patch = patch.object(tg_bot, "get_db_path", return_value=self.db_path)
         self.path_patch.start()
         self.addCleanup(self.path_patch.stop)

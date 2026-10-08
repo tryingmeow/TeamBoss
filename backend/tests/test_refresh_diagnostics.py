@@ -17,7 +17,6 @@ import json
 import secrets
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,9 +27,10 @@ from curl_cffi.requests import Headers, Response
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import start_temp_db
+
 from app import chatgpt_client as chatgpt_client_module
 from app import chatgpt_limiter
-from app import database as app_database
 from app import team_service
 from app.chatgpt_client import (
     ChatGPTClient,
@@ -104,14 +104,7 @@ def _session_body(access_token: str, session_token: str) -> dict:
 
 class _TempDbMixin:
     def _setup_db(self, access_token: str, session_token: str) -> None:
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
-        self.assertTrue(self.db_path.startswith(self.tmpdir.name))
+        self.db_path = start_temp_db(self)
 
         conn = sqlite3.connect(self.db_path)
         conn.execute(

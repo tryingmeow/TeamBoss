@@ -17,7 +17,6 @@ import _isolation  # noqa: F401  must precede any app import
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -25,7 +24,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import direct_call, start_temp_db_async
+
 from app.routes import access_tokens
 from app.services import gpt_invites
 from app.services.member_expiry import expires_in_to_datetime
@@ -37,10 +37,6 @@ TEAM_T = "batch-team-t"
 TEAM_U = "batch-team-u"
 ABSENT = {"members": [], "pending_invites": []}
 VISIBLE = {"members": [], "pending_invites": [{"email": EMAIL}]}
-
-
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
 
 
 class _Client:
@@ -55,13 +51,7 @@ class _Client:
 
 class BatchInviteUncertainInAnotherTeamTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        await app_database.init_database()
-        self.db_path = app_database.get_db_path()
+        self.db_path = await start_temp_db_async(self)
         # U 的最后一个席位给了那笔兑换（缓存里已满），批量拉人的候选只剩 T。
         others = [{"email": f"u{i}@example.com", "seat_type": "default"} for i in range(2)]
         for team_id, entitled, members in ((TEAM_T, 5, []), (TEAM_U, 2, others)):
@@ -145,7 +135,7 @@ class BatchInviteUncertainInAnotherTeamTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(side_effect=lambda t: clients[t])),
             patch.object(gpt_invites, "fetch_and_cache_members", new=fetch),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
             patch.object(gpt_invites, "reserve_default_seat", new=AsyncMock()),
             patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),

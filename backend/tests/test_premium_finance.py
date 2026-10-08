@@ -4,7 +4,6 @@ import asyncio
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +11,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import insert_row, start_temp_db
+
 from app.routes.finance import get_overview
 
 
@@ -22,13 +22,7 @@ def _iso_in_days(days):
 
 class PremiumFinanceTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
     def _insert_team(self, **fields):
         fields.setdefault("status", "active")
@@ -38,10 +32,8 @@ class PremiumFinanceTest(unittest.TestCase):
         fields.setdefault("billing_currency", "USD")
         fields.setdefault("will_renew", 1)
         fields.setdefault("active_until", _iso_in_days(20))
-        columns = ", ".join(fields)
-        marks = ", ".join("?" for _ in fields)
         conn = sqlite3.connect(self.db_path)
-        conn.execute(f"INSERT INTO teams ({columns}) VALUES ({marks})", tuple(fields.values()))
+        insert_row(conn, "teams", fields)
         conn.commit()
         conn.close()
 

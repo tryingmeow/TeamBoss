@@ -15,7 +15,6 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +23,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import direct_call, start_temp_db, start_temp_db_async
 
 from app import database as app_database
 from app import tg_bot
@@ -43,13 +44,7 @@ class _TempDb:
     """真实 init_database() 建表，落在临时目录里。"""
 
     def _start_db(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
@@ -110,10 +105,6 @@ class _InviteClient:
                 "_mutation_status": "confirmed"}
 
 
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
-
-
 # ── 管理员单个拉人：POST /api/teams/{team_id}/members/invite ───────────────
 
 class AdminReinviteGuardTest(_TempDb, unittest.TestCase):
@@ -129,7 +120,7 @@ class AdminReinviteGuardTest(_TempDb, unittest.TestCase):
             patch.object(members, "get_team_client", new=AsyncMock(return_value=client)),
             patch.object(members, "fetch_and_cache_members", new=fetch),
             patch.object(members, "_ensure_default_seat_available", new=AsyncMock()),
-            patch.object(members, "run_chatgpt_call", new=_direct_call),
+            patch.object(members, "run_chatgpt_call", new=direct_call),
             patch.object(members, "add_member_watch", new=AsyncMock()),
             patch.object(members, "reserve_default_seat", new=AsyncMock()),
             patch.object(members, "notify_member_event", new=AsyncMock()),
@@ -261,7 +252,7 @@ class GptBatchInviteStaleSnapshotTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=client)),
             patch.object(gpt_invites, "fetch_and_cache_members", new=fetch),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
             patch.object(gpt_invites, "record_confirmed_invite", new=record),
             patch.object(gpt_invites, "record_uncertain_invite", new=AsyncMock()),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
@@ -523,7 +514,7 @@ class AdminInviteErroredEmailTest(_TempDb, unittest.TestCase):
             patch.object(members, "fetch_and_cache_members",
                          new=AsyncMock(return_value={"members": [], "pending_invites": []})),
             patch.object(members, "_ensure_default_seat_available", new=AsyncMock()),
-            patch.object(members, "run_chatgpt_call", new=_direct_call),
+            patch.object(members, "run_chatgpt_call", new=direct_call),
             patch.object(members, "add_member_watch", new=AsyncMock()),
             patch.object(members, "reserve_default_seat", new=AsyncMock()),
             patch.object(members, "notify_member_event", new=AsyncMock()),
@@ -570,7 +561,7 @@ class GptBatchInviteErroredEmailTest(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "fetch_and_cache_members",
                          new=AsyncMock(return_value={"members": [], "pending_invites": []})),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
             patch.object(gpt_invites, "record_confirmed_invite", new=record),
             patch.object(gpt_invites, "log_operation", new=AsyncMock()),
         ):
@@ -594,13 +585,7 @@ class RedemptionErroredEmailTest(_TempDb, unittest.IsolatedAsyncioTestCase):
     """驱动真实的 redeem_access_token；上游只替换成带假 session 的真 ChatGPTClient。"""
 
     async def asyncSetUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        await app_database.init_database()
-        self.db_path = app_database.get_db_path()
+        self.db_path = await start_temp_db_async(self)
         for team_id in ("team-1", "team-2"):
             self._insert_team(team_id)
         # 每个测试的库都是新的、码 id 会重复；尝试预算是进程级单例，必须每个测试一份。
@@ -647,7 +632,7 @@ class RedemptionErroredEmailTest(_TempDb, unittest.IsolatedAsyncioTestCase):
             patch.object(access_tokens, "_get_proxy_url", new=AsyncMock(return_value=None)),
             patch.object(access_tokens, "_chatgpt_available", new=AsyncMock(return_value=(True, "ok"))),
             patch.object(access_tokens, "ChatGPTClient", _client_factory),
-            patch.object(access_tokens, "run_chatgpt_call", new=_direct_call),
+            patch.object(access_tokens, "run_chatgpt_call", new=direct_call),
             patch.object(access_tokens, "fetch_and_cache_members",
                          new=AsyncMock(return_value={"members": [], "pending_invites": []})),
             patch.object(access_tokens, "add_member_watch", new=AsyncMock()),

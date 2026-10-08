@@ -4,26 +4,20 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import start_temp_db
 
 from app import database as app_database
 
 
 class LogOperationMaskingTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
     @contextmanager
     def _conn(self):

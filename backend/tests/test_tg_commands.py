@@ -10,6 +10,8 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import start_temp_db
+
 from app import database as app_database
 from app.services import tg_commands
 
@@ -21,18 +23,7 @@ class _Response:
 
 class TelegramCommandScopeTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_dir = self.tmpdir.name
-
-        # Patch get_db_dir to return temp directory
-        self.db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        self.db_dir_patch.start()
-
-        # Initialize the database
-        import asyncio
-        asyncio.run(app_database.init_database())
-
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
         # Insert test data
         conn = sqlite3.connect(self.db_path)
@@ -51,10 +42,6 @@ class TelegramCommandScopeTest(unittest.TestCase):
         )
         conn.commit()
         conn.close()
-
-    def tearDown(self):
-        self.db_dir_patch.stop()
-        self.tmpdir.cleanup()
 
     def test_identity_precedence_is_admin_then_member_then_public(self):
         self.assertEqual(tg_commands.command_identity_sync("admin"), "admin")

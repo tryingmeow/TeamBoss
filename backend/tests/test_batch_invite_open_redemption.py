@@ -14,7 +14,6 @@ T：到期记成 now+30；对账随后在 T 里看到这个人，确认兑换，
 import _isolation  # noqa: F401  must precede any app import
 import sqlite3
 import sys
-import tempfile
 import unittest
 import uuid
 from datetime import datetime, timezone
@@ -23,7 +22,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import direct_call, start_temp_db_async
+
 from app.routes import access_tokens
 from app.services import gpt_invites
 from app.services.member_expiry import expires_in_to_datetime
@@ -38,10 +38,6 @@ ABSENT = {"members": [], "pending_invites": []}
 VISIBLE = {"members": [], "pending_invites": [{"email": EMAIL}]}
 
 
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
-
-
 class _Client:
     def __init__(self):
         self.invites = []
@@ -54,13 +50,7 @@ class _Client:
 
 class _BatchOpenRedemptionCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        await app_database.init_database()
-        self.db_path = app_database.get_db_path()
+        self.db_path = await start_temp_db_async(self)
         # 两个空 Team，候选顺序先 TEAM 后 OTHER_TEAM（空位相同，按创建时间）。
         for team_id, created_at in ((TEAM, "2026-10-01T00:00:00+00:00"),
                                     (OTHER_TEAM, "2026-10-02T00:00:00+00:00")):
@@ -132,7 +122,7 @@ class _BatchOpenRedemptionCase(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "get_team_client", new=self.get_client),
             patch.object(gpt_invites, "fetch_and_cache_members", new=self.fetch),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
             patch.object(gpt_invites, "reserve_default_seat", new=self.reserve),
             patch.object(gpt_invites, "notify_member_event", new=self.notify),

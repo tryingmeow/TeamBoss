@@ -2,15 +2,14 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import insert_row, start_temp_db
+
 from app.routes.finance import get_overview
 
 
@@ -26,29 +25,14 @@ class FinanceOverviewTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-
-        db_dir_patch = patch.object(
-            app_database, "get_db_dir", return_value=self.tmpdir.name
-        )
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
     def _insert_team(self, **fields):
         fields.setdefault("status", "active")
         fields.setdefault("created_at", "2026-07-21")
         fields.setdefault("updated_at", "2026-07-21")
-        columns = ", ".join(fields)
-        placeholders = ", ".join("?" for _ in fields)
         conn = sqlite3.connect(self.db_path)
-        conn.execute(
-            f"INSERT INTO teams ({columns}) VALUES ({placeholders})",
-            tuple(fields.values()),
-        )
+        insert_row(conn, "teams", fields)
         conn.commit()
         conn.close()
 

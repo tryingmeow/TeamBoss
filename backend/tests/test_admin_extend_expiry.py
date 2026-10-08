@@ -5,7 +5,6 @@ import asyncio
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -17,7 +16,8 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app import member_cache_service
 from app.models import ExtendExpiryRequest
 from app.routes import members
@@ -29,13 +29,7 @@ UTC = timezone.utc
 
 class AdminExtendExpiryTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
         with self._conn() as conn:
             conn.execute(

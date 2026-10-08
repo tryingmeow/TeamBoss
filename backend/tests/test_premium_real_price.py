@@ -6,6 +6,7 @@ year 桶（按订阅的计费周期），带上 price_period 存；财务总览�
 年付方案的月价 630 / 3150，一年 = 月价 × 12，按公开定价推断）。
 """
 import _isolation  # noqa: F401  must precede any app import
+from _fixtures import start_temp_db
 from _seat_fixtures import (
     INVITE_TEAM as TEAM,
     NOW,
@@ -381,13 +382,7 @@ def _iso_in_days(days):
 
 class _DbTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
     def _execute(self, sql, params=()):
         conn = sqlite3.connect(self.db_path)

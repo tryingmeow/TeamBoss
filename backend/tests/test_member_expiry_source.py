@@ -2,14 +2,14 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app import scheduler as app_scheduler
 from app.scheduler import _reconcile_pending_invites_sync
 from app.services.member_expiry import upsert_member_expiry
@@ -17,18 +17,7 @@ from app.services.member_expiry import upsert_member_expiry
 
 class MemberExpirySourceTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        self.db_dir = self.tmpdir.name
-
-        # Patch get_db_dir to return temp directory
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-
-        asyncio.run(app_database.init_database())
-
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             """INSERT INTO teams (id, name, status, created_at, updated_at)

@@ -7,15 +7,14 @@
 """
 
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import start_temp_db
 
 from app import database as app_database
 from app.services.invoices import (
@@ -155,14 +154,7 @@ class FakeInvoiceClient:
 
 class InvoiceStorageTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(
-            app_database, "get_db_dir", return_value=self.tmpdir.name
-        )
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
 
         self.conn = sqlite3.connect(app_database.get_db_path())
         self.conn.row_factory = sqlite3.Row

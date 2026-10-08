@@ -1,8 +1,6 @@
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import json
 import sqlite3
-import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -18,10 +16,11 @@ from curl_cffi.requests.exceptions import Timeout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import start_temp_db
+
 from app import chatgpt_client as chatgpt_client_module
 from app.chatgpt_client import ChatGPTClient, mask_secrets
 from app import chatgpt_limiter
-from app import database as app_database
 
 
 class MaskSecretsTest(unittest.TestCase):
@@ -75,22 +74,7 @@ class SuccessfulClient(ChatGPTClient):
 
 class ChatGPTLimiterTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_dir = self.tmpdir.name
-
-        # Patch get_db_dir to return temp directory
-        self.db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        self.db_dir_patch.start()
-
-        # Initialize the database using the patched paths
-        asyncio.run(app_database.init_database())
-
-        # Get the actual database path after initialization
-        self.db_path = app_database.get_db_path()
-
-    def tearDown(self):
-        self.db_dir_patch.stop()
-        self.tmpdir.cleanup()
+        self.db_path = start_temp_db(self)
 
     def _insert_team(self, access_token: str):
         conn = sqlite3.connect(self.db_path)

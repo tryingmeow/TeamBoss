@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import insert_row, start_temp_db
+
 from app import database as app_database
 from app.routes.resources import get_resource_usage
 from app.routes.teams import get_team, list_teams
@@ -25,22 +27,14 @@ def _member(email, seat_type):
 
 class PremiumDisplayTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
     def _insert_team(self, members=None, **fields):
         fields.setdefault("status", "active")
         fields.setdefault("created_at", "2026-10-01")
         fields.setdefault("updated_at", "2026-10-01")
-        columns = ", ".join(fields)
-        marks = ", ".join("?" for _ in fields)
         conn = sqlite3.connect(self.db_path)
-        conn.execute(f"INSERT INTO teams ({columns}) VALUES ({marks})", tuple(fields.values()))
+        insert_row(conn, "teams", fields)
         if members is not None:
             conn.execute(
                 "INSERT INTO member_cache (team_id, members_json, pending_json, updated_at) "
@@ -161,12 +155,7 @@ if __name__ == "__main__":
 
 class PendingInviteCountsTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
         conn = sqlite3.connect(app_database.get_db_path())
         for team_id in ("c1", "c2", "c3"):
             conn.execute(

@@ -17,6 +17,8 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import direct_call
+
 import httpx
 from fastapi import FastAPI, HTTPException
 
@@ -31,10 +33,6 @@ EMAIL = "premium.redeemer@example.com"
 OTHER = "someone.else@example.com"
 CREATED = "2026-09-01T00:00:00+00:00"
 FUTURE = (datetime.now(timezone.utc) + timedelta(days=10)).replace(microsecond=0).isoformat()
-
-
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
 
 
 def _subscription(*, entitled=5, in_use=0, capacity=None):
@@ -97,8 +95,8 @@ class _FlowBase(unittest.IsolatedAsyncioTestCase):
             (access_tokens, "ChatGPTClient", FakeClient),
             (access_tokens, "fetch_and_cache_members", fake_fetch),
             (access_tokens, "add_member_watch", AsyncMock()),
-            (access_tokens, "run_chatgpt_call", _direct_call),
-            (seat_capacity_module, "run_chatgpt_call", _direct_call),
+            (access_tokens, "run_chatgpt_call", direct_call),
+            (seat_capacity_module, "run_chatgpt_call", direct_call),
             (access_tokens, "notify_admins", self.notify_admins),
             (access_tokens, "_premium_notice_sent", {}),
             (access_tokens, "notify_member_event", self.notify_member_event),

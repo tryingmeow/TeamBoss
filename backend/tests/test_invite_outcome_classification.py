@@ -17,7 +17,6 @@
 import _isolation  # noqa: F401  must precede any app import
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -26,6 +25,8 @@ import requests
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import direct_call, start_temp_db_async
 
 from app import database as app_database
 from app.chatgpt_client import ChatGPTClient
@@ -44,10 +45,6 @@ def _ok_response(body):
     response.raise_for_status.return_value = None
     response.json.return_value = body
     return response
-
-
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
 
 
 # ── 1. 2xx 但 account_invites 里没有本次邮箱：不是 confirmed ─────────────────
@@ -151,13 +148,7 @@ class InviteAccountInvitesClassificationTest(unittest.TestCase):
 
 class _TempDbAsync:
     async def _start_db(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        await app_database.init_database()
-        self.db_path = app_database.get_db_path()
+        self.db_path = await start_temp_db_async(self)
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
@@ -253,7 +244,7 @@ class RedemptionAccountInvitesMissingEmailTest(_TempDbAsync, unittest.IsolatedAs
             patch.object(access_tokens, "_get_proxy_url", new=AsyncMock(return_value=None)),
             patch.object(access_tokens, "_chatgpt_available", new=AsyncMock(return_value=(True, "ok"))),
             patch.object(access_tokens, "ChatGPTClient", _client_factory),
-            patch.object(access_tokens, "run_chatgpt_call", new=_direct_call),
+            patch.object(access_tokens, "run_chatgpt_call", new=direct_call),
             # 邀请后立即现拉一次原 Team：还看不到这个人，结果仍不明确。
             patch.object(access_tokens, "fetch_and_cache_members",
                          new=AsyncMock(return_value={"members": [], "pending_invites": []})),
@@ -336,7 +327,7 @@ class GptBatchInviteStaysInTeamTest(_TempDbAsync, unittest.IsolatedAsyncioTestCa
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(side_effect=lambda t: clients[t])),
             patch.object(gpt_invites, "fetch_and_cache_members", new=AsyncMock(side_effect=_fetch)),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(side_effect=_available)),
-            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
             patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),
         ):

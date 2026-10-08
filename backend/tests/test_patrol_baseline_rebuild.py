@@ -11,11 +11,9 @@ patrol_team_baselines 行（token_expired / 重新导入），run_patrol 自动�
 全部跑在 init_database() 建出的临时库上；ChatGPT 客户端一律替换成假对象，不发任何网络请求。
 """
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +21,8 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app.services import patrol
 
 
@@ -112,14 +111,7 @@ class _UpstreamClient:
 
 class AutoRebaselineBackfillTest(unittest.TestCase):
     def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self._tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
-        self.assertTrue(self.db_path.startswith(self._tmpdir.name))
+        self.db_path = start_temp_db(self)
 
         for name, value in (
             ("notify_admins_sync", lambda *a, **kw: None),

@@ -4,7 +4,6 @@ import asyncio
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,9 +11,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import insert_row, start_temp_db
 from _seat_fixtures import NOW, OUT_OF_WINDOW, _capacity, _renewal_team as _team
 
-from app import database as app_database
 from app.routes.teams import get_team, list_teams
 from app.services import renewal_reminders, team_health_alerts
 from app.services.renewal_reminders import (
@@ -125,13 +124,7 @@ class ParseRenewalRequestedTest(unittest.TestCase):
 
 class _DbCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
         self.messages: list[str] = []
         self.deliver = 1
         notify_patch = patch.object(renewal_reminders, "notify_admins_sync", self._notify)
@@ -146,10 +139,8 @@ class _DbCase(unittest.TestCase):
         team = _team(**overrides)
         team.setdefault("status", "active")
         team["created_at"] = "2026-10-01"
-        columns = ", ".join(team)
-        marks = ", ".join("?" for _ in team)
         conn = sqlite3.connect(self.db_path)
-        conn.execute(f"INSERT INTO teams ({columns}) VALUES ({marks})", tuple(team.values()))
+        insert_row(conn, "teams", team)
         if pending_json is not None:
             conn.execute(
                 "INSERT INTO member_cache (team_id, members_json, pending_json, updated_at) VALUES (?, '[]', ?, ?)",

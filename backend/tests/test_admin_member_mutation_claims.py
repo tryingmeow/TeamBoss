@@ -1,7 +1,6 @@
 """Admin changes serialize with paid renewal and expiry removal on the same Team."""
 import _isolation  # noqa: F401
 import asyncio
-import tempfile
 import sys
 from pathlib import Path
 import unittest
@@ -11,7 +10,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database
+from _fixtures import start_temp_db
+
 from app.models import SetExpiryRequest
 from app.routes import members
 from app.services.team_locks import member_operation_claim
@@ -19,12 +19,9 @@ from app.services.team_locks import member_operation_claim
 
 class AdminMemberMutationClaimsTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        start_temp_db(self)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(patch.object(database, 'get_db_dir', return_value=self.tmp.name))
-        asyncio.run(database.init_database())
         self.resolve = self.stack.enter_context(patch.object(members, '_resolve_member_identity', new=AsyncMock(return_value=('user-1', 'member@example.com'))))
         self.open = self.stack.enter_context(patch.object(members, 'find_open_redemption', new=AsyncMock(return_value=None)))
         self.client = self.stack.enter_context(patch.object(members, 'get_team_client', new=AsyncMock(return_value=object())))

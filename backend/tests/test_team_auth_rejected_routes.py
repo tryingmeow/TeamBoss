@@ -10,7 +10,6 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,8 +20,9 @@ from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _fixtures import start_temp_db
+
 from app import chatgpt_limiter
-from app import database as app_database
 from app import team_service, team_sync_service
 from app.chatgpt_client import ChatGPTClient
 from app.models import ExtendExpiryRequest, TeamSession
@@ -59,15 +59,7 @@ def _token(delta: timedelta) -> str:
 
 class TeamAuthRejectedRoutesTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
-        # Every test here runs against the temp DB only.
-        self.assertTrue(self.db_path.startswith(self.tmpdir.name))
+        self.db_path = start_temp_db(self)  # checks the DB is inside the temp dir
 
         self.expired_token = _token(timedelta(hours=-12))
         conn = sqlite3.connect(self.db_path)

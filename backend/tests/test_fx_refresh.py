@@ -1,7 +1,6 @@
 import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,7 +10,8 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app.services import fx
 from app.services.fx import FxRefreshError, get_fx_config, refresh_fx_rates, refresh_fx_rates_safely, save_fx_rates
 
@@ -25,12 +25,7 @@ def _ok_response(payload):
 
 class FxRefreshTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        p = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        p.start()
-        self.addCleanup(p.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
 
     def test_success_saves_only_supported_currencies(self):
         payload = {"result": "success", "rates": {"USD": 1, "GBP": 0.5, "ZZZ": 9.0}}

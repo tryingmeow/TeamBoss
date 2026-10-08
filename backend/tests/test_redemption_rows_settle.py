@@ -15,7 +15,6 @@ import asyncio
 import logging
 import sqlite3
 import sys
-import tempfile
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -25,6 +24,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import temp_db_dir
 
 from app import database as app_database
 from app.routes import access_tokens
@@ -41,11 +42,7 @@ ABSENT = {"members": [], "pending_invites": []}
 
 class _RowsCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
+        temp_db_dir(self)
         no_backoff = patch.object(member_expiry, "_CONFIRM_WRITE_BACKOFF_SECONDS", 0)
         no_backoff.start()
         self.addCleanup(no_backoff.stop)

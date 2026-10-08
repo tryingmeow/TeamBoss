@@ -14,14 +14,13 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _fixtures import direct_call
+from _fixtures import direct_call, start_temp_db
 from _seat_fixtures import (
     NO_CHATGPT_SEAT,
     REDEEM_EMAIL as EMAIL,
@@ -212,12 +211,7 @@ class PersistentReservationTest(unittest.TestCase):
     def setUp(self):
         team_locks._reservations.clear()
         self.addCleanup(team_locks._reservations.clear)
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
 
     def _hold_rows(self):
         conn = sqlite3.connect(app_database.get_db_path())

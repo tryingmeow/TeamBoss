@@ -1,32 +1,21 @@
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import sqlite3
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app.services import team_health_alerts
 
 
 class TeamHealthAlertsTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_dir = self.tmpdir.name
-
-        # Patch get_db_dir to return temp directory
-        self.db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        self.db_dir_patch.start()
-
-        asyncio.run(app_database.init_database())
-
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
         conn = sqlite3.connect(self.db_path)
         conn.execute(
@@ -40,9 +29,7 @@ class TeamHealthAlertsTest(unittest.TestCase):
         team_health_alerts.notify_admins_sync = self._notify
 
     def tearDown(self):
-        self.db_dir_patch.stop()
         team_health_alerts.notify_admins_sync = self.original_notify
-        self.tmpdir.cleanup()
 
     def _notify(self, text: str) -> int:
         self.messages.append(text)

@@ -14,7 +14,6 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -25,7 +24,8 @@ from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import direct_call, start_temp_db
+
 from app.models import ExtendExpiryRequest, InviteMemberRequest, SetExpiryRequest
 from app.routes import access_tokens, members
 from app.services import open_redemptions
@@ -49,19 +49,9 @@ class _InviteClient:
                 "_mutation_status": "confirmed"}
 
 
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
-
-
 class _OpenRedemptionCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
         conn = self._conn()
         for team_id in (TEAM, OTHER_TEAM):
             conn.execute(
@@ -124,7 +114,7 @@ class _OpenRedemptionCase(unittest.TestCase):
             patch.object(members, "get_team_client", new=AsyncMock(return_value=client)),
             patch.object(members, "fetch_and_cache_members", new=fetch),
             patch.object(members, "_ensure_default_seat_available", new=AsyncMock()),
-            patch.object(members, "run_chatgpt_call", new=_direct_call),
+            patch.object(members, "run_chatgpt_call", new=direct_call),
             patch.object(members, "add_member_watch", new=AsyncMock()),
             patch.object(members, "reserve_default_seat", new=AsyncMock()),
             patch.object(members, "notify_member_event", new=AsyncMock()),

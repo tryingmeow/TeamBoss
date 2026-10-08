@@ -3,13 +3,14 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import start_temp_db
 
 from app import database as app_database
 from app.routes import finance
@@ -83,12 +84,7 @@ class InvoiceSummaryTest(unittest.TestCase):
 
 class InvoiceEndpointTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
         conn = sqlite3.connect(app_database.get_db_path())
         for team_id in ("t1", "t2"):
             conn.execute(

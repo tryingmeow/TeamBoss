@@ -15,7 +15,6 @@ import asyncio
 import logging
 import sqlite3
 import sys
-import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -24,6 +23,8 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import temp_db_dir
 
 from app import database as app_database
 from app.routes import access_tokens
@@ -38,14 +39,8 @@ ABSENT = {"members": [], "pending_invites": []}
 
 class _DeleteTeamCase(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        sessions_patch = patch.object(
-            teams_routes, "get_sessions_dir", return_value=self.tmpdir.name
-        )
+        db_dir = temp_db_dir(self)
+        sessions_patch = patch.object(teams_routes, "get_sessions_dir", return_value=db_dir)
         sessions_patch.start()
         self.addCleanup(sessions_patch.stop)
         telegram_patch = patch.object(teams_routes, "sync_email_chat_commands_sync")

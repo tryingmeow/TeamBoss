@@ -18,14 +18,14 @@ import _isolation  # noqa: F401  must precede any app import
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import direct_call, start_temp_db_async
+
 from app.routes import access_tokens, gpt_members
 from app.services import gpt_invites, member_expiry
 from app.services.team_locks import release_default_seat_reservation
@@ -36,10 +36,6 @@ TEAM_A = "outcome-team-a"
 TEAM_B = "outcome-team-b"
 ABSENT = {"members": [], "pending_invites": []}
 UNCERTAIN = {"error": "timed out", "_mutation_status": "uncertain"}
-
-
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
 
 
 def _others(prefix, count):
@@ -64,13 +60,7 @@ class _Client:
 class _BatchInviteHarness(unittest.IsolatedAsyncioTestCase):
     async def _start(self):
         """新建一份临时库，两个 Team：A 空、B 已有两个别人，候选顺序是先 A 后 B。"""
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        await app_database.init_database()
-        self.db_path = app_database.get_db_path()
+        self.db_path = await start_temp_db_async(self)
         for team_id in (TEAM_A, TEAM_B):
             # 成功邀请后的席位预留在进程内存里，跨用例会互相影响。
             await release_default_seat_reservation(team_id, EMAIL)
@@ -126,7 +116,7 @@ class _BatchInviteHarness(unittest.IsolatedAsyncioTestCase):
             patch.object(gpt_invites, "get_team_client", new=AsyncMock(side_effect=lambda t: clients[t])),
             patch.object(gpt_invites, "fetch_and_cache_members", new=AsyncMock(return_value=ABSENT)),
             patch.object(gpt_invites, "_live_gpt_available", new=AsyncMock(return_value=(True, "available=1"))),
-            patch.object(gpt_invites, "run_chatgpt_call", new=_direct_call),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
             patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
             patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),
         ):

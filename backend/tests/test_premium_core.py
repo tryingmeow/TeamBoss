@@ -3,12 +3,13 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _fixtures import direct_call, start_temp_db, temp_db_dir
 
 from app import database as app_database
 from app import seat_types
@@ -21,10 +22,6 @@ from app.services.seat_capacity import (
     fetch_live_seat_type_capacity,
     parse_seat_capacity,
 )
-
-
-async def _direct_call(func, *args, **kwargs):
-    return func(*args, **kwargs)
 
 
 class FakeClient:
@@ -158,7 +155,7 @@ class ChatGPTSeatCapacityTest(unittest.TestCase):
 
 class LiveCapacityTest(unittest.TestCase):
     def _run(self, coro):
-        with patch.object(seat_capacity, "run_chatgpt_call", new=_direct_call):
+        with patch.object(seat_capacity, "run_chatgpt_call", new=direct_call):
             return asyncio.run(coro)
 
     def test_live_default_uses_lower_per_type_value(self):
@@ -228,12 +225,7 @@ class ReservationsTest(unittest.TestCase):
         team_locks._reservations.clear()
         self.addCleanup(team_locks._reservations.clear)
         # Premium 预留另在库里占一份（seat_holds），需要一个空库。
-        tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
 
     def test_reservations_are_counted_per_type(self):
         async def scenario():
@@ -280,11 +272,7 @@ class SeatTypesHelpersTest(unittest.TestCase):
 
 class OveragePolicyMigrationTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        temp_db_dir(self)  # no schema yet: each test runs init_database() itself
         self.db_path = app_database.get_db_path()
 
     def _sql(self, sql, params=()):

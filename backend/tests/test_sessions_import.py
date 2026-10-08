@@ -3,25 +3,19 @@
 import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app.routes import sessions as sessions_route
 
 
 class SessionsImportTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.tmpdir.name)
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
+        start_temp_db(self)
 
     def test_malformed_session_does_not_echo_submitted_tokens(self):
         secret_access_token = "sk-super-secret-access-token"

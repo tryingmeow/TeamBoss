@@ -15,7 +15,6 @@ import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,7 +22,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app import scheduler as app_scheduler
 from app.scheduler import _reconcile_pending_invites_sync
 from app.services import patrol as patrol_service
@@ -37,16 +37,7 @@ EMAIL = "redeemer@example.com"
 
 class _TempDbTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        db_dir_patch = patch.object(
-            app_database, "get_db_dir", return_value=self.tmpdir.name
-        )
-        db_dir_patch.start()
-        self.addCleanup(db_dir_patch.stop)
-        asyncio.run(app_database.init_database())
-        self.db_path = app_database.get_db_path()
-        self.assertTrue(self.db_path.startswith(self.tmpdir.name))
+        self.db_path = start_temp_db(self)
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
