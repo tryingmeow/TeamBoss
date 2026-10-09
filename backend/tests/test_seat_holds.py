@@ -31,7 +31,7 @@ from fastapi import HTTPException
 from app import member_cache_service
 from app.models import ChangeSeatRequest
 from app.routes import members
-from app.services import seat_capacity, seat_holds, team_health_alerts
+from app.services import seat_capacity, seat_holds, team_health_alerts, team_locks
 
 SNAPSHOT_START = "2026-10-06T12:00:00.000000+00:00"
 GRACE = timedelta(seconds=seat_holds.HOLD_ABSENT_GRACE_SECONDS)
@@ -282,6 +282,16 @@ class VersionExactDeleteTest(SeatHoldsCase):
         started = _iso(datetime.now(timezone.utc))
         self.assertEqual(asyncio.run(seat_holds.reconcile_seat_holds(TEAM, [], [], started)), 1)
         self.assertEqual(self.holds(), [])
+
+
+# ═══ 预留层不删持久占用 ═════════════════════════════════════════════════════════════
+
+class ReservationLayerTest(unittest.TestCase):
+    def test_no_versionless_hold_release_in_the_reservation_layer(self):
+        # 持久占用只在两处放掉：上游明确拒绝（兑换流程直接调 seat_holds.release_seat_hold）
+        # 和按版本（seat_type + created_at）删除的对账。预留层那个连库里占用一起、不比版本
+        # 就删的出口没人调用，留着只会被误用成「放掉这个人的占用」。
+        self.assertFalse(hasattr(team_locks, "release_seat_reservation"))
 
 
 if __name__ == "__main__":
