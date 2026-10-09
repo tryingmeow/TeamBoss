@@ -111,7 +111,6 @@ function StatCard({
   tooltip,
   icon: Icon,
   toneKey = 'blue',
-  hideIconOnMobile = false,
   seat,
   children,
 }: {
@@ -121,7 +120,6 @@ function StatCard({
   tooltip?: ReactNode;
   icon: typeof Shield;
   toneKey?: StatToneKey;
-  hideIconOnMobile?: boolean;
   /** Tiles about one seat type wear that seat's color (same as the Team cards). */
   seat?: SeatType;
   children?: ReactNode;
@@ -160,7 +158,7 @@ function StatCard({
               </Tooltip.Root>
             )}
           </div>
-          <div className={cn('size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', hideIconOnMobile ? 'hidden sm:flex' : 'flex', tone.iconBg)}>
+          <div className={cn('size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', 'flex', tone.iconBg)}>
             <Icon className="size-4 sm:size-4.5" />
           </div>
         </div>
@@ -170,6 +168,44 @@ function StatCard({
         {children}
       </div>
       {detail ? <div className="mt-2 text-xs leading-snug text-gray-500 dark:text-ink-400">{detail}</div> : null}
+    </div>
+  );
+}
+
+function CostViewTabs({
+  label,
+  view,
+  onChange,
+  selectedColor,
+}: {
+  label: string;
+  view: 'all' | 'default' | 'prolite';
+  onChange: (view: 'all' | 'default' | 'prolite') => void;
+  selectedColor: 'indigo' | 'amber';
+}) {
+  const selectedClasses = {
+    indigo: ['bg-indigo-600 text-white shadow-xs', 'bg-blue-600 text-white shadow-xs', 'bg-pink-600 text-white shadow-xs'],
+    amber: ['bg-amber-600 text-white shadow-xs', 'bg-blue-600 text-white shadow-xs', 'bg-pink-600 text-white shadow-xs'],
+  }[selectedColor];
+  return (
+    <div role="group" aria-label={label} className="flex w-fit shrink-0 items-center gap-0.5 rounded-md bg-gray-100/90 p-0.5 sm:gap-1 dark:bg-ink-800/90">
+      {(['all', 'default', 'prolite'] as const).map((item, index) => {
+        const text = item === 'all' ? 'All' : item === 'default' ? 'ChatGPT' : 'Premium';
+        return (
+          <button
+            key={item}
+            type="button"
+            aria-pressed={view === item}
+            onClick={() => onChange(item)}
+            className={cn(
+              'rounded px-1 py-0.5 text-[10px] font-medium transition-all sm:px-1.5 sm:text-xs',
+              view === item ? selectedClasses[index] : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100',
+            )}
+          >
+            {text}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -334,6 +370,7 @@ export default function TeamManagement() {
   }, []);
 
   const [seatView, setSeatView] = useState<'default' | 'prolite'>('default');
+  const [monthlyCostView, setMonthlyCostView] = useState<'all' | 'default' | 'prolite'>('all');
   const [idleCostView, setIdleCostView] = useState<'all' | 'default' | 'prolite'>('all');
 
   const seatUtilization = data && data.total_gpt_seats > 0
@@ -416,15 +453,12 @@ export default function TeamManagement() {
     0,
   );
   const baseCurrency = finance?.base_currency || 'USD';
-  // 月预计支出里已含的真实 Premium：有 Team 不是基准币种就是换算出来的，带 ≈（和财务页同一写法）。
-  const premiumIncludedConverted = (finance?.teams ?? []).some((team) => (
-    team.status === 'active'
-    && team.subscription_status === 'renewing'
-    && team.premium_price_source === 'upstream'
-    && (team.premium_seats_paid ?? 0) > 0
-    && team.monthly_total_native !== null
-    && !sameCurrency(team.billing_currency, baseCurrency)
-  ));
+  const monthlyPremiumCost = finance?.premium_monthly_base_total ?? 0;
+  const monthlyCost = monthlyCostView === 'all'
+    ? finance?.monthly_total_base
+    : monthlyCostView === 'prolite'
+      ? monthlyPremiumCost
+      : (finance?.monthly_total_base ?? 0) - monthlyPremiumCost;
 
   return (
     <PageShell
@@ -541,57 +575,24 @@ export default function TeamManagement() {
               />
               <StatCard
                 title="月预计支出"
-                value={formatMoney(finance?.monthly_total_base, baseCurrency)}
-                detail={
-                  finance?.excluded_teams_count ? (
-                    <span className="font-medium text-amber-600 dark:text-amber-400">
-                      未计入 {finance.excluded_teams_count} 个费用不明或异常的 Team
-                    </span>
-                  ) : (finance?.premium_monthly_base_total ?? 0) > 0 ? (
-                    <span className="block">
-                      含 <span className={SEAT_STYLE.prolite.text}>Premium</span>{' '}
-                      {premiumIncludedConverted ? '≈ ' : ''}{formatMoney(finance?.premium_monthly_base_total, baseCurrency)}
-                    </span>
-                  ) : null
-                }
-                tooltip={
-                  (finance?.premium_monthly_base_total ?? 0) > 0
-                    ? '只计入活跃且自动续费的 Team（已剔除异常及已取消续费的 Team），年付按月均，含已读到单价的 Premium 席位；不含税'
-                    : '只计入活跃且自动续费的 Team（已剔除异常及已取消续费的 Team），年付按月均；不含税'
-                }
+                value={finance ? formatMoney(monthlyCost, baseCurrency) : '—'}
                 icon={Wallet}
                 toneKey="indigo"
-              />
+              >
+                <div className="mt-2.5">
+                  <CostViewTabs label="月预计支出类型" view={monthlyCostView} onChange={setMonthlyCostView} selectedColor="indigo" />
+                </div>
+              </StatCard>
               <StatCard
-                title={(
-                  <div role="group" aria-label="闲置席位折算类型" className="flex w-fit items-center gap-0.5 rounded-md bg-gray-100/90 p-0.5 sm:gap-1 dark:bg-ink-800/90">
-                    {([
-                      ['all', 'All', 'bg-amber-600 text-white shadow-xs'],
-                      ['default', 'ChatGPT', 'bg-blue-600 text-white shadow-xs'],
-                      ['prolite', 'Premium', 'bg-pink-600 text-white shadow-xs'],
-                    ] as const).map(([view, label, selectedClass]) => (
-                      <button
-                        key={view}
-                        type="button"
-                        aria-pressed={idleCostView === view}
-                        onClick={() => setIdleCostView(view)}
-                        className={cn(
-                          'rounded px-1 py-0.5 text-[10px] font-medium transition-all sm:px-1.5 sm:text-xs',
-                          idleCostView === view
-                            ? selectedClass
-                            : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100',
-                        )}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                )}
+                title="闲置席位折算"
                 value={finance ? `约 ${formatMoney(idleCost[idleCostView], baseCurrency)}` : '—'}
-                hideIconOnMobile
                 icon={CreditCard}
                 toneKey="amber"
-              />
+              >
+                <div className="mt-2.5">
+                  <CostViewTabs label="闲置席位折算类型" view={idleCostView} onChange={setIdleCostView} selectedColor="amber" />
+                </div>
+              </StatCard>
               <StatCard
                 title="近期续费 Team"
                 value={upcomingRenewals.length}
