@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -600,6 +601,67 @@ class MultiTeamSelfServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(use_row["error_message"], "team_choice_not_found")
         self.assertEqual(use_row["team_id"], "team-b")
         self.assertEqual(claim_count, 0)
+
+
+# ── 没指定 Team 时，拿锁后要重新全量扫描 ─────────────────────────────────────
+
+class RescanAfterClaimTest(unittest.IsolatedAsyncioTestCase):
+    async def test_second_team_appearing_during_the_window_asks_the_user(self):
+        @asynccontextmanager
+        async def _claim(*a, **k):
+            yield True
+
+        team_a = {"id": "team-a", "name": "A"}
+        team_b = {"id": "team-b", "name": "B"}
+        existing = {"team": team_a, "user_id": "u1", "kind": "member", "is_owner": False}
+        both = [
+            {"team": team_a, "user_id": "u1", "kind": "member", "is_owner": False},
+            {"team": team_b, "user_id": "u1", "kind": "member", "is_owner": False},
+        ]
+
+        with (
+            patch.object(access_tokens, "member_operation_claim", _claim),
+            patch.object(
+                access_tokens, "_find_all_memberships", new=AsyncMock(return_value=both)
+            ),
+            patch.object(access_tokens, "extend_member_expiry", new=AsyncMock()) as extend,
+        ):
+            result = await access_tokens._renew_existing_membership(
+                existing, "user@example.com", "30d", 1, rescan_teams=[team_a, team_b]
+            )
+
+        self.assertEqual(result["needs_selection"], both)
+        extend.assert_not_awaited()
+
+    async def test_chosen_team_path_does_not_rescan(self):
+        @asynccontextmanager
+        async def _claim(*a, **k):
+            yield True
+
+        team_a = {"id": "team-a", "name": "A"}
+        existing = {"team": team_a, "user_id": "u1", "kind": "member", "is_owner": False}
+
+        with (
+            patch.object(access_tokens, "member_operation_claim", _claim),
+            patch.object(access_tokens, "_find_all_memberships", new=AsyncMock()) as scan_all,
+            patch.object(
+                access_tokens,
+                "_find_existing_membership",
+                new=AsyncMock(return_value=existing),
+            ),
+            patch.object(access_tokens, "_set_token_use_phase", new=AsyncMock()),
+            patch.object(
+                access_tokens,
+                "extend_member_expiry",
+                new=AsyncMock(return_value="2026-10-06T00:00:00+00:00"),
+            ),
+        ):
+            result = await access_tokens._renew_existing_membership(
+                existing, "user@example.com", "30d", 1
+            )
+
+        scan_all.assert_not_awaited()
+        self.assertEqual(result["action"], "renewed_member")
 
 
 if __name__ == "__main__":

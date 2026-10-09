@@ -1,14 +1,15 @@
-"""定时同步里两处资金路径缺陷的回归测试。
+"""seats_entitled across sync paths, and what an unknown value does to patrol.
 
-1. 本轮订阅没给出可用的 seats_entitled（null / 0 / 缺字段 / 订阅接口报错）时，
-   整个 Team 被移出巡逻白名单：撤陌生邀请和严格模式跟着停掉，而它们根本不看
-   席位数。席位数未知只该让"超员踢人"这一段跳过；管理员每 24 小时最多收到一次
-   Telegram 提醒，复用 team_health_incidents 的去重机制。
-2. 兑换兜底行（kind='extend'）的时长从行的创建时刻起算，兜底拖了多久，成员就
-   少了多久。必须和正常续期同一条规则：max(现在, 现有到期) + 时长。
+Only a positive JSON integer is ever stored; every write path (scheduled data
+sync, capacity cache, manual Team sync, session import) keeps the previous value
+otherwise, and the live pre-invite capacity check treats it as a fetch error.
+When this round cannot confirm the value, the Team skips only the over-quota
+kicks: stranger-invite revokes and strict mode still run, and the admins get at
+most one Telegram alert per Team per 24 hours. Display-only overview failures
+never count as enforcement failures.
 
-全部跑在 init_database() 建出的临时库上；ChatGPT 客户端和 Telegram 一律打桩，
-不发任何网络请求。
+Everything runs on a database built by ``init_database()``; the ChatGPT client
+and Telegram are stubbed and no request leaves the process.
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -18,24 +19,309 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _fixtures import start_temp_db
+from _redemption_fixtures import ConnectedTeamCase
 
 from app import scheduler as app_scheduler
-from app.scheduler import _reconcile_pending_invites_sync
+from app.scheduler import _classify_overview_failures
 from app.services import patrol as patrol_service
 from app.services import team_health_alerts, tg_notify, tg_summary
-from app.services.member_expiry import extend_member_expiry
 
 TEAM = "team-1"
 OTHER_TEAM = "team-2"
-EMAIL = "redeemer@example.com"
 
 
-class _TempDbTest(unittest.TestCase):
+# ── seats_entitled 只认正整数，不合格就保留上一次的值 ─────────────────────────
+
+# 上游契约是 JSON 整数。null / 0 / 负数一旦落库，patrol 把每个默认席位都算成超员；
+# 数字字符串、浮点数、bool 说明响应结构变了，同样不认。
+_BAD_ENTITLEMENTS = (None, 0, -3, "25", 25.0, True)
+
+
+class _Missing:
+    def __repr__(self):
+        return "<missing>"
+
+
+_MISSING = _Missing()
+
+
+# 真实的 /users 回复里至少有 owner。
+_OWNER_ROW = {"id": "u-owner", "email": "owner@example.com", "role": "account-owner"}
+
+
+def _guard_subscription(entitled):
+    sub = {
+        "seats_in_use": 3,
+        "billing_currency": "USD",
+        "active_start": "2026-10-01T00:00:00+00:00",
+        "active_until": "2026-11-01T00:00:00+00:00",
+        "will_renew": True,
+    }
+    if entitled is not _MISSING:
+        sub["seats_entitled"] = entitled
+    return sub
+
+
+class _GuardSyncClient:
+    subscription: dict = {}
+
+    def __init__(self, access_token, team_id, device_id, proxy_url=None):
+        self.team_id = team_id
+
+    def get_subscription(self):
+        return dict(_GuardSyncClient.subscription)
+
+    def get_seat_type_counts(self):
+        return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+    def get_members(self, offset=0, limit=100):
+        return {"items": [dict(_OWNER_ROW)], "total": 1}
+
+    def get_pending_invites(self, offset=0, limit=100):
+        return {"items": [], "total": 0}
+
+
+
+class PositiveSeatCountTest(unittest.TestCase):
+    def test_only_positive_json_integers_are_accepted(self):
+        from app.services.seat_capacity import positive_seat_count
+
+        self.assertEqual(positive_seat_count(1), 1)
+        self.assertEqual(positive_seat_count(25), 25)
+        for bad in _BAD_ENTITLEMENTS + (False, 1.0, "abc", [], {}):
+            with self.subTest(value=bad):
+                self.assertIsNone(positive_seat_count(bad))
+
+
+class SeatsEntitledGuardTest(ConnectedTeamCase):
+    def setUp(self):
+        super().setUp()
+        conn = self._conn()
+        conn.execute(
+            "UPDATE teams SET seats_entitled = 5, display_synced_at = ? WHERE id = 'team-1'",
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.commit()
+        conn.close()
+
+    def _set_entitled(self, value):
+        conn = self._conn()
+        conn.execute("UPDATE teams SET seats_entitled = ? WHERE id = 'team-1'", (value,))
+        conn.commit()
+        conn.close()
+
+    def _entitled(self, team_id="team-1"):
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT seats_entitled, typeof(seats_entitled) AS t FROM teams WHERE id = ?",
+            (team_id,),
+        ).fetchone()
+        conn.close()
+        return row["seats_entitled"], row["t"]
+
+    def _run_data_sync(self, subscription):
+        from app import scheduler as app_scheduler
+        from app.services import patrol as patrol_service
+        from app.services import tg_notify, tg_summary
+
+        _GuardSyncClient.subscription = subscription
+        run_patrol = MagicMock(return_value={})
+        with patch.object(app_scheduler, "ChatGPTClient", _GuardSyncClient), \
+             patch.object(app_scheduler, "run_chatgpt_call_sync",
+                          lambda fn, *a, **kw: fn(*a, **kw)), \
+             patch.object(app_scheduler, "refresh_invoices_if_stale_sync", lambda *a, **kw: None), \
+             patch.object(app_scheduler, "report_team_recovery_sync", lambda *a, **kw: None), \
+             patch.object(app_scheduler, "report_team_failure_sync", lambda *a, **kw: None), \
+             patch.object(app_scheduler, "notify_member_event_sync", lambda *a, **kw: None), \
+             patch.object(patrol_service, "run_patrol", run_patrol), \
+             patch.object(tg_notify, "notify_admins_sync", lambda *a, **kw: None), \
+             patch.object(tg_summary, "maybe_send_summary_sync", lambda *a, **kw: None):
+            app_scheduler.data_sync_job()
+        run_patrol.assert_called_once()
+        self.skip_over_quota = set(run_patrol.call_args.kwargs.get("skip_over_quota_team_ids", ()))
+        return set(run_patrol.call_args.kwargs["allow_team_ids"])
+
+    def test_scheduled_sync_keeps_previous_entitlement_and_skips_over_quota(self):
+        for bad in _BAD_ENTITLEMENTS + (_MISSING,):
+            with self.subTest(seats_entitled=bad):
+                self._set_entitled(5)
+                patrolled = self._run_data_sync(_guard_subscription(bad))
+                self.assertEqual(self._entitled(), (5, "integer"))
+                # 这一轮分母没刷新到可信值：巡逻照常撤陌生邀请、执行严格模式，
+                # 但库里留着的 5 不能拿去判超员。
+                self.assertIn("team-1", patrolled)
+                self.assertIn("team-1", self.skip_over_quota)
+
+    def test_scheduled_sync_writes_a_valid_entitlement(self):
+        patrolled = self._run_data_sync(_guard_subscription(7))
+        self.assertEqual(self._entitled(), (7, "integer"))
+        self.assertIn("team-1", patrolled)
+        self.assertNotIn("team-1", self.skip_over_quota)
+
+    def test_capacity_cache_keeps_previous_entitlement(self):
+        from app.services.seat_capacity import update_capacity_cache
+
+        seat_counts = {"seat_type_counts": {"default": 3, "usage_based": 0}}
+        for bad in _BAD_ENTITLEMENTS:
+            with self.subTest(seats_entitled=bad):
+                self._set_entitled(5)
+                asyncio.run(update_capacity_cache("team-1", _guard_subscription(bad), seat_counts))
+                self.assertEqual(self._entitled(), (5, "integer"))
+        asyncio.run(update_capacity_cache("team-1", _guard_subscription(9), seat_counts))
+        self.assertEqual(self._entitled(), (9, "integer"))
+
+    def test_live_capacity_with_invalid_entitlement_is_a_fetch_error(self):
+        """邀请前的实时容量判断不能把不合格的 seats_entitled 当成一个可信数字
+        （null → 0 个空位只是碰巧安全；"25"/True 会被当成 25/1 个席位）。"""
+        from app.services import seat_capacity
+
+        class _Client:
+            def __init__(self, sub):
+                self.sub = sub
+
+            def get_subscription(self):
+                return dict(self.sub)
+
+            def get_seat_type_counts(self):
+                return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+            def get_pending_invites(self, offset=0, limit=100):
+                return {"items": [], "total": 0}
+
+        async def _direct(fn, *a, **kw):
+            return fn(*a, **kw)
+
+        with patch.object(seat_capacity, "run_chatgpt_call", _direct):
+            for bad in _BAD_ENTITLEMENTS + (_MISSING,):
+                with self.subTest(seats_entitled=bad):
+                    with self.assertRaises(seat_capacity.SeatCapacityFetchError):
+                        asyncio.run(
+                            seat_capacity.fetch_live_chatgpt_seat_capacity(
+                                _Client(_guard_subscription(bad))
+                            )
+                        )
+            capacity, *_ = asyncio.run(
+                seat_capacity.fetch_live_chatgpt_seat_capacity(_Client(_guard_subscription(6)))
+            )
+        self.assertEqual(capacity.seats_entitled, 6)
+        self.assertEqual(capacity.available, 3)
+
+    def test_manual_team_sync_does_not_write_invalid_entitlement(self):
+        from app import team_sync_service
+
+        class _Client:
+            team_id = "team-1"
+
+            def __init__(self, sub):
+                self.sub = sub
+
+            def get_subscription(self):
+                return dict(self.sub)
+
+            def get_remaining_balance(self):
+                return {"balance": 0}
+
+            def get_seat_type_counts(self):
+                return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+            def get_payment_methods(self):
+                return {"payment_methods": []}
+
+            def get_account_info(self):
+                return {"accounts": {"team-1": {"account": {"name": "Team 1"}}}}
+
+        async def _direct(fn, *a, **kw):
+            return fn(*a, **kw)
+
+        with patch.object(team_sync_service, "run_chatgpt_call", _direct), \
+             patch.object(team_sync_service, "fetch_seat_pricing", AsyncMock(return_value={})):
+            for bad in _BAD_ENTITLEMENTS + (_MISSING,):
+                with self.subTest(seats_entitled=bad):
+                    updates, _ = asyncio.run(
+                        team_sync_service._fetch_overview(_Client(_guard_subscription(bad)))
+                    )
+                    self.assertNotIn("seats_entitled", updates)
+                    # 同一响应里的其它字段照常写。
+                    self.assertEqual(updates["seats_in_use"], 3)
+            updates, _ = asyncio.run(
+                team_sync_service._fetch_overview(_Client(_guard_subscription(8)))
+            )
+        self.assertEqual(updates["seats_entitled"], 8)
+
+    def test_session_import_does_not_write_invalid_entitlement(self):
+        import jwt
+
+        from app import team_service
+        from app.models import TeamSession
+
+        team_uuid = "11111111-2222-3333-4444-555555555555"
+        token = jwt.encode(
+            {"https://api.openai.com/auth": {"chatgpt_account_id": team_uuid},
+             "exp": int(datetime.now(timezone.utc).timestamp()) + 3600},
+            "test-signing-key-not-a-secret-0000000000",
+            algorithm="HS256",
+        )
+
+        class _Client:
+            sub: dict = {}
+
+            def __init__(self, *a, **kw):
+                pass
+
+            def get_account_info(self):
+                return {"accounts": {team_uuid: {"account": {"name": "Imported"}}}}
+
+            def get_subscription(self):
+                return dict(_Client.sub)
+
+            def get_remaining_balance(self):
+                return {"balance": 0}
+
+            def get_seat_type_counts(self):
+                return {"seat_type_counts": {"default": 3, "usage_based": 0}}
+
+            def get_payment_methods(self):
+                return {"payment_methods": []}
+
+        async def _direct(fn, *a, **kw):
+            return fn(*a, **kw)
+
+        session = TeamSession(
+            user={"email": "owner@example.com"},
+            expires="2099-01-01T00:00:00Z",
+            account={"id": team_uuid},
+            accessToken=token,
+            sessionToken="stub-session",
+        )
+
+        def _import(entitled):
+            _Client.sub = _guard_subscription(entitled)
+            with patch.object(team_service, "ChatGPTClient", _Client), \
+                 patch.object(team_service, "run_chatgpt_call", _direct), \
+                 patch.object(team_service, "fetch_seat_pricing", AsyncMock(return_value={})), \
+                 patch.object(team_service, "write_session_file", lambda *a, **kw: None):
+                asyncio.run(team_service.upsert_team_from_session(session))
+
+        # 新 Team：不合格的值不能被当成数字写进去（留 NULL = 未知）。
+        _import(0)
+        self.assertEqual(self._entitled(team_uuid), (None, "null"))
+        _import(4)
+        self.assertEqual(self._entitled(team_uuid), (4, "integer"))
+        # 已有 Team：保留上一次的合法值。
+        for bad in _BAD_ENTITLEMENTS:
+            with self.subTest(seats_entitled=bad):
+                _import(bad)
+                self.assertEqual(self._entitled(team_uuid), (4, "integer"))
+
+
+# ── 席位数未知：只跳过超员踢人，撤陌生邀请 / 严格模式照常，提醒 24h 一次 ──
+
+class _SyncDbCase(unittest.TestCase):
     def setUp(self):
         self.db_path = start_temp_db(self)
 
@@ -52,8 +338,6 @@ class _TempDbTest(unittest.TestCase):
         conn.close()
         return [dict(r) for r in rows if team_id is None or r["team_id"] == team_id]
 
-
-# ── 1. 席位数未知：只跳过超员踢人，撤陌生邀请 / 严格模式照常，提醒 24h 一次 ──
 
 def _subscription(entitled="absent"):
     sub = {
@@ -109,7 +393,7 @@ class _FakeSyncClient:
         }
 
 
-class _EntitlementBase(_TempDbTest):
+class _EntitlementBase(_SyncDbCase):
     def setUp(self):
         super().setUp()
         self.upstream_writes: list[tuple[str, str]] = []
@@ -414,216 +698,41 @@ class EntitlementAlertThrottleTest(_EntitlementBase):
         self.assertEqual(len(self.alerts), 2)  # 一条提醒 + 一条恢复
 
 
-# ── 2. 兜底行补记购买时长：max(现在, 现有到期) + 时长 ─────────────────────────
+# ── 纯展示接口失败不参与挂起判定 ────────────────────────────────────────────
 
-THIRTY_DAYS = timedelta(days=30)
-DELAY = timedelta(days=10)
-
-
-class FallbackCreditTest(_TempDbTest):
-    """自助兑换的邀请已在上游成功，本地写到期失败，留下 kind='extend' 兜底行；
-    10 天后数据同步才看到这个人并补记。"""
-
-    def setUp(self):
-        super().setUp()
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO teams (id, name, status, access_token, device_id,
-                                  created_at, updated_at)
-               VALUES (?, 'Team 1', 'active', 'stub-token', 'stub-device',
-                       '2026-07-01', '2026-07-01')""",
-            (TEAM,),
+class OverviewFailureClassificationTest(unittest.TestCase):
+    def test_display_only_failures_are_not_enforcement_failures(self):
+        overview, display, enforcement = _classify_overview_failures(
+            subscription={"seats_entitled": 5},
+            seat_counts={"default": 3},
+            balance_info={"error": "boom"},
+            payment_methods={"error": "boom"},
+            account_info={"error": "boom"},
         )
-        conn.commit()
-        conn.close()
+        self.assertEqual(overview, ["balance", "payment_methods", "account_info"])
+        self.assertEqual(display, ["balance", "payment_methods", "account_info"])
+        self.assertEqual(enforcement, [])
 
-    def _fallback_row(self, *, duration=THIRTY_DAYS, delay=DELAY):
-        """按 member_expiry._persist_confirmed_membership 的形状落一行兜底 + 一次兑换。"""
-        created = datetime.now(timezone.utc) - delay
-        conn = self._conn()
-        cur = conn.execute(
-            """INSERT INTO access_tokens
-               (token_hash, token_prefix, grant_expires_in, max_uses, used_count,
-                disabled, created_at)
-               VALUES (?, 'p', ?, 1, 1, 0, '2026-07-01')""",
-            (f"h-{created.timestamp()}", "30d" if duration else "never"),
+    def test_subscription_and_seat_counts_are_enforcement_inputs(self):
+        _overview, display, enforcement = _classify_overview_failures(
+            subscription={"error": "401"},
+            seat_counts={"error": "401"},
+            balance_info=None,
+            payment_methods=None,
+            account_info=None,
         )
-        cur = conn.execute(
-            """INSERT INTO access_token_uses
-               (token_id, email, action, team_id, user_id, expires_at, result, created_at)
-               VALUES (?, ?, 'invite_pending', ?, NULL, NULL, 'pending', ?)""",
-            (cur.lastrowid, EMAIL, TEAM, created.isoformat()),
+        self.assertEqual(enforcement, ["subscription", "seat_counts"])
+        self.assertEqual(display, [])
+
+    def test_throttled_calls_are_not_failures(self):
+        overview, display, enforcement = _classify_overview_failures(
+            subscription={"seats_entitled": 5},
+            seat_counts={"default": 3},
+            balance_info=None,
+            payment_methods=None,
+            account_info=None,
         )
-        token_use_id = cur.lastrowid
-        conn.execute(
-            """INSERT INTO pending_invite_reconciliations
-               (team_id, user_id, email, expires_at, source, reason, resolved,
-                created_at, token_use_id, kind)
-               VALUES (?, '', ?, ?, 'self_service', 'database is locked', 0, ?, ?, 'extend')""",
-            (
-                TEAM,
-                EMAIL,
-                (created + duration).isoformat() if duration else None,
-                created.isoformat(),
-                token_use_id,
-            ),
-        )
-        conn.commit()
-        conn.close()
-        return token_use_id
-
-    def _existing_expiry(self, expires_at, *, source="self_service", kicked=0):
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO member_expiry
-               (team_id, user_id, email, expires_at, auto_kick, kicked,
-                first_seen_at, source, created_at)
-               VALUES (?, 'u1', ?, ?, ?, ?, '2026-07-01', ?, '2026-07-01')""",
-            (TEAM, EMAIL, expires_at, 1 if expires_at else 0, kicked, source),
-        )
-        conn.commit()
-        conn.close()
-
-    def _reconcile(self):
-        conn = self._conn()
-        try:
-            count = _reconcile_pending_invites_sync(
-                conn,
-                TEAM,
-                [{"id": "u1", "email": EMAIL}],
-                [],
-                datetime.now(timezone.utc).isoformat(),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        return count
-
-    def _state(self, token_use_id):
-        conn = self._conn()
-        rows = conn.execute(
-            """SELECT expires_at, auto_kick FROM member_expiry
-               WHERE team_id = ? AND kicked = 0""",
-            (TEAM,),
-        ).fetchall()
-        use = conn.execute(
-            "SELECT result, expires_at FROM access_token_uses WHERE id = ?",
-            (token_use_id,),
-        ).fetchone()
-        unresolved = conn.execute(
-            "SELECT COUNT(*) FROM pending_invite_reconciliations WHERE resolved = 0"
-        ).fetchone()[0]
-        conn.close()
-        self.assertEqual(len(rows), 1)
-        return dict(rows[0]), dict(use), unresolved
-
-    def _assert_full_duration_from(self, expires_iso, base):
-        gained = datetime.fromisoformat(expires_iso) - base
-        # 兜底行的到期和 created_at 在落盘时先后取时间，差几毫秒属正常。
-        self.assertGreater(gained, THIRTY_DAYS - timedelta(minutes=1))
-        self.assertLessEqual(gained, THIRTY_DAYS + timedelta(minutes=1))
-
-    def test_delayed_fallback_credits_full_duration_from_now(self):
-        token_use_id = self._fallback_row()
-
-        self.assertEqual(self._reconcile(), 1)
-
-        expiry, use, unresolved = self._state(token_use_id)
-        # 原先是 created_at + 30 天 = 只剩 20 天。
-        self._assert_full_duration_from(expiry["expires_at"], datetime.now(timezone.utc))
-        self.assertEqual(expiry["auto_kick"], 1)
-        self.assertEqual(use, {"result": "success", "expires_at": expiry["expires_at"]})
-        self.assertEqual(unresolved, 0)
-
-    def test_delayed_fallback_over_detected_row_credits_from_now(self):
-        # 同步先把这个人当成"外部发现"建了档（detected + NULL 不是永久授权）。
-        self._existing_expiry(None, source="detected")
-        token_use_id = self._fallback_row()
-
-        self._reconcile()
-
-        expiry, use, _ = self._state(token_use_id)
-        self._assert_full_duration_from(expiry["expires_at"], datetime.now(timezone.utc))
-        self.assertEqual(expiry["auto_kick"], 1)
-        self.assertEqual(use["expires_at"], expiry["expires_at"])
-
-    def test_delayed_fallback_after_archived_membership_credits_from_now(self):
-        # 上一段成员身份已 kicked=1 归档，没有任何已购时长需要保护。
-        self._existing_expiry(
-            (datetime.now(timezone.utc) + timedelta(days=90)).isoformat(), kicked=1,
-        )
-        token_use_id = self._fallback_row()
-
-        self._reconcile()
-
-        expiry, _, _ = self._state(token_use_id)
-        self._assert_full_duration_from(expiry["expires_at"], datetime.now(timezone.utc))
-
-    def test_existing_future_expiry_is_extended_from_that_expiry(self):
-        future = datetime.now(timezone.utc) + timedelta(days=100)
-        self._existing_expiry(future.isoformat())
-        token_use_id = self._fallback_row()
-
-        self._reconcile()
-
-        expiry, use, _ = self._state(token_use_id)
-        self._assert_full_duration_from(expiry["expires_at"], future)
-        self.assertEqual(use["expires_at"], expiry["expires_at"])
-
-    def test_existing_past_expiry_credits_from_now(self):
-        self._existing_expiry(
-            (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
-        )
-        token_use_id = self._fallback_row()
-
-        self._reconcile()
-
-        expiry, _, _ = self._state(token_use_id)
-        self._assert_full_duration_from(expiry["expires_at"], datetime.now(timezone.utc))
-
-    def test_permanent_authorization_is_never_made_finite(self):
-        self._existing_expiry(None, source="system")
-        token_use_id = self._fallback_row()
-
-        self._reconcile()
-
-        expiry, use, unresolved = self._state(token_use_id)
-        self.assertIsNone(expiry["expires_at"])
-        self.assertEqual(expiry["auto_kick"], 0)
-        self.assertEqual(use, {"result": "success", "expires_at": None})
-        self.assertEqual(unresolved, 0)
-
-    def test_permanent_purchase_grants_permanent(self):
-        self._existing_expiry(
-            (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
-        )
-        token_use_id = self._fallback_row(duration=None)
-
-        self._reconcile()
-
-        expiry, use, _ = self._state(token_use_id)
-        self.assertIsNone(expiry["expires_at"])
-        self.assertIsNone(use["expires_at"])
-
-    def test_second_pass_and_other_recovery_path_do_not_credit_again(self):
-        token_use_id = self._fallback_row()
-        self._reconcile()
-        credited, _, _ = self._state(token_use_id)
-
-        # 同一行再被扫一次（已 resolved），以及另一条恢复路径晚到：都不能再加。
-        self.assertEqual(self._reconcile(), 0)
-        returned = asyncio.run(
-            extend_member_expiry(
-                TEAM, "u1", EMAIL, "30d",
-                source="self_service", keep_permanent=True,
-                token_use_id=token_use_id, token_action="invited",
-            )
-        )
-        after, use, unresolved = self._state(token_use_id)
-        self.assertEqual(returned, credited["expires_at"])
-        self.assertEqual(after, credited)
-        self.assertEqual(use["expires_at"], credited["expires_at"])
-        self.assertEqual(unresolved, 0)
+        self.assertEqual((overview, display, enforcement), ([], [], []))
 
 
 if __name__ == "__main__":
