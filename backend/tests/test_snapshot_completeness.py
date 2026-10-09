@@ -1,21 +1,26 @@
-"""成员 / 邀请快照与实时容量的第三轮复核修复的端到端回归测试。
+"""一份不能证明完整的成员 / 邀请名单什么都不能改（端到端回归测试）。
 
-- F2：名单里每一行都要认得出是谁，id / 邮箱不能重复；否则整份名单不完整，异步刷新保留
-  上一份缓存和席位占用，调度器的数据同步不关任何 member_expiry 行。
-- F3：空的 /users 回复（``{"items": [], "total": 0}``）不完整——真实名单里至少有 owner。
-  数据同步不关行、异步刷新不动缓存和占用、踢人监视不收尾、到期踢人的查找不说「人不在」、
-  patrol 严格模式的刷新失败。空的邀请名单照常有效。
-- F1：分配席位前现拉的待接受邀请和快照同一套完整性规则。第一页 100 条、total 101，第二页空、
-  total 100（翻页期间少了一个邀请，Premium 邀请挪到了第一页范围里）：占用未知，兑换按没有
-  空位拒绝、不消耗码。
-- N3：预留层没有不比版本就删持久占用的出口。
+名单完整与否由 SnapshotPageAccumulator 判，规则本身在 test_snapshot_pages.py：条数要和 total
+对上、total 不能在翻页之间变；每一行都要认得出是谁，id / 邮箱不能重复；成员名单不能是空的
+（``{"items": [], "total": 0}`` 也不行——真实名单里至少有 owner），空的邀请名单照常有效。
 
-累加器本身的规则在 test_snapshot_pages.py。上游一律是只记录调用的假客户端，绝不触网。
+名单不完整时：
+- 异步刷新（member_cache_service）失败，保留上一份缓存和席位占用；
+- 调度器的数据同步不写缓存、不对账、不关任何 member_expiry 行；
+- 到期踢人的查找不说「人不在」，踢人监视不收尾，patrol 严格模式的刷新失败、不踢人；
+- 分配席位前现拉的待接受邀请读不全（例如第一页 100 条、total 101，第二页空、total 100）：
+  占用未知，兑换按没有空位拒绝、不消耗码。
+完整的名单照常关行、放占用（每组都带一个这样的对照）。
+
+另外，到期时间的就地修改是对读到那一版的比较后交换：读写之间落地的更新快照不会被盖掉，
+修改落在新快照上。
+
+上游一律是只记录调用的假客户端，绝不触网。
 """
 
 import _isolation  # noqa: F401  must precede any app import
 from _fixtures import direct_call
-from _patrol_fixtures import OLD, PatrolSnapshotCase, RecordingClient, _live, _member
+from _patrol_fixtures import OLD, PatrolSnapshotCase, RecordingClient, _member
 from _seat_fixtures import (
     HOLDS_EMAIL as EMAIL,
     HOLDS_TEAM as TEAM,
@@ -32,6 +37,7 @@ from _seat_fixtures import (
 )
 
 import asyncio
+import contextlib
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -44,7 +50,7 @@ from app import scheduler as app_scheduler
 from app.services import patrol as patrol_service
 from app.routes import access_tokens
 from app.services import seat_capacity as seat_capacity_module
-from app.services import team_health_alerts, team_locks, tg_notify, tg_summary
+from app.services import team_health_alerts, tg_notify, tg_summary
 from app.services.seat_capacity import (
     SeatCapacityFetchError,
     fetch_all_pending_invites,
@@ -59,6 +65,7 @@ OWNER = {
     "role": "account-owner",
     "seat_type": "default",
 }
+OTHER = "other.member@example.com"
 
 
 EMPTY_USERS = [{"items": [], "total": 0}]
@@ -72,8 +79,33 @@ def _owner_only():
     return [{"items": [dict(OWNER)], "total": 1}]
 
 
+def _live(email, user_id, seat_type, *, role="standard-user"):
+    return {"id": user_id, "email": email, "seat_type": seat_type, "role": role}
+
+
+def _others(count, prefix="filler"):
+    return [
+        {"id": f"u-{prefix}{i}", "email": f"{prefix}{i}@example.com", "seat_type": "usage_based"}
+        for i in range(count)
+    ]
+
+
+# 每一项都是目标邮箱不在里面、但分页本身对不上的回复（按 offset 分页）。
+INCOMPLETE_MEMBER_PAGES = {
+    "empty page claiming one entry": [{"items": [], "total": 1}],
+    "more entries than the total": [{"items": _others(2), "total": 1}],
+    "total changed between pages": [
+        {"items": _others(100), "total": 101},
+        {"items": [], "total": 100},
+    ],
+}
+
+
 class _SyncClient:
-    """调度器用的同步假客户端：成员 / 邀请按 offset 回预设分页，没有任何写接口。"""
+    """调度器用的同步假客户端：成员 / 邀请按 offset 回预设分页，没有任何写接口。
+
+    member_pages / invite_pages 是类属性，_SnapshotCase.setUp 每个用例重置。
+    """
 
     member_pages: list = []
     invite_pages: list = [{"items": [], "total": 0}]
@@ -216,7 +248,113 @@ class _SnapshotCase(SeatHoldsCase):
         self.assertEqual(self.holds(), before_holds)
 
 
-# ═══ F2：行身份与重复 ═══════════════════════════════════════════════════════════
+# ═══ 分页对不上：空页报有条目、条数超过 total、total 翻页时变了 ═══════════════════════
+
+class AsyncRefreshRejectsIncompleteSnapshotTest(_SnapshotCase):
+    def _refresh(self, client):
+        failure = AsyncMock()
+        patches = [
+            patch.object(member_cache_service, "run_chatgpt_call", new=direct_call),
+            patch.object(team_health_alerts, "report_team_failure", new=failure),
+            patch.object(team_health_alerts, "report_team_recovery", new=AsyncMock()),
+        ]
+        with _patched(patches):
+            with self.assertRaises(HTTPException) as raised:
+                asyncio.run(member_cache_service.fetch_and_cache_members(TEAM, client))
+        failure.assert_awaited_once()
+        return raised.exception
+
+    def test_incomplete_member_list_fails_the_refresh_and_changes_nothing(self):
+        for label, pages in INCOMPLETE_MEMBER_PAGES.items():
+            with self.subTest(reply=label):
+                before_cache, before_holds = self.cache_row(), self.holds()
+
+                exc = self._refresh(_ListClient(member_pages=pages))
+
+                self.assertEqual(exc.status_code, 502)
+                self.assertTrue(exc.detail.startswith("Failed to fetch members: "), exc.detail)
+                self.assertEqual(self.cache_row(), before_cache)
+                self.assertEqual(self.holds(), before_holds)
+                self.assertEqual(len(before_holds), 1)
+
+    def test_incomplete_invite_list_fails_the_refresh(self):
+        owner = _live(f"owner-{TEAM}@example.com", "u-owner", "default", role="account-owner")
+        exc = self._refresh(
+            _ListClient(
+                member_pages=[{"items": [owner], "total": 1}],
+                invite_pages=[{"items": [], "total": 1}],
+            )
+        )
+        self.assertTrue(exc.detail.startswith("Failed to fetch pending invites: "), exc.detail)
+        self.assertEqual(len(self.holds()), 1)
+
+    def test_upstream_error_page_keeps_its_error_text(self):
+        exc = self._refresh(_ListClient(member_pages=[{"error": "HTTP 401 Unauthorized"}]))
+        self.assertEqual(exc.detail, "Failed to fetch members: HTTP 401 Unauthorized")
+        self.assertTrue(team_health_alerts.is_auth_error(exc))
+
+
+class SchedulerRejectsIncompleteSnapshotTest(_SnapshotCase):
+    # 完整名单照常关行、放占用的对照：
+    # DuplicateOwnerSnapshotTest.test_data_sync_still_closes_the_row_on_a_clean_list（同一套夹具）。
+
+    def test_data_sync_closes_nothing_on_an_incomplete_member_list(self):
+        for label, pages in INCOMPLETE_MEMBER_PAGES.items():
+            with self.subTest(reply=label):
+                before_cache, before_holds = self.cache_row(), self.holds()
+
+                self.run_data_sync(pages)
+
+                # 这一轮走到了拉名单，并且按拉取失败处理。
+                conn = self._conn()
+                failure = conn.execute(
+                    """SELECT error_message FROM operation_logs
+                       WHERE action = 'data_sync' AND detail = 'member snapshot refresh failed'
+                       ORDER BY id DESC LIMIT 1"""
+                ).fetchone()
+                conn.execute("DELETE FROM operation_logs")
+                conn.commit()
+                conn.close()
+                self.assertIsNotNone(failure)
+                self.assertTrue(failure["error_message"].startswith("members: "))
+                self.assertEqual(self.expiry_row(), {"kicked": 0, "kick_source": None})
+                self.assertEqual(self.cache_row(), before_cache)
+                self.assertEqual(self.holds(), before_holds)
+
+    def test_auto_kick_lookups_do_not_report_gone(self):
+        direct = patch.object(app_scheduler, "run_chatgpt_call_sync", lambda fn, *a, **kw: fn(*a, **kw))
+        with direct:
+            for label, pages in INCOMPLETE_MEMBER_PAGES.items():
+                with self.subTest(reply=label, lookup="member"):
+                    _SyncClient.member_pages = pages
+                    user_id, error = app_scheduler._find_member_user_id_by_email(_SyncClient(), EMAIL)
+                    self.assertIsNone(user_id)
+                    self.assertTrue(error)
+                with self.subTest(reply=label, lookup="invite"):
+                    _SyncClient.invite_pages = [
+                        {**page, "items": [{**item, "email_address": item["email"]} for item in page["items"]]}
+                        for page in pages
+                    ]
+                    try:
+                        exists, error = app_scheduler._pending_invite_exists(_SyncClient(), EMAIL)
+                    finally:
+                        _SyncClient.invite_pages = [{"items": [], "total": 0}]
+                    self.assertFalse(exists)
+                    self.assertTrue(error)
+
+            # 上游报错页原样返回它的 error；error 为空时也不能被当成成功。
+            _SyncClient.member_pages = [{"error": "HTTP 401 Unauthorized"}]
+            self.assertEqual(
+                app_scheduler._find_member_user_id_by_email(_SyncClient(), EMAIL),
+                (None, "HTTP 401 Unauthorized"),
+            )
+            _SyncClient.member_pages = [{"error": None}]
+            user_id, error = app_scheduler._find_member_user_id_by_email(_SyncClient(), EMAIL)
+            self.assertIsNone(user_id)
+            self.assertTrue(error)
+
+
+# ═══ 行身份：认不出是谁的行、重复的 id / 邮箱 ═════════════════════════════════════════
 
 class DuplicateOwnerSnapshotTest(_SnapshotCase):
     """上游把 owner 回了两遍：条数凑满 total，但 EMAIL 其实没拉到——不能据此判他不在。"""
@@ -253,7 +391,7 @@ class DuplicateOwnerSnapshotTest(_SnapshotCase):
         self.assertEqual(self.holds(), [])
 
 
-# ═══ F3：空的成员名单不完整 ═════════════════════════════════════════════════════
+# ═══ 空的成员名单不完整 ═════════════════════════════════════════════════════════════
 
 class EmptyMemberListTest(_SnapshotCase):
     def test_data_sync_closes_nothing(self):
@@ -368,7 +506,7 @@ class StrictRefreshEmptyMemberListTest(PatrolSnapshotCase):
         self.assertEqual(self._calls("remove_member"), [("remove_member", "u-d")])
 
 
-# ═══ F1：分配席位前的待接受邀请读取 ═════════════════════════════════════════════════
+# ═══ 分配席位前的待接受邀请读取 ═════════════════════════════════════════════════════
 
 # 读第一页时有 101 个邀请（第 101 个是 Premium 邀请）；读第二页之前少了一个，Premium 邀请
 # 挪到 offset 99，第二页是空的、total 100。拼起来的 100 条里没有那个 Premium 邀请。
@@ -459,15 +597,99 @@ class RedeemFailsClosedOnShiftingInvitesTest(RedeemFlowCase):
         self.assertEqual(self.invites, [])
 
 
+# ═══ 到期时间的就地修改不盖掉更新的快照 ══════════════════════════════════════════════
 
-# ═══ N3：预留层不删持久占用 ═════════════════════════════════════════════════════
+class ExpiryEditRaceTest(SeatHoldsCase):
+    OLD_START = "2026-10-06T10:00:00.000000+00:00"
+    NEW_START = "2026-10-06T10:05:00.000000+00:00"
 
-class ReservationLayerTest(unittest.TestCase):
-    def test_no_versionless_hold_release_in_the_reservation_layer(self):
-        # 持久占用只在两处放掉：上游明确拒绝（兑换流程直接调 seat_holds.release_seat_hold）
-        # 和按版本（seat_type + created_at）删除的对账。预留层那个连库里占用一起、不比版本
-        # 就删的出口没人调用，留着只会被误用成「放掉这个人的占用」。
-        self.assertFalse(hasattr(team_locks, "release_seat_reservation"))
+    def setUp(self):
+        super().setUp()
+        self.insert_team(
+            TEAM,
+            members=[{"id": USER_ID, "email": EMAIL, "seat_type": "usage_based",
+                      "expires_at": "old-expiry", "status": "active"}],
+        )
+        conn = self._conn()
+        conn.execute(
+            "UPDATE member_cache SET fetch_started_at = ? WHERE team_id = ?", (self.OLD_START, TEAM)
+        )
+        conn.commit()
+        conn.close()
+
+    def _newer_snapshot(self):
+        """另一次刷新拿到的新名单：这个人已经是 Premium，还多了一个人。"""
+        conn = self._conn()
+        member_cache_service.store_member_snapshot_sync(
+            conn,
+            TEAM,
+            [
+                {"id": USER_ID, "email": EMAIL, "seat_type": "prolite",
+                 "expires_at": "old-expiry", "status": "active"},
+                {"id": "u-other", "email": OTHER, "seat_type": "default",
+                 "expires_at": None, "status": "active"},
+            ],
+            [],
+            self.NEW_START,
+        )
+        conn.commit()
+        conn.close()
+
+    def _racing_get_db(self):
+        """包住 get_db：这次修改的 UPDATE 到库之前，先让另一次刷新的快照落地（只一次）。"""
+        real_get_db = member_cache_service.get_db
+        fired = []
+        test = self
+
+        class RacingDb:
+            def __init__(self, db):
+                self._db = db
+
+            async def execute(self, sql, *args, **kwargs):
+                if not fired and sql.lstrip().upper().startswith("UPDATE MEMBER_CACHE"):
+                    fired.append(True)
+                    test._newer_snapshot()
+                return await self._db.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._db, name)
+
+        @contextlib.asynccontextmanager
+        async def racing_get_db():
+            async with real_get_db() as db:
+                yield RacingDb(db)
+
+        return patch.object(member_cache_service, "get_db", racing_get_db), fired
+
+    def test_newer_snapshot_written_between_read_and_write_is_kept(self):
+        patcher, fired = self._racing_get_db()
+        with patcher:
+            asyncio.run(
+                member_cache_service.update_cached_member_expiry(
+                    TEAM, user_id=USER_ID, email=EMAIL, expires_at="new-expiry"
+                )
+            )
+        self.assertEqual(fired, [True])
+
+        row = self.cache_row()
+        self.assertEqual(row["fetch_started_at"], self.NEW_START)
+        cached = {m["email"]: m for m in json.loads(row["members_json"])}
+        self.assertEqual(set(cached), {EMAIL, OTHER})
+        self.assertEqual(cached[EMAIL]["seat_type"], "prolite")
+        # 修改落在新快照上。
+        self.assertEqual(cached[EMAIL]["expires_at"], "new-expiry")
+        self.assertIsNone(cached[OTHER]["expires_at"])
+
+    def test_edit_without_a_race_still_applies(self):
+        asyncio.run(
+            member_cache_service.update_cached_member_expiry(
+                TEAM, user_id=USER_ID, email=EMAIL, expires_at="new-expiry"
+            )
+        )
+        row = self.cache_row()
+        self.assertEqual(row["fetch_started_at"], self.OLD_START)
+        self.assertEqual(json.loads(row["members_json"])[0]["expires_at"], "new-expiry")
+
 
 if __name__ == "__main__":
     unittest.main()

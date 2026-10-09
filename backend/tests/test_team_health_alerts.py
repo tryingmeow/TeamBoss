@@ -1,8 +1,11 @@
+"""Team 健康告警（team_health_alerts）：失败去重、未恢复定期再提醒、没送达就重试、恢复只发一次；
+以及成员名单刷新成功只解除登录类（chatgpt_auth）告警。"""
 import _isolation  # noqa: F401  must precede any app import
 import sqlite3
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import sys
 
@@ -10,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _fixtures import start_temp_db
 
+from app import member_cache_service
 from app.services import team_health_alerts
 
 
@@ -169,6 +173,32 @@ class TeamHealthAlertsTest(unittest.TestCase):
         self.assertTrue(team_health_alerts.is_auth_error("401 Client Error"))
         self.assertTrue(team_health_alerts.is_auth_error("Unauthorized"))
         self.assertFalse(team_health_alerts.is_auth_error("Read timed out"))
+
+
+class MemberCacheIncidentTest(unittest.IsolatedAsyncioTestCase):
+    async def test_member_refresh_does_not_resolve_full_sync_incident(self):
+        snapshot = {"members": [], "pending_invites": []}
+
+        with (
+            patch.object(
+                member_cache_service,
+                "_fetch_and_cache_members_impl",
+                new=AsyncMock(return_value=snapshot),
+            ),
+            patch.object(
+                team_health_alerts,
+                "report_team_recovery",
+                new=AsyncMock(),
+            ) as report_recovery,
+        ):
+            result = await member_cache_service.fetch_and_cache_members("team-1", object())
+
+        self.assertEqual(result, snapshot)
+        report_recovery.assert_awaited_once_with(
+            "team-1",
+            "chatgpt_auth",
+            source="member_refresh",
+        )
 
 
 if __name__ == "__main__":
