@@ -24,6 +24,7 @@ from curl_cffi import requests as curl_requests
 from curl_cffi.const import CurlECode
 from curl_cffi.requests import Response
 from curl_cffi.requests import exceptions as cx
+from curl_cffi.requests.exceptions import Timeout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -101,6 +102,64 @@ class SessionSetupTest(unittest.TestCase):
         self.assertEqual(kwargs["impersonate"], IMPERSONATE)
         self.assertEqual(kwargs["proxies"], {"http": proxy, "https": proxy})
         self.assertEqual(kwargs["timeout"], 60)
+
+
+class RefreshTokenClientShapeTest(unittest.TestCase):
+    """refresh_token 必须让调用方分得清"上游明确答复"和"这次没问成"。"""
+
+    @staticmethod
+    def _http_response(status_code: int, body=None):
+        response = Response()
+        response.status_code = status_code
+        response.ok = 200 <= status_code < 400
+        response.url = "https://chatgpt.com/api/auth/session"
+        response.reason = "test"
+        response.content = json.dumps(body if body is not None else {}).encode()
+        return response
+
+    def _call(self, **get_kwargs):
+        with patch.object(chatgpt_client_module.curl_requests, "get", **get_kwargs) as get:
+            result = ChatGPTClient.refresh_token("session-1")
+        get.assert_called_once()
+        return result
+
+    # refresh_token 只追加诊断字段，原有字段一个不少、值不变。
+    ADDED_KEYS = {"refresh_diagnostics", "set_cookie_session_token"}
+
+    def _without_added(self, result: dict) -> dict:
+        self.assertTrue(self.ADDED_KEYS <= set(result))
+        return {k: v for k, v in result.items() if k not in self.ADDED_KEYS}
+
+    def test_in_band_refresh_error_carries_its_2xx_status(self):
+        result = self._call(
+            return_value=self._http_response(200, {"error": "RefreshAccessTokenError"})
+        )
+        self.assertEqual(
+            self._without_added(result),
+            {"error": "RefreshAccessTokenError", "status_code": 200},
+        )
+
+    def test_successful_session_body_is_returned_unchanged(self):
+        body = {"accessToken": "a", "sessionToken": "s"}
+        result = self._call(return_value=self._http_response(200, dict(body)))
+        self.assertEqual(self._without_added(result), body)
+
+    def test_timeout_has_no_status_code(self):
+        # curl_cffi 超时时会把收了一半的响应挂在异常上；那不是上游答复。
+        partial = Response()
+        partial.status_code = 401
+        timeout = Timeout(
+            "curl: (28) Operation timed out", CurlECode.OPERATION_TIMEDOUT, partial
+        )
+        result = self._call(side_effect=timeout)
+        self.assertIn("error", result)
+        self.assertNotIn("status_code", result)
+
+    def test_http_errors_keep_their_own_status(self):
+        for status_code in (401, 403, 429, 503):
+            with self.subTest(status_code=status_code):
+                result = self._call(return_value=self._http_response(status_code))
+                self.assertEqual(result["status_code"], status_code)
 
 
 class InviteClassificationTest(unittest.TestCase):

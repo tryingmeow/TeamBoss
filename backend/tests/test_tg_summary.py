@@ -1,9 +1,7 @@
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import json
 import sqlite3
 import sys
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,33 +9,21 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app.services import tg_summary
-
-
-def _init_temp_db(db_file_path: str) -> None:
-    # 使用 monkeypatch get_db_dir 返回数据库文件所在目录
-    # 这样 init_database 会创建所有必要的表
-    db_dir = str(Path(db_file_path).parent)
-    with patch.object(app_database, "get_db_dir", return_value=db_dir):
-        asyncio.run(app_database.init_database())
 
 
 class TelegramSummaryTest(unittest.TestCase):
     def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.db_dir = self.tmpdir.name
-        self.db_path = str(Path(self.db_dir) / "app.db")
-        _init_temp_db(self.db_path)
+        self.db_path = start_temp_db(self)
 
-        # Patch get_db_dir to return test database directory
-        # This makes get_db_path() return the test database path automatically
-        self.db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        self.db_dir_patch.start()
-
-        self.original_notify = tg_summary.notify_admins_sync
         self.sent_texts: list[str] = []
-        tg_summary.notify_admins_sync = lambda text: self.sent_texts.append(text) or 1
+        notify_patch = patch.object(
+            tg_summary, "notify_admins_sync", new=lambda text: self.sent_texts.append(text) or 1
+        )
+        notify_patch.start()
+        self.addCleanup(notify_patch.stop)
 
         conn = sqlite3.connect(self.db_path)
         now = "2026-07-21T12:00:00+00:00"
@@ -83,11 +69,6 @@ class TelegramSummaryTest(unittest.TestCase):
         conn.commit()
         conn.close()
         self.now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
-
-    def tearDown(self):
-        self.db_dir_patch.stop()
-        tg_summary.notify_admins_sync = self.original_notify
-        self.tmpdir.cleanup()
 
     def test_build_summary_counts_online_and_overage(self):
         text = tg_summary.build_summary_sync(now=self.now)

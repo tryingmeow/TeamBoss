@@ -88,6 +88,21 @@ class TelegramCommandScopeTest(unittest.TestCase):
         self.assertEqual(payload["commands"], tg_commands.PUBLIC_COMMANDS)
 
 
+class TelegramCommandMenuTest(unittest.TestCase):
+    def test_command_menu_registers_q_instead_of_cancel(self):
+        admin_commands = [item["command"] for item in tg_commands.ADMIN_COMMANDS]
+        member_commands = [item["command"] for item in tg_commands.MEMBER_COMMANDS]
+        public_commands = [item["command"] for item in tg_commands.PUBLIC_COMMANDS]
+
+        self.assertIn("q", admin_commands)
+        self.assertIn("m_logs", admin_commands)
+        self.assertNotIn("cancel", admin_commands)
+        self.assertNotIn("q", member_commands)
+        self.assertNotIn("q", public_commands)
+        self.assertNotIn("m_logs", member_commands)
+        self.assertNotIn("m_logs", public_commands)
+
+
 class TelegramLegacyRoleMigrationTest(unittest.TestCase):
     def test_init_database_removes_legacy_viewer_rows_and_role_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -5,18 +5,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _request_fixtures import FakeRequest
+
 from app import client_ip
-
-
-class _FakeClient:
-    def __init__(self, host: str):
-        self.host = host
-
-
-class _FakeRequest:
-    def __init__(self, peer: str, headers: dict | None = None):
-        self.client = _FakeClient(peer)
-        self.headers = headers or {}
+from app.client_ip import rate_limit_key
 
 
 class GetClientIpInfoTest(unittest.TestCase):
@@ -24,7 +16,7 @@ class GetClientIpInfoTest(unittest.TestCase):
         # A public IP directly hitting the backend (no reverse proxy in front, or a
         # proxy outside AUTO_TEAM_TRUSTED_PROXIES) must never be treated as a proxy's
         # own identity, no matter what headers it sends.
-        request = _FakeRequest("203.0.113.7", {"X-Real-IP": "203.0.113.7"})
+        request = FakeRequest("203.0.113.7", {"X-Real-IP": "203.0.113.7"})
         ip, is_self = client_ip.get_client_ip_info(request)
         self.assertEqual(ip, "203.0.113.7")
         self.assertFalse(is_self)
@@ -33,7 +25,7 @@ class GetClientIpInfoTest(unittest.TestCase):
         # Correctly configured deployment: the trusted proxy (bridge gateway) forwards
         # a real, distinct visitor IP via X-Real-IP. This must never be flagged as a
         # collapsed identity.
-        request = _FakeRequest("172.18.0.1", {"X-Real-IP": "198.51.100.23"})
+        request = FakeRequest("172.18.0.1", {"X-Real-IP": "198.51.100.23"})
         ip, is_self = client_ip.get_client_ip_info(request)
         self.assertEqual(ip, "198.51.100.23")
         self.assertFalse(is_self)
@@ -44,19 +36,19 @@ class GetClientIpInfoTest(unittest.TestCase):
         # backend (correctly) trusts it because the peer is in the default trusted
         # range. The resolved "visitor" IP is then indistinguishable from the proxy's
         # own address.
-        request = _FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
+        request = FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
         ip, is_self = client_ip.get_client_ip_info(request)
         self.assertEqual(ip, "172.18.0.1")
         self.assertTrue(is_self)
 
     def test_trusted_proxy_with_no_forwarding_headers_falls_back_to_peer_and_is_self_identity(self):
-        request = _FakeRequest("127.0.0.1", {})
+        request = FakeRequest("127.0.0.1", {})
         ip, is_self = client_ip.get_client_ip_info(request)
         self.assertEqual(ip, "127.0.0.1")
         self.assertTrue(is_self)
 
     def test_get_client_ip_still_returns_plain_string(self):
-        request = _FakeRequest("198.51.100.5", {"X-Real-IP": "198.51.100.5"})
+        request = FakeRequest("198.51.100.5", {"X-Real-IP": "198.51.100.5"})
         # 198.51.100.5 is not a trusted proxy by default, so this is just the direct peer.
         self.assertEqual(client_ip.get_client_ip(request), "198.51.100.5")
 
@@ -75,7 +67,7 @@ class CollapseDetectionWarningTest(unittest.TestCase):
     def test_warns_once_after_threshold_consecutive_collapsed_samples(self):
         with self.assertLogs(client_ip.logger, level="WARNING") as captured:
             for _ in range(client_ip._COLLAPSE_SAMPLE_THRESHOLD):
-                request = _FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
+                request = FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
                 client_ip.get_client_ip_info(request)
         self.assertEqual(len(captured.records), 1)
         self.assertIn("身份坍缩", captured.records[0].getMessage())
@@ -85,25 +77,21 @@ class CollapseDetectionWarningTest(unittest.TestCase):
         # source).
         with self.assertRaises(AssertionError):
             with self.assertLogs(client_ip.logger, level="WARNING"):
-                request = _FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
+                request = FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
                 client_ip.get_client_ip_info(request)
 
     def test_a_single_non_collapsed_sample_resets_the_streak(self):
         for _ in range(client_ip._COLLAPSE_SAMPLE_THRESHOLD - 1):
-            request = _FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
+            request = FakeRequest("172.18.0.1", {"X-Real-IP": "172.18.0.1"})
             client_ip.get_client_ip_info(request)
         self.assertFalse(client_ip._collapse_warned)
 
         # A real, distinct visitor IP breaks the streak (correctly configured
         # deployments must never trip the detector just because it once matched).
-        request = _FakeRequest("172.18.0.1", {"X-Real-IP": "198.51.100.9"})
+        request = FakeRequest("172.18.0.1", {"X-Real-IP": "198.51.100.9"})
         client_ip.get_client_ip_info(request)
         self.assertEqual(client_ip._collapse_samples, 0)
         self.assertFalse(client_ip._collapse_warned)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ComposeTopologyCollapseTest(unittest.TestCase):
@@ -114,25 +102,19 @@ class ComposeTopologyCollapseTest(unittest.TestCase):
     """
 
     def test_bridge_gateway_in_header_is_collapsed(self):
+        # 第一次请求就必须判成坍缩：攒样本期间锁定仍然生效，而攻击者只需要 5 个请求。
         ip, collapsed = client_ip.get_client_ip_info(
-            _FakeRequest("172.18.0.3", {"X-Real-IP": "172.18.0.1"})
+            FakeRequest("172.18.0.3", {"X-Real-IP": "172.18.0.1"})
         )
         self.assertEqual(ip, "172.18.0.1")
         self.assertTrue(collapsed)
 
     def test_real_public_visitor_behind_the_same_proxy_is_not_collapsed(self):
         ip, collapsed = client_ip.get_client_ip_info(
-            _FakeRequest("172.18.0.3", {"X-Real-IP": "203.0.113.9"})
+            FakeRequest("172.18.0.3", {"X-Real-IP": "203.0.113.9"})
         )
         self.assertEqual(ip, "203.0.113.9")
         self.assertFalse(collapsed)
-
-    def test_collapse_is_immediate_not_after_a_sample_streak(self):
-        # 攒样本期间锁定仍然生效，而攻击者只需要 5 个请求，所以第一次就必须成立。
-        _, collapsed = client_ip.get_client_ip_info(
-            _FakeRequest("172.18.0.3", {"X-Real-IP": "172.18.0.1"})
-        )
-        self.assertTrue(collapsed)
 
 
 class ProductionNginxHeadersTest(unittest.IsolatedAsyncioTestCase):
@@ -207,3 +189,16 @@ class ProductionNginxHeadersTest(unittest.IsolatedAsyncioTestCase):
         source = (Path(__file__).resolve().parents[1] / "run_server.py").read_text(encoding="utf-8")
         self.assertIn("proxy_headers=False", source)
         self.assertNotIn("proxy_headers=True", source)
+
+
+class RateLimitKeyTest(unittest.TestCase):
+    def test_ipv6_addresses_share_their_slash_64(self):
+        self.assertEqual(rate_limit_key("2001:db8:1:2::1"), "2001:db8:1:2::/64")
+        self.assertEqual(rate_limit_key("2001:db8:1:2:ffff:ffff:ffff:ffff"), "2001:db8:1:2::/64")
+        self.assertNotEqual(rate_limit_key("2001:db8:1:3::1"), "2001:db8:1:2::/64")
+        self.assertEqual(rate_limit_key("198.51.100.9"), "198.51.100.9")
+        self.assertEqual(rate_limit_key("unknown"), "unknown")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,3 +1,5 @@
+"""Admin credentials: first-start checks, API key rotation, and password change."""
+
 import _isolation  # noqa: F401  must precede any app import
 import os
 import sys
@@ -14,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import security
 from app.database import init_database
+from app.routes import admin as admin_routes
 
 
 class InitialAdminCredentialsTest(unittest.IsolatedAsyncioTestCase):
@@ -152,6 +155,39 @@ class AdminPasswordChangeRotatesKeyTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raised.exception.status_code, 400)
             self.assertEqual(await security.get_admin_api_key(), old_key)
             await security.require_admin(x_api_key=old_key)
+
+
+class ChangePasswordWrongCurrentTest(unittest.IsolatedAsyncioTestCase):
+    """错误的当前密码是表单校验失败，不能用 401：前端会把带管理员 key 的 401 当成 key 失效并登出。"""
+
+    def setUp(self):
+        self.store = {security.ADMIN_PASSWORD_HASH_SETTING: security._password_hash("correct-password")}
+
+        async def read(key):
+            return self.store.get(key)
+
+        async def write(key, value):
+            self.store[key] = value
+
+        for target, new in (("_read_setting", read), ("_write_setting", write)):
+            p = patch.object(security, target, side_effect=new)
+            p.start()
+            self.addCleanup(p.stop)
+        lp = patch.object(admin_routes, "log_operation", new=AsyncMock())
+        self.log = lp.start()
+        self.addCleanup(lp.stop)
+
+    def _req(self, current, new="brand-new-password"):
+        return admin_routes.ChangeAdminPasswordRequest(current_password=current, new_password=new)
+
+    async def test_wrong_current_password_is_400_and_password_unchanged(self):
+        before = self.store[security.ADMIN_PASSWORD_HASH_SETTING]
+        with self.assertRaises(HTTPException) as ctx:
+            await admin_routes.update_admin_password(self._req("wrong-password"))
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(ctx.exception.detail, "当前密码不正确")
+        self.assertEqual(self.store[security.ADMIN_PASSWORD_HASH_SETTING], before)
+        self.assertTrue(await security.verify_admin_password("correct-password"))
 
 
 if __name__ == "__main__":
