@@ -235,11 +235,24 @@ class SubscriptionDiscountTest(unittest.TestCase):
         self.assertEqual(subscription_billing_updates({"entitlement": {"applied_discounts": []}})["discount_amount"], 0)
 
     def test_unknown_or_unsupported_is_not_a_fixed_discount(self):
-        for entitlement in (None, {}, {"discount": {"discount_type": "percent", "amount": 25}},
-                            {"discount": {"amount": 999}}, {"applied_discounts": "invalid"}):
+        for entitlement in (None, [], {"error": "offline"}, {"discount": {"discount_type": "percent", "amount": 25}},
+                            {"discount": {"amount": 999}}, {"applied_discounts": "invalid"},
+                            {"applied_discounts": [None]}, {"applied_discounts": [{}, {}]}):
             self.assertIsNone(subscription_billing_updates({"entitlement": entitlement})["discount_amount"])
         self.assertNotIn("discount_amount", subscription_billing_updates({"error": "offline"}))
         self.assertNotIn("discount_amount", subscription_billing_updates({"billing_period": "monthly"}))
+
+    def test_successful_entitlement_without_promotion_clears_stale_discount(self):
+        for entitlement in ({}, {"seats_entitled": 7}):
+            subscription = subscription_billing_updates({"entitlement": entitlement})
+            account = account_billing_updates({"accounts": {"team-1": {"entitlement": entitlement}}}, "team-1")
+            for updates in (subscription, account):
+                self.assertEqual(updates["discount_amount"], 0)
+                self.assertIsNone(updates["promo_campaign_id"])
+                self.assertIsNone(updates["discount_expires_at"])
+                for make, expected in ((_row, 11700), (_yearly_row, 9450)):
+                    discount_fields = {key: value for key, value in updates.items() if key != "billing_period"}
+                    self.assertEqual(team_monthly_cost(make(**discount_fields)).monthly_total, expected)
 
     def test_explicit_account_id_never_borrows_another_team(self):
         account = {"accounts": {"other": {"account": {"structure": "workspace"}, "entitlement": {
@@ -412,6 +425,32 @@ class FinanceOverviewTest(_DbTest):
             result = asyncio.run(get_overview())
         return result, {team["team_id"]: team for team in result["teams"]}
 
+    def test_unconfirmed_discount_exposes_subtotal_without_fabricating_net_cost(self):
+        self._insert_team("monthly", discount_amount=None)
+        self._insert_team("yearly", yearly=True, discount_amount=None)
+        self._insert_team("missing-price", premium_price_per_seat=None, discount_amount=None)
+        result, teams = self.overview()
+        for team_id, subtotal, months in (("monthly", 11700, 1), ("yearly", 9450, 12)):
+            team = teams[team_id]
+            self.assertEqual(team["monthly_subtotal_native"], subtotal)
+            self.assertAlmostEqual(team["monthly_subtotal_base"], subtotal / 32.5)
+            self.assertEqual(team["period_subtotal_native"], subtotal * months)
+            self.assertIsNone(team["discount_amount"])
+            self.assertIsNone(team["monthly_total_native"])
+            self.assertIsNone(team["period_total_native"])
+        self.assertIsNone(teams["missing-price"]["monthly_subtotal_native"])
+        self.assertEqual(result["monthly_total_base"], 0)
+        self.assertEqual(result["excluded_teams_count"], 3)
+
+    def test_no_promotion_counts_full_seat_cost_in_finance(self):
+        self._insert_team("regular", **subscription_billing_updates({
+            "billing_period": "monthly", "entitlement": {}
+        }))
+        result, teams = self.overview()
+        self.assertEqual(teams["regular"]["monthly_total_native"], 11700)
+        self.assertAlmostEqual(result["monthly_total_base"], 11700 / 32.5)
+        self.assertEqual(result["excluded_teams_count"], 0)
+
     def test_n_premium_seats_use_the_real_price_and_convert(self):
         self._insert_team("thb")
         result, teams = self.overview()
@@ -524,6 +563,14 @@ class FinanceOverviewTest(_DbTest):
 
 
 class TeamsApiTest(_DbTest):
+    def test_unconfirmed_discount_keeps_known_monthly_and_yearly_subtotals(self):
+        for team_id, yearly, subtotal, months in (("monthly", False, 11700, 1), ("yearly", True, 9450, 12)):
+            self._insert_team(team_id, yearly=yearly, discount_amount=None)
+            team = asyncio.run(get_team(team_id))
+            self.assertEqual(team["monthly_subtotal"], subtotal)
+            self.assertEqual(team["period_subtotal"], subtotal * months)
+            self.assertIsNone(team["monthly_total"])
+
     def test_team_response_carries_premium_price_and_full_monthly_total(self):
         self._insert_team("thb")
         team = asyncio.run(get_team("thb"))
@@ -860,6 +907,10 @@ class SchedulerSyncTest(_DbTest):
     def test_current_subscription_discount_overrides_account_discount(self):
         _team, snapshot = self._sync("monthly", {"discount": {"discount_type": "fixed", "amount": 999}})
         self.assertEqual(snapshot["monthly_total"], MONTHLY_TOTAL)
+
+    def test_subscription_without_promotion_overrides_stale_account_discount(self):
+        _team, snapshot = self._sync("monthly", {})
+        self.assertEqual(snapshot["monthly_total"], 11700)
 
     def test_scheduled_sync_of_a_yearly_team(self):
         team, snapshot = self._sync("yearly")

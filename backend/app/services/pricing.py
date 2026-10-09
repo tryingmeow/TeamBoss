@@ -126,7 +126,7 @@ def _selected_account_entry(account_info: dict[str, Any], team_id: str | None) -
 
 
 def _discount_updates(entitlement: Any) -> dict[str, Any]:
-    """A reported fixed discount, explicit absence, or unknown; never invent coupon eligibility."""
+    """Optional discount fields may be omitted on a successful entitlement with no promotion."""
     updates = {
         "discount_amount": None,
         "discount_duration_num_periods": None,
@@ -135,7 +135,7 @@ def _discount_updates(entitlement: Any) -> dict[str, Any]:
         "discount_quantity_off": None,
         "promo_campaign_id": None,
     }
-    if not isinstance(entitlement, dict):
+    if not isinstance(entitlement, dict) or "error" in entitlement:
         return updates
     if "applied_discounts" in entitlement:
         discounts = entitlement["applied_discounts"]
@@ -143,11 +143,13 @@ def _discount_updates(entitlement: Any) -> dict[str, Any]:
             return updates
         if len(discounts) > 1:
             return updates  # Multiple coupons need allocation rules not supplied by this API.
+        if discounts and not isinstance(discounts[0], dict):
+            return updates
         discount = discounts[0] if discounts else entitlement.get("discount")
     elif "discount" in entitlement:
         discount = entitlement["discount"]
     else:
-        return updates
+        discount = None
     if discount is None:
         updates["discount_amount"] = 0.0
         return updates

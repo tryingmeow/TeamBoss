@@ -145,7 +145,7 @@ function monthlySubtotal(team: Team): number | null {
 }
 
 function periodTotal(team: Team): number | null {
-  return typeof team.period_total === 'number' ? team.period_total : null;
+  return team.period_total ?? team.period_subtotal ?? null;
 }
 
 /**
@@ -166,6 +166,7 @@ function monthlyFeeTitle(team: Team, total: number, premiumPaid: number, unit: s
       : `Premium ${premiumPaid} 席：单价未知，总额暂不计算`);
   }
   if ((team.discount_amount ?? 0) > 0) lines.push(`优惠 -${formatMoney(team.discount_amount, unit)}${yearly ? '/年' : ''}`);
+  if (team.monthly_total == null) lines.push('优惠前金额；优惠信息待确认，实际费用以账单为准');
   const annual = periodTotal(team);
   lines.push(yearly
     ? `${annual !== null ? `一年 ${formatMoney(annual, unit)}，` : ''}月均 ${formatMoney(total, unit)}/月，不含税；按年付月价 × 12 推算，以 ChatGPT 账单为准`
@@ -263,8 +264,10 @@ export default function TeamCard({
   const isWarning = (isNonRenewing || (team.days_remaining !== null && team.days_remaining <= 3))
     && !authBlocked
     && !isSubscriptionExpired;
-  const monthlyTotal = discountedMonthlyTotal(team);
   const subtotal = monthlySubtotal(team);
+  const confirmedMonthlyTotal = discountedMonthlyTotal(team);
+  const monthlyTotal = confirmedMonthlyTotal ?? subtotal;
+  const beforeDiscount = confirmedMonthlyTotal === null && subtotal !== null;
   const [openingAddMember, setOpeningAddMember] = useState(false);
   const defaultSeatLabel = team.default_seat_type
     ? formatSeatTypeLabel(team.default_seat_type)
@@ -828,6 +831,9 @@ export default function TeamCard({
                       {formatMoney(monthlyTotal, unit)}
                       <span className="font-normal text-gray-400 dark:text-ink-500"> /月</span>
                     </span>
+                    {beforeDiscount && (
+                      <span className="block text-xs font-normal text-gray-500 dark:text-ink-400">优惠前 · 优惠待确认</span>
+                    )}
                     {/* 年付：上面是按年总额折成的每月，年总额另起一行（按年付月价 × 12 推算，以账单为准）。 */}
                     {isYearly && (
                       <span className="block text-xs font-normal text-gray-500 dark:text-ink-400">
@@ -849,10 +855,10 @@ export default function TeamCard({
                   <span
                     className="font-normal text-gray-500 dark:text-ink-400"
                     title={team.billing_period === 'monthly' || team.billing_period === 'yearly'
-                      ? (team.discount_amount === null ? '尚未读到折扣金额，总额暂不计算' : '尚未读到全部已付席位单价，总额暂不计算')
+                      ? '尚未读到全部已付席位单价，总额暂不计算'
                       : `不认识的计费周期「${team.billing_period}」，月费暂不计算`}
                   >
-                    {team.discount_amount === null ? '折扣未知' : '单价未知'}
+                    单价未知
                   </span>
                 )}
               </dd>

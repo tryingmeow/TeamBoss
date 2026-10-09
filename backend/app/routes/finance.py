@@ -226,6 +226,11 @@ async def get_overview():
             "codex_count": codex_count or 0,
             "is_codex_enabled": 1 if team_row["is_codex_enabled"] else 0,
             "discount_amount": cost.discount_amount,
+            "monthly_subtotal_native": cost.monthly_subtotal,
+            "monthly_subtotal_base": _convert_or_none(
+                cost.monthly_subtotal, billing_currency, base_currency, rates
+            ),
+            "period_subtotal_native": cost.period_subtotal,
             "monthly_total_native": monthly_total_native,
             "monthly_total_base": monthly_total_base_value,
             "period_total_native": period_total_native,

@@ -948,6 +948,10 @@ export interface FinanceTeamItem {
   codex_count: number;
   is_codex_enabled: number;
   discount_amount: number | null;
+  /** Known seat cost before promotions, available even if the discount is unconfirmed. */
+  monthly_subtotal_native?: number | null;
+  monthly_subtotal_base?: number | null;
+  period_subtotal_native?: number | null;
   monthly_total_native: number | null;
   monthly_total_base: number | null;
   balance: string | null;

@@ -75,7 +75,7 @@ function premiumRealText(team: FinanceTeamItem, baseCurrency: string): string {
 /** Why a renewing Team is left out of 月预计支出 (the backend counts it in excluded_teams_count). */
 function excludedReason(team: FinanceTeamItem): string {
   if (team.billing_period === null) return '计费周期未知';
-  if (team.discount_amount === null) return '折扣未知';
+  if (team.monthly_total_native === null && team.monthly_subtotal_native != null) return '优惠待确认，优惠前金额见明细';
   if (team.monthly_total_native === null) return '单价未知';
   return '缺汇率';
 }
@@ -83,7 +83,7 @@ function excludedReason(team: FinanceTeamItem): string {
 /** A yearly Team's charge per year in its own currency; null for other Teams or when unknown. */
 function annualTotalNative(team: FinanceTeamItem): number | null {
   if (team.billing_period !== 'yearly') return null;
-  const value = team.period_total_native;
+  const value = team.period_total_native ?? team.period_subtotal_native;
   return typeof value === 'number' ? value : null;
 }
 
@@ -1160,8 +1160,11 @@ export default function Finance() {
                       const premium = premiumCost(team);
                       const yearly = team.billing_period === 'yearly';
                       const annualTotal = annualTotalNative(team);
+                      const beforeDiscount = team.monthly_total_native === null && team.monthly_subtotal_native != null;
+                      const monthlyNative = team.monthly_total_native ?? team.monthly_subtotal_native ?? null;
+                      const monthlyBase = beforeDiscount ? team.monthly_subtotal_base ?? null : team.monthly_total_base;
                       const subscription = SUBSCRIPTION_STATUS[team.subscription_status] ?? SUBSCRIPTION_STATUS.renewing;
-                      const monthlyConverted = team.monthly_total_base !== null && !sameCurrency(team.billing_currency, overview.base_currency);
+                      const monthlyConverted = monthlyBase !== null && !sameCurrency(team.billing_currency, overview.base_currency);
                       let daysBadge: string = TONE.neutral;
                       if (team.days_left !== null) {
                         if (team.days_left <= 7) daysBadge = TONE.danger;
@@ -1263,25 +1266,28 @@ export default function Finance() {
                           <td className="px-3 py-3.5 text-right">
                             <div className="whitespace-nowrap font-medium tabular-nums text-gray-900 dark:text-gray-100">
                               {/* 这一列统一写成基准币种（换算过的带 ≈），原币另起一行。 */}
-                              {team.monthly_total_base !== null
-                                ? `${monthlyConverted ? '≈ ' : ''}${formatMoney(team.monthly_total_base, overview.base_currency)}`
-                                : formatMoney(team.monthly_total_native, sym)}
+                              {monthlyBase !== null
+                                ? `${monthlyConverted ? '≈ ' : ''}${formatMoney(monthlyBase, overview.base_currency)}`
+                                : formatMoney(monthlyNative, sym)}
                             </div>
+                            {beforeDiscount && (
+                              <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">优惠前 · 优惠待确认</div>
+                            )}
                             {team.billing_period === null ? (
                               <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
                                 计费周期未知
                               </div>
-                            ) : team.monthly_total_native === null ? (
+                            ) : monthlyNative === null ? (
                               <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
-                                {team.discount_amount === null ? '折扣未知，总额暂不计算' : '单价未知，总额暂不计算'}
+                                单价未知，总额暂不计算
                               </div>
                             ) : monthlyConverted && (
                               <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
-                                {formatMoney(team.monthly_total_native, sym)}
+                                {formatMoney(monthlyNative, sym)}
                               </div>
                             )}
                             {/* 年付：上面是按年总额折成的每月；一年的总额用原币种写在这里。 */}
-                            {yearly && team.monthly_total_native !== null && (
+                            {yearly && monthlyNative !== null && (
                               <div className="mt-0.5 whitespace-nowrap text-xs tabular-nums text-gray-500 dark:text-ink-400">
                                 年付·月均{annualTotal !== null && ` · 一年 ${formatMoney(annualTotal, sym)}`}
                               </div>
