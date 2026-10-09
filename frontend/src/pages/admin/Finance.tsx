@@ -20,6 +20,7 @@ import {
   Check,
   ChevronDown,
   Clock,
+  CircleAlert,
   CreditCard,
   KeyRound,
   Loader2,
@@ -34,6 +35,7 @@ import {
 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import * as Select from '@radix-ui/react-select';
+import * as Tooltip from '@radix-ui/react-tooltip';
 import { differenceInCalendarDays, parseISO } from 'date-fns';
 import { formatDateSafe, formatBeijingDateTime } from '../../lib/formatDate';
 import { formatCredit, formatMoney, sameCurrency, teamUnit } from '../../lib/money';
@@ -75,7 +77,7 @@ function premiumRealText(team: FinanceTeamItem, baseCurrency: string): string {
 /** Why a renewing Team is left out of 月预计支出 (the backend counts it in excluded_teams_count). */
 function excludedReason(team: FinanceTeamItem): string {
   if (team.billing_period === null) return '计费周期未知';
-  if (team.monthly_total_native === null && team.monthly_subtotal_native != null) return '优惠待确认，优惠前金额见明细';
+  if (team.monthly_total_native === null && team.monthly_subtotal_native != null) return '未找到优惠信息，明细显示计算原价';
   if (team.monthly_total_native === null) return '单价未知';
   return '缺汇率';
 }
@@ -1140,7 +1142,23 @@ export default function Finance() {
                     <th className="whitespace-nowrap px-3 py-2 font-medium first:pl-4 sm:first:pl-6">Team</th>
                     <th className="whitespace-nowrap px-3 py-2 font-medium">席位</th>
                     <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title="每席月价 × 已付席位（年付 Team 是年付价折成的每月），和 ChatGPT「管理席位」一样不含税">计费</th>
-                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title="每月；年付 Team 按一年的总额 ÷ 12。不含税，以 ChatGPT 账单为准">预计月费</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium" title="每月；年付 Team 按一年的总额 ÷ 12。不含税，以 ChatGPT 账单为准">
+                      预计月费
+                      {overview?.teams.some((team) => team.monthly_total_native === null && team.monthly_subtotal_native != null) && (
+                        <Tooltip.Root disableHoverableContent>
+                          <Tooltip.Trigger asChild>
+                            <span role="img" tabIndex={0} aria-label="未找到优惠信息，显示计算原价" className="ml-1 inline-flex align-middle text-gray-400 outline-none dark:text-ink-500">
+                              <CircleAlert size={13} aria-hidden="true" />
+                            </span>
+                          </Tooltip.Trigger>
+                          <Tooltip.Portal>
+                            <Tooltip.Content className="z-50 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-700 shadow-lg dark:border-ink-700 dark:bg-ink-800 dark:text-gray-200" sideOffset={6}>
+                              未找到优惠信息，显示计算原价
+                            </Tooltip.Content>
+                          </Tooltip.Portal>
+                        </Tooltip.Root>
+                      )}
+                    </th>
                     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">上期实付</th>
                     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">账户余额</th>
                     <th className="whitespace-nowrap px-3 py-2 font-medium last:pr-4 sm:last:pr-6">到期日</th>
@@ -1160,9 +1178,9 @@ export default function Finance() {
                       const premium = premiumCost(team);
                       const yearly = team.billing_period === 'yearly';
                       const annualTotal = annualTotalNative(team);
-                      const beforeDiscount = team.monthly_total_native === null && team.monthly_subtotal_native != null;
+                      const usingOriginalPrice = team.monthly_total_native === null && team.monthly_subtotal_native != null;
                       const monthlyNative = team.monthly_total_native ?? team.monthly_subtotal_native ?? null;
-                      const monthlyBase = beforeDiscount ? team.monthly_subtotal_base ?? null : team.monthly_total_base;
+                      const monthlyBase = usingOriginalPrice ? team.monthly_subtotal_base ?? null : team.monthly_total_base;
                       const subscription = SUBSCRIPTION_STATUS[team.subscription_status] ?? SUBSCRIPTION_STATUS.renewing;
                       const monthlyConverted = monthlyBase !== null && !sameCurrency(team.billing_currency, overview.base_currency);
                       let daysBadge: string = TONE.neutral;
@@ -1270,9 +1288,6 @@ export default function Finance() {
                                 ? `${monthlyConverted ? '≈ ' : ''}${formatMoney(monthlyBase, overview.base_currency)}`
                                 : formatMoney(monthlyNative, sym)}
                             </div>
-                            {beforeDiscount && (
-                              <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">优惠前 · 优惠待确认</div>
-                            )}
                             {team.billing_period === null ? (
                               <div className="mt-0.5 whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
                                 计费周期未知

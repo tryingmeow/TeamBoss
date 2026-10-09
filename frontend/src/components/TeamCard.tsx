@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, type FormEvent, type ReactNode } from 'react';
+import * as Tooltip from '@radix-ui/react-tooltip';
 import { UserPlus, Trash2, KeyRound, CreditCard, Globe, Mail, Users, Zap, ChevronDown, RefreshCw, Settings, Pencil, Loader2, CircleAlert, Copy, Check, Gem, Ban, Receipt } from 'lucide-react';
 import type { MembersData, SeatType, ShowToast, Team, TeamWorkspaceSettings } from '../types';
 import MemberPanel from './MemberPanel';
@@ -166,7 +167,7 @@ function monthlyFeeTitle(team: Team, total: number, premiumPaid: number, unit: s
       : `Premium ${premiumPaid} 席：单价未知，总额暂不计算`);
   }
   if ((team.discount_amount ?? 0) > 0) lines.push(`优惠 -${formatMoney(team.discount_amount, unit)}${yearly ? '/年' : ''}`);
-  if (team.monthly_total == null) lines.push('优惠前金额；优惠信息待确认，实际费用以账单为准');
+  if (team.monthly_total == null) lines.push('按已知席位单价计算的原价');
   const annual = periodTotal(team);
   lines.push(yearly
     ? `${annual !== null ? `一年 ${formatMoney(annual, unit)}，` : ''}月均 ${formatMoney(total, unit)}/月，不含税；按年付月价 × 12 推算，以 ChatGPT 账单为准`
@@ -267,7 +268,7 @@ export default function TeamCard({
   const subtotal = monthlySubtotal(team);
   const confirmedMonthlyTotal = discountedMonthlyTotal(team);
   const monthlyTotal = confirmedMonthlyTotal ?? subtotal;
-  const beforeDiscount = confirmedMonthlyTotal === null && subtotal !== null;
+  const usingOriginalPrice = confirmedMonthlyTotal === null && subtotal !== null;
   const [openingAddMember, setOpeningAddMember] = useState(false);
   const defaultSeatLabel = team.default_seat_type
     ? formatSeatTypeLabel(team.default_seat_type)
@@ -820,7 +821,23 @@ export default function TeamCard({
               </dd>
             </div>
             <div className="min-w-0">
-              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">月费</dt>
+              <dt className="text-[11px] leading-4 text-gray-400 dark:text-ink-500">
+                月费
+                {usingOriginalPrice && (
+                  <Tooltip.Root disableHoverableContent>
+                    <Tooltip.Trigger asChild>
+                      <span role="img" tabIndex={0} aria-label="未找到优惠信息，显示计算原价" className="ml-1 inline-flex align-middle text-gray-400 outline-none dark:text-ink-500">
+                        <CircleAlert size={13} aria-hidden="true" />
+                      </span>
+                    </Tooltip.Trigger>
+                    <Tooltip.Portal>
+                      <Tooltip.Content className="z-50 rounded-md border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-700 shadow-lg dark:border-ink-700 dark:bg-ink-800 dark:text-gray-200" sideOffset={6}>
+                        未找到优惠信息，显示计算原价
+                      </Tooltip.Content>
+                    </Tooltip.Portal>
+                  </Tooltip.Root>
+                )}
+              </dt>
               <dd className="mt-0.5 min-w-0 text-sm font-medium text-gray-900 dark:text-gray-100">
                 {monthlyTotal !== null && subtotal !== null ? (
                   <>
@@ -831,9 +848,6 @@ export default function TeamCard({
                       {formatMoney(monthlyTotal, unit)}
                       <span className="font-normal text-gray-400 dark:text-ink-500"> /月</span>
                     </span>
-                    {beforeDiscount && (
-                      <span className="block text-xs font-normal text-gray-500 dark:text-ink-400">优惠前 · 优惠待确认</span>
-                    )}
                     {/* 年付：上面是按年总额折成的每月，年总额另起一行（按年付月价 × 12 推算，以账单为准）。 */}
                     {isYearly && (
                       <span className="block text-xs font-normal text-gray-500 dark:text-ink-400">
