@@ -24,6 +24,9 @@ class PricingTest(unittest.TestCase):
     def test_resolve_country_from_price_country(self):
         subscription = {"billing_currency": "NZD", "price_country": "NZ"}
         self.assertEqual(resolve_pricing_country_code(subscription, "NZD"), "NZ")
+        # price_country wins over the billing currency's country.
+        subscription = {"billing_currency": "USD", "price_country": "nz"}
+        self.assertEqual(resolve_pricing_country_code(subscription, "USD"), "NZ")
 
     def test_resolve_country_falls_back_to_stored_value(self):
         subscription = {"billing_currency": "XXX", "price_country": None}

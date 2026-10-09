@@ -226,7 +226,7 @@ class TelegramMemberBindingTest(unittest.TestCase):
             stage_label="1 天",
             admin_contact=None,
         )
-        self.assertNotIn("管理员联系方式", text)
+        self.assertNotIn("💬 管理员", text)
 
 
 class TelegramMemberCommandScopeTest(unittest.TestCase):
