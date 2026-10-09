@@ -111,6 +111,7 @@ function StatCard({
   tooltip,
   icon: Icon,
   toneKey = 'blue',
+  hideIconOnMobile = false,
   seat,
   children,
 }: {
@@ -120,6 +121,7 @@ function StatCard({
   tooltip?: ReactNode;
   icon: typeof Shield;
   toneKey?: StatToneKey;
+  hideIconOnMobile?: boolean;
   /** Tiles about one seat type wear that seat's color (same as the Team cards). */
   seat?: SeatType;
   children?: ReactNode;
@@ -136,7 +138,7 @@ function StatCard({
   return (
     <div className={cn(CARD, 'group relative flex min-w-0 flex-col justify-between p-4 transition-all duration-200 hover:shadow-md sm:p-5', tone.surface, tone.borderHover)}>
       <div>
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex min-h-8 items-center justify-between gap-2 sm:min-h-9">
           <div className="flex min-w-0 items-center gap-1.5">
             <div className="truncate text-xs font-medium text-gray-500 sm:text-sm dark:text-ink-400">{title}</div>
             {tooltip && (
@@ -158,7 +160,7 @@ function StatCard({
               </Tooltip.Root>
             )}
           </div>
-          <div className={cn('flex size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', tone.iconBg)}>
+          <div className={cn('size-8 shrink-0 items-center justify-center rounded-lg transition-transform duration-200 group-hover:scale-105 sm:size-9', hideIconOnMobile ? 'hidden sm:flex' : 'flex', tone.iconBg)}>
             <Icon className="size-4 sm:size-4.5" />
           </div>
         </div>
@@ -561,34 +563,35 @@ export default function TeamManagement() {
                 toneKey="indigo"
               />
               <StatCard
-                title="闲置席位折算"
+                title={(
+                  <div role="group" aria-label="闲置席位折算类型" className="flex w-fit items-center gap-0.5 rounded-md bg-gray-100/90 p-0.5 sm:gap-1 dark:bg-ink-800/90">
+                    {([
+                      ['all', 'All', 'bg-amber-600 text-white shadow-xs'],
+                      ['default', 'ChatGPT', 'bg-blue-600 text-white shadow-xs'],
+                      ['prolite', 'Premium', 'bg-pink-600 text-white shadow-xs'],
+                    ] as const).map(([view, label, selectedClass]) => (
+                      <button
+                        key={view}
+                        type="button"
+                        aria-pressed={idleCostView === view}
+                        onClick={() => setIdleCostView(view)}
+                        className={cn(
+                          'rounded px-1 py-0.5 text-[10px] font-medium transition-all sm:px-1.5 sm:text-xs',
+                          idleCostView === view
+                            ? selectedClass
+                            : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100',
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 value={finance ? `约 ${formatMoney(idleCost[idleCostView], baseCurrency)}` : '—'}
+                hideIconOnMobile
                 icon={CreditCard}
                 toneKey="amber"
-              >
-                <div role="group" aria-label="闲置席位折算类型" className="mt-2 flex w-fit items-center gap-0.5 rounded-md bg-gray-100/90 p-0.5 sm:gap-1 dark:bg-ink-800/90">
-                  {([
-                    ['all', 'All', 'bg-amber-600 text-white shadow-xs'],
-                    ['default', 'ChatGPT', 'bg-blue-600 text-white shadow-xs'],
-                    ['prolite', 'Premium', 'bg-pink-600 text-white shadow-xs'],
-                  ] as const).map(([view, label, selectedClass]) => (
-                    <button
-                      key={view}
-                      type="button"
-                      aria-pressed={idleCostView === view}
-                      onClick={() => setIdleCostView(view)}
-                      className={cn(
-                        'rounded px-1 py-0.5 text-[10px] font-medium transition-all sm:px-1.5 sm:text-xs',
-                        idleCostView === view
-                          ? selectedClass
-                          : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100',
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </StatCard>
+              />
               <StatCard
                 title="近期续费 Team"
                 value={upcomingRenewals.length}
