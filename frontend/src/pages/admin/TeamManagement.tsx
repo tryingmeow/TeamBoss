@@ -332,6 +332,7 @@ export default function TeamManagement() {
   }, []);
 
   const [seatView, setSeatView] = useState<'default' | 'prolite'>('default');
+  const [idleCostView, setIdleCostView] = useState<'all' | 'default' | 'prolite'>('all');
 
   const seatUtilization = data && data.total_gpt_seats > 0
     ? Math.round((data.inuse_gpt / data.total_gpt_seats) * 100)
@@ -386,16 +387,25 @@ export default function TeamManagement() {
   const upcomingMembers = expiringMembers.filter((member) => member.daysUntil <= WINDOW_DAYS);
   const laterMemberCount = expiringMembers.length - upcomingMembers.length;
 
-  // 空闲 ChatGPT 席位 × ChatGPT 每席月价（基准币种；年付 Team 是年付价折成的每月）。月费总额里有
-  // Premium、有折扣，不能拿它平摊；单价未知（计费周期未知 / 没同步到 / 缺汇率）的 Team 不算。
   const idleCost = useMemo(() => {
-    if (!data || !finance) return 0;
-    const freeSeatsByTeam = new Map(data.teams.map((team) => [team.team_id, team.free_gpt_seats]));
-    return finance.teams.reduce((total, team) => {
-      const price = team.price_per_seat_base;
-      if (team.status !== 'active' || team.will_renew !== 1 || typeof price !== 'number') return total;
-      return total + price * (freeSeatsByTeam.get(team.team_id) ?? 0);
-    }, 0);
+    const result = { default: 0, prolite: 0, all: 0 };
+    if (!data || !finance) return result;
+    const usageByTeam = new Map(data.teams.map((team) => [team.team_id, team]));
+    finance.teams.forEach((team) => {
+      if (team.status !== 'active' || team.will_renew !== 1) return;
+      const usage = usageByTeam.get(team.team_id);
+      if (!usage) return;
+      const defaultPrice = team.price_per_seat_base;
+      const premiumPrice = team.premium_price_per_seat_base;
+      if (typeof defaultPrice === 'number' && Number.isFinite(defaultPrice)) {
+        result.default += defaultPrice * usage.free_gpt_seats;
+      }
+      if (typeof premiumPrice === 'number' && Number.isFinite(premiumPrice)) {
+        result.prolite += premiumPrice * (usage.free_premium_seats ?? 0);
+      }
+    });
+    result.all = result.default + result.prolite;
+    return result;
   }, [data, finance]);
 
   // 金额只取七天内：把跨度不同的账单日加在一起得到的总额没有对应的支出行为。
@@ -462,7 +472,7 @@ export default function TeamManagement() {
                       type="button"
                       onClick={() => setSeatView('default')}
                       className={cn(
-                        'rounded px-1.5 py-0.5 text-xs font-medium transition-all',
+                        'rounded px-1 py-0.5 text-[10px] font-medium transition-all sm:px-1.5 sm:text-xs',
                         seatView === 'default'
                           ? 'bg-blue-600 text-white shadow-xs'
                           : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100'
@@ -552,11 +562,33 @@ export default function TeamManagement() {
               />
               <StatCard
                 title="闲置席位折算"
-                value={finance ? `约 ${formatMoney(idleCost, baseCurrency)}` : '—'}
-                tooltip={`${data.free_gpt_seats} 个空闲 ChatGPT 席位 × 每席月价（不含税，年付按月均）；单价未知的 Team 不算`}
+                value={finance ? `约 ${formatMoney(idleCost[idleCostView], baseCurrency)}` : '—'}
                 icon={CreditCard}
                 toneKey="amber"
-              />
+              >
+                <div role="group" aria-label="闲置席位折算类型" className="mt-2 flex w-fit items-center gap-0.5 rounded-md bg-gray-100/90 p-0.5 sm:gap-1 dark:bg-ink-800/90">
+                  {([
+                    ['all', 'All', 'bg-amber-600 text-white shadow-xs'],
+                    ['default', 'ChatGPT', 'bg-blue-600 text-white shadow-xs'],
+                    ['prolite', 'Premium', 'bg-pink-600 text-white shadow-xs'],
+                  ] as const).map(([view, label, selectedClass]) => (
+                    <button
+                      key={view}
+                      type="button"
+                      aria-pressed={idleCostView === view}
+                      onClick={() => setIdleCostView(view)}
+                      className={cn(
+                        'rounded px-1 py-0.5 text-[10px] font-medium transition-all sm:px-1.5 sm:text-xs',
+                        idleCostView === view
+                          ? selectedClass
+                          : 'text-gray-600 hover:text-gray-900 dark:text-ink-300 dark:hover:text-gray-100',
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </StatCard>
               <StatCard
                 title="近期续费 Team"
                 value={upcomingRenewals.length}

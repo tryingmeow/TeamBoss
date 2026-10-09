@@ -29,17 +29,18 @@ class PremiumDisplayTest(unittest.TestCase):
     def setUp(self):
         self.db_path = start_temp_db(self)
 
-    def _insert_team(self, members=None, **fields):
+    def _insert_team(self, members=None, pending=None, **fields):
         fields.setdefault("status", "active")
         fields.setdefault("created_at", "2026-10-01")
         fields.setdefault("updated_at", "2026-10-01")
         conn = sqlite3.connect(self.db_path)
         insert_row(conn, "teams", fields)
-        if members is not None:
+        if members is not None or pending is not None:
             conn.execute(
                 "INSERT INTO member_cache (team_id, members_json, pending_json, updated_at) "
-                "VALUES (?, ?, '[]', ?)",
-                (fields["id"], json.dumps(members), "2026-10-01T00:00:00+00:00"),
+                "VALUES (?, ?, ?, ?)",
+                (fields["id"], json.dumps(members) if members is not None else "[]",
+                 json.dumps(pending) if pending is not None else "[]", "2026-10-01T00:00:00+00:00"),
             )
         conn.commit()
         conn.close()
@@ -116,6 +117,88 @@ class PremiumDisplayTest(unittest.TestCase):
         self.assertEqual(item["premium_seats_paid"], 2)
         self.assertEqual(result["inuse_premium"], 1)
         self.assertEqual(item["free_gpt_seats"], 2)
+
+    def test_resources_counts_default_and_premium_free_seats_independently(self):
+        self._insert_team(
+            [_member("d@x.com", "default"), _member("p@x.com", "prolite")],
+            pending=[{"seat_type": "default"}],
+            id="p1", name="P1", seats_entitled=5, seats_in_use=0,
+            seat_capacity_json=json.dumps({
+                "default": {"paid": 5, "available": 4},
+                "prolite": {"paid": 4, "available": 3},
+            }),
+        )
+        result = asyncio.run(get_resource_usage(refresh=False))
+        item = result["teams"][0]
+        self.assertEqual(item["free_gpt_seats"], 3)
+        self.assertEqual(item["free_premium_seats"], 3)
+        self.assertEqual(result["free_premium_seats"], 3)
+
+    def test_premium_free_seats_reserve_typed_and_untyped_invites_and_clamp_overage(self):
+        self._insert_team(
+            [_member("p1@x.com", "prolite"), _member("p2@x.com", "prolite"), _member("d@x.com", "default")],
+            pending=[{"seat_type": "prolite"}, {}],
+            id="p2", name="P2", seats_entitled=4, seats_in_use=0,
+            seat_capacity_json=json.dumps({"prolite": {"paid": 4, "available": 4}}),
+        )
+        self._insert_team(
+            [_member("p@x.com", "prolite"), _member("d@x.com", "default")],
+            id="p3", name="P3", seats_entitled=3, seats_in_use=0,
+            seat_capacity_json=json.dumps({"prolite": {"paid": 1, "available": 5}}),
+        )
+        self._insert_team(
+            [_member("p1@x.com", "prolite"), _member("p2@x.com", "prolite")],
+            id="p6", name="P6", seats_entitled=3, seats_in_use=0,
+            seat_capacity_json=json.dumps({"prolite": {"paid": 5, "available": 5}}),
+        )
+        result = asyncio.run(get_resource_usage(refresh=False))
+        by_id = {item["team_id"]: item for item in result["teams"]}
+        # P2: min(available 4 - 2 reservations, paid 4 - 2 used - 2 reservations) = 0.
+        self.assertEqual(by_id["p2"]["free_premium_seats"], 0)
+        # P3: upstream availability exceeds paid seats and occupancy, so only 0 remains.
+        self.assertEqual(by_id["p3"]["free_premium_seats"], 0)
+        # P6 has upstream availability 5 but only 3 paid seats remain after occupancy.
+        self.assertEqual(by_id["p6"]["free_premium_seats"], 3)
+        self.assertEqual(result["free_premium_seats"], 3)
+
+    def test_premium_free_seats_are_zero_for_inactive_team(self):
+        self._insert_team(
+            [], id="p4", name="P4", status="inactive",
+            seat_capacity_json=json.dumps({"prolite": {"paid": 4, "available": 4}}),
+        )
+        result = asyncio.run(get_resource_usage(refresh=False))
+        self.assertEqual(result["teams"][0]["free_premium_seats"], 0)
+        self.assertEqual(result["free_premium_seats"], 0)
+
+    def test_premium_free_seats_fail_closed_for_unknown_pending_and_use_cached_occupancy(self):
+        from app.routes import resources
+
+        self._insert_team(
+            None, id="p5", name="P5", seat_type_counts_json=json.dumps({"prolite": 1}),
+            seat_capacity_json=json.dumps({"prolite": {"paid": 5, "available": 5}}),
+        )
+        async def cache_with_missing_pending(team, refresh, errors):
+            return {"members": None}
+
+        async def cache_with_valid_pending(team, refresh, errors):
+            return {"members": None, "pending_invites": []}
+
+        with patch.object(resources, "_load_cache", side_effect=cache_with_valid_pending):
+            result = asyncio.run(get_resource_usage(refresh=False))
+        # The team column supplies the unknown member occupancy (one used seat).
+        self.assertEqual(result["teams"][0]["free_premium_seats"], 4)
+
+        with patch.object(resources, "_load_cache", side_effect=cache_with_missing_pending):
+            result = asyncio.run(get_resource_usage(refresh=False))
+        # Cached occupancy fallback is available, but absent pending state means zero free seats.
+        self.assertEqual(result["teams"][0]["free_premium_seats"], 0)
+
+        async def cache_with_malformed_pending(team, refresh, errors):
+            return {"members": None, "pending_invites": ["invalid"]}
+
+        with patch.object(resources, "_load_cache", side_effect=cache_with_malformed_pending):
+            result = asyncio.run(get_resource_usage(refresh=False))
+        self.assertEqual(result["teams"][0]["free_premium_seats"], 0)
 
 
 class PremiumTelegramSummaryTest(unittest.TestCase):

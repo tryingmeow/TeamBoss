@@ -632,6 +632,7 @@ export interface UsageTeamItem {
   premium_seats_paid?: number;
   pending_gpt_invites: number;
   free_gpt_seats: number;
+  free_premium_seats: number;
   card_last4: string | null;
   active_until: string | null;
   cache_loaded: boolean;
@@ -647,6 +648,7 @@ export interface UsageData {
   pending_gpt_invites: number;
   total_gpt_seats: number;
   free_gpt_seats: number;
+  free_premium_seats: number;
   free_team_count: number;
   refresh: boolean;
   teams: UsageTeamItem[];

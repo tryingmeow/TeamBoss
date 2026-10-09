@@ -6,9 +6,13 @@ from ..database import get_db
 from ..member_cache_service import fetch_and_cache_members, get_cached_members
 from ..seat_types import DEFAULT_SEAT_TYPE, PREMIUM_SEAT_TYPE, normalize_seat_type
 from ..services.seat_capacity import (
+    SeatCapacityFetchError,
+    cached_seat_type_counts,
     cached_seat_capacity,
     chatgpt_seat_capacity,
     member_seat_usage_from_members,
+    occupancy_bounded_free_seats,
+    pending_count_from_api,
     safe_int,
 )
 from ..services.team_clients import get_team_client
@@ -94,6 +98,7 @@ async def get_resource_usage(refresh: bool = Query(False)):
     pending_gpt_invites = 0
     total_gpt_seats = 0
     free_gpt_seats = 0
+    free_premium_seats = 0
     free_team_count = 0
 
     for team in teams:
@@ -115,6 +120,27 @@ async def get_resource_usage(refresh: bool = Query(False)):
         seat_capacity = cached_seat_capacity(team.get("seat_capacity_json"))
         premium_entry = (seat_capacity or {}).get(PREMIUM_SEAT_TYPE)
         premium_in_use = _premium_in_use(cache)
+        premium_occupancy = premium_in_use
+        if premium_occupancy is None:
+            premium_occupancy = cached_seat_type_counts(
+                team.get("seat_type_counts_json")
+            ).get(PREMIUM_SEAT_TYPE)
+        premium_pending_valid = True
+        try:
+            premium_pending = pending_count_from_api(
+                {"items": cache.get("pending_invites") if isinstance(cache, dict) else None},
+                PREMIUM_SEAT_TYPE,
+            )
+        except SeatCapacityFetchError:
+            premium_pending = 0
+            premium_pending_valid = False
+        team_free_premium = (
+            occupancy_bounded_free_seats(
+                premium_entry, in_use=premium_occupancy, pending=premium_pending
+            )
+            if premium_pending_valid
+            else 0
+        )
         capacity = chatgpt_seat_capacity(
             seats_entitled=seats_entitled,
             seats_in_use=seats_in_use,
@@ -138,6 +164,7 @@ async def get_resource_usage(refresh: bool = Query(False)):
             inuse_premium += premium_in_use or 0
             pending_gpt_invites += pending_default
             free_gpt_seats += team_free_gpt
+            free_premium_seats += team_free_premium
             if team_is_idle:
                 free_team_count += 1
 
@@ -155,6 +182,7 @@ async def get_resource_usage(refresh: bool = Query(False)):
             "free_gpt_seats": team_free_gpt,
             "inuse_premium": (premium_in_use or 0) if is_active else 0,
             "premium_seats_paid": premium_entry["paid"] if premium_entry else 0,
+            "free_premium_seats": team_free_premium if is_active else 0,
             "card_last4": team.get("card_last4"),
             "active_until": team.get("active_until"),
             "cache_loaded": cache is not None,
@@ -170,6 +198,7 @@ async def get_resource_usage(refresh: bool = Query(False)):
         "pending_gpt_invites": pending_gpt_invites,
         "total_gpt_seats": total_gpt_seats,
         "free_gpt_seats": free_gpt_seats,
+        "free_premium_seats": free_premium_seats,
         "free_team_count": free_team_count,
         "refresh": refresh,
         "teams": team_items,

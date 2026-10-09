@@ -459,6 +459,7 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
   let inuseCodex = 0;
   let pendingGpt = 0;
   let freeGpt = 0;
+  let freePremium = 0;
   let freeTeamCount = 0;
 
   const teams: UsageTeamItem[] = db.teams.map((record) => {
@@ -467,6 +468,13 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
     const isActive = team.status === 'active';
     const available = availableGptSeats(record);
     const teamFree = isActive ? available : 0;
+    const premiumEntry = team.seat_capacity?.prolite;
+    const teamFreePremium = isActive && premiumEntry
+      ? Math.max(0, Math.min(
+        premiumEntry.available - usage.pendingPremium,
+        (team.seat_capacity?.prolite?.paid ?? 0) - usage.premium - usage.pendingPremium,
+      ))
+      : 0;
     if (isActive) {
       activeTeam += 1;
       totalGptSeats += record.paid.default;
@@ -474,6 +482,7 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
       inuseCodex += usage.codex;
       pendingGpt += usage.pendingDefault;
       freeGpt += teamFree;
+      freePremium += teamFreePremium;
       if (teamFree > 0) freeTeamCount += 1;
     }
     return {
@@ -488,6 +497,7 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
       inuse_codex: isActive ? usage.codex : 0,
       pending_gpt_invites: isActive ? usage.pendingDefault : 0,
       free_gpt_seats: teamFree,
+      free_premium_seats: teamFreePremium,
       card_last4: team.card_last4,
       active_until: team.active_until,
       cache_loaded: true,
@@ -503,6 +513,7 @@ export function resourceUsage(db: DemoDb, refresh: boolean): UsageData {
     pending_gpt_invites: pendingGpt,
     total_gpt_seats: totalGptSeats,
     free_gpt_seats: freeGpt,
+    free_premium_seats: freePremium,
     free_team_count: freeTeamCount,
     refresh,
     teams,
