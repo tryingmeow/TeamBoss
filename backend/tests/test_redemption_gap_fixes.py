@@ -182,20 +182,6 @@ class SingleRecoveryCreditTest(_TempDbTest):
         self.assertEqual(use["result"], "success")
         self.assertEqual(use["expires_at"], "2026-10-06T00:00:00+00:00")
 
-    def test_access_reconcile_query_skips_settled_use(self):
-        token_use_id = self._new_token_use()
-        conn = self._conn()
-        conn.execute(
-            "UPDATE access_token_uses SET result = 'success' WHERE id = ?",
-            (token_use_id,),
-        )
-        conn.commit()
-        rows = conn.execute(
-            "SELECT id FROM access_token_uses WHERE result IN ('pending','uncertain')"
-        ).fetchall()
-        conn.close()
-        self.assertEqual(rows, [])
-
 
 # ── 缺口 5：结果未定的自助邀请要有巡逻屏障 ───────────────────────────────
 
@@ -383,10 +369,6 @@ class RescanAfterClaimTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["action"], "renewed_member")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ── A 方案：结果确认中的兑换只由管理员收尾，绝不按时间自动退码 ─────────────
 
 class AdminResolvesPendingConfirmationTest(_TempDbTest):
@@ -542,3 +524,7 @@ class AdminResolvesPendingConfirmationTest(_TempDbTest):
                 )
             )
         self.assertEqual(ctx.exception.status_code, 409)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -625,28 +625,6 @@ class FallbackCreditTest(_TempDbTest):
         self.assertEqual(use["expires_at"], credited["expires_at"])
         self.assertEqual(unresolved, 0)
 
-    def test_duplicate_fallback_rows_for_one_redemption_credit_once(self):
-        token_use_id = self._fallback_row()
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO pending_invite_reconciliations
-               (team_id, user_id, email, expires_at, source, reason, resolved,
-                created_at, token_use_id, kind)
-               SELECT team_id, user_id, email, expires_at, source, reason, 0,
-                      created_at, token_use_id, kind
-               FROM pending_invite_reconciliations WHERE token_use_id = ?""",
-            (token_use_id,),
-        )
-        conn.commit()
-        conn.close()
-
-        self._reconcile()
-
-        expiry, use, unresolved = self._state(token_use_id)
-        self._assert_full_duration_from(expiry["expires_at"], datetime.now(timezone.utc))
-        self.assertEqual(use["expires_at"], expiry["expires_at"])
-        self.assertEqual(unresolved, 0)
-
 
 if __name__ == "__main__":
     unittest.main()

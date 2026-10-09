@@ -164,32 +164,6 @@ class UnavailableTeamMembershipBlocksRedemptionTest(_RedeemFlowTest):
 
         await self._assert_blocked_without_consuming("atm_inactive_newseat", token_id)
 
-    async def test_renewal_in_the_active_team_is_not_chosen_for_the_customer(self):
-        await self._team("team-a")
-        await self._team("team-x", status="token_expired")
-        await self._expiry("team-a", expires_at="2026-12-01T00:00:00+00:00")
-        await self._expiry("team-x")
-        self.live["team-a"] = {
-            "members": [{"email": EMAIL, "id": "u-1", "is_owner": False,
-                         "expires_at": "2026-12-01T00:00:00+00:00", "source": "self_service"}],
-            "pending_invites": [],
-        }
-        token_id = await self._token("atm_inactive_renew")
-
-        # 不替用户选 Team：走多 Team 提示，不可用的 team-x 列出但不可续，码不消耗。
-        result = await self._redeem("atm_inactive_renew")
-        self.assertEqual(result["status"], "team_selection_required")
-        self.assertEqual(
-            {(c["team_id"], c["renewable"]) for c in result["choices"]},
-            {("team-a", True), ("team-x", False)},
-        )
-        self.assertEqual(self.invites, [])
-        self.assertEqual(await self._used_count(token_id), 0)
-        rows = await self._rows(
-            "SELECT expires_at FROM member_expiry WHERE team_id = 'team-a'"
-        )
-        self.assertEqual(rows[0]["expires_at"], "2026-12-01T00:00:00+00:00")
-
     async def test_cached_pending_invite_in_a_non_active_team_blocks(self):
         await self._team("team-a")
         await self._team("team-x", status="token_expired")

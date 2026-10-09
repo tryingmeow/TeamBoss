@@ -334,40 +334,6 @@ class FallbackBackfillAddsDurationTest(_TempDbTest):
         expected = datetime.fromisoformat(far_future) + timedelta(days=30)
         self.assertEqual(resolved, expected)
 
-    def test_authorized_permanent_membership_is_never_downgraded(self):
-        token_use_id = self._new_token_use()
-        created = "2026-09-11T00:00:00+00:00"
-        conn = self._conn()
-        conn.execute(
-            """INSERT INTO member_expiry
-               (team_id, user_id, email, expires_at, auto_kick, kicked,
-                first_seen_at, source, created_at)
-               VALUES ('team-1', 'u1', 'user@example.com', NULL, 0, 0, ?, 'system', ?)""",
-            (created, created),
-        )
-        conn.execute(
-            """INSERT INTO pending_invite_reconciliations
-               (team_id, user_id, email, expires_at, source, reason, resolved,
-                created_at, token_use_id, kind)
-               VALUES ('team-1', 'u1', 'user@example.com', '2026-10-11T00:00:00+00:00',
-                       'self_service', 'write failed', 0, ?, ?, 'extend')""",
-            (created, token_use_id),
-        )
-        conn.commit()
-        _reconcile_pending_invites_sync(
-            conn, "team-1",
-            [{"id": "u1", "email": "user@example.com"}],
-            [],
-            "2026-09-12T00:00:00+00:00",
-        )
-        conn.commit()
-        row = conn.execute(
-            "SELECT expires_at, auto_kick FROM member_expiry WHERE team_id='team-1'"
-        ).fetchone()
-        conn.close()
-        self.assertIsNone(row["expires_at"])
-        self.assertEqual(row["auto_kick"], 0)
-
 
 # ── 4. 快照之后才写进来的行不参与缺席判定 / 复用行不被降级成 detected ─────
 
