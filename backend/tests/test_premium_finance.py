@@ -79,9 +79,19 @@ class PremiumFinanceTest(unittest.TestCase):
             id="p4", name="P4", price_per_seat=25.0, seats_entitled=2,
             seat_capacity_json=json.dumps({"prolite": {"paid": 1, "available": 0}}),
         )
+        # p4 的原币合计本来就未知（Premium 单价缺失）；p5 的原币合计已知，没有汇率时同样换算不出来。
+        self._insert_team(id="p5", name="P5", price_per_seat=25.0, seats_entitled=2)
         with patch("app.routes.finance.convert", return_value=None):
             result = asyncio.run(get_overview())
         team = self._team(result, "p4")
+        self.assertIsNone(team["price_per_seat_base"])
+        self.assertIsNone(team["monthly_total_base"])
+        known = self._team(result, "p5")
+        self.assertAlmostEqual(known["monthly_total_native"], 50.0)
+        self.assertIsNone(known["monthly_total_base"])
+        # 换算不出来的 Team 不进月预计支出，按未计入统计。
+        self.assertEqual(result["monthly_total_base"], 0.0)
+        self.assertEqual(result["excluded_teams_count"], 2)
 
 
 if __name__ == "__main__":

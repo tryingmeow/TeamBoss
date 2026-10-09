@@ -61,18 +61,17 @@ class SettingsRouteTest(unittest.TestCase):
     def test_skip_overage_confirmation_key_in_allowlist(self):
         self.assertIn("skip_overage_confirmation", settings_route.PUBLIC_SETTINGS_KEYS)
 
-    def test_patch_skip_overage_confirmation_true(self):
-        """已退役的全局开关：照收不报错，但存的、回的都是 false（旧页面读到 true 会自动确认超员）。"""
-        from app.models import SettingsUpdate
-
-        asyncio.run(settings_route.update_settings(SettingsUpdate(skip_overage_confirmation=True)))
-        result = asyncio.run(settings_route.get_settings())
-        self.assertEqual(result["skip_overage_confirmation"]["value"], "false")
-
     def test_patch_skip_overage_confirmation_false(self):
+        """已退役的全局开关：PATCH false 照收，存成字符串 "false"（不是 str(False) 的 "False"）。"""
         from app.models import SettingsUpdate
 
-        asyncio.run(settings_route.update_settings(SettingsUpdate(skip_overage_confirmation=False)))
+        response = asyncio.run(settings_route.update_settings(SettingsUpdate(skip_overage_confirmation=False)))
+        self.assertEqual(response["updated"], {"skip_overage_confirmation": "false"})
+        with self._conn() as conn:
+            stored = conn.execute(
+                "SELECT value FROM settings WHERE key = 'skip_overage_confirmation'"
+            ).fetchone()["value"]
+        self.assertEqual(stored, "false")
         result = asyncio.run(settings_route.get_settings())
         self.assertEqual(result["skip_overage_confirmation"]["value"], "false")
 
