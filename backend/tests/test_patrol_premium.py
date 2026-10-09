@@ -1,13 +1,25 @@
-"""巡逻 / 到期踢人遇到 Premium（prolite）和注册表外席位类型（automation 等）时的回归测试。
+"""Patrol and expiry kicks around Premium (prolite) and seat types outside the registry (automation etc.).
 
-规则（契约 §3.9，所有者裁决）：
-- 已建基线、未豁免、巡逻已武装的 Team 上，source=detected 的非 Owner Premium 成员直接踢
-  （不看超员 / Codex / 严格模式），仍走 _patrol_kick 的全部闸门，单轮同样封顶。
-- default 超员踢人逐字不变；Codex 不变。
-- 注册表外的类型任何模式都不踢、不撤；到期踢人遇到它们跳过并记一条。
-- TeamBoss 管理的成员被切到 Premium（不是 TeamBoss 切的）只发限频提醒。
+Rules (contract §3.9, owner's ruling):
+- On a Team that has a baseline, is not exempt and has patrol armed, a source=detected non-Owner
+  Premium member is kicked directly (regardless of overage / Codex / strict mode), still through
+  every _patrol_kick gate and under the same per-round cap.
+- The outsider batch guard counts every detected outsider, whatever the seat type and whether
+  strict mode is on; Premium and over-quota kicks share one per-round cap
+  (NON_STRICT_KICK_ABS_CAP).
+- Any seat-change or invite record TeamBoss holds for the person in this Team (any result, any
+  target seat, including the batch invite's invite_gpt_member_existing) blocks the Premium kick;
+  the person goes to the seat alert instead.
+- A Premium removal that fails (e.g. upstream 403 every round) sends its card under the
+  team-health throttle; failure logs are written every round, success cards every time.
+- default over-quota kicks are unchanged; Codex is unchanged.
+- Types outside the registry are never kicked or revoked in any mode; expiry kicks skip them and
+  log once.
+- A TeamBoss-managed member switched to Premium (not by TeamBoss) only gets a throttled alert.
 
-所有上游调用都是记录调用的假客户端，绝不触网。
+Protection from TeamBoss member / redemption history and the Owner's email is in
+test_patrol_authorization_protection; snapshot freshness is in test_patrol_refresh.
+Every upstream call goes to a recording fake client.
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -20,10 +32,28 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _patrol_fixtures import OLD, OWNER, PatrolCase, RecordingClient, _live, _member, _pending
+from _patrol_fixtures import (  # noqa: I001  (_isolation first)
+    OLD,
+    OWNER,
+    PROD_OWNER,
+    PatrolCase,
+    PatrolHistoryCase,
+    PatrolSnapshotCase,
+    RecordingClient,
+    _live,
+    _member,
+    _pending,
+)
 
 from app import scheduler as app_scheduler
-from app.services import patrol
+from app.services import patrol, team_health_alerts
+from app.services.gpt_invites import EMAIL_ALREADY_IN_TEAM
+
+KEEPER = _member("keeper@example.com", "u-k", source="system")
+
+
+def _iso(delta=timedelta()):
+    return (datetime.now(timezone.utc) + delta).isoformat()
 
 
 # ═══ 一、Premium 外部成员自动踢 ═══════════════════════════════════════════════
@@ -439,175 +469,287 @@ class PremiumOutsiderKickTest(PatrolCase):
         self.assertEqual(self._calls("remove_member"), [])
 
 
-# ═══ 二、default 超员不变；Codex / automation 不踢 ════════════════════════════
+# ═══ 二、护栏数全部外部成员；Premium + 超员合计封顶 ════════════════════════════════
 
-class OverQuotaUnchangedTest(PatrolCase):
-    def test_default_over_quota_is_unchanged_with_premium_seats_present(self):
-        base = [
-            OWNER,
-            _member("a@example.com", "u-a", source="system"),
-            _member("b@example.com", "u-b", source="system"),
-            _member("newcomer@example.com", "u-d", first_seen_at="2026-07-20T00:00:00+00:00"),
-            _member("codexguy@example.com", "u-c", seat_type="usage_based"),
+class PremiumRoundLimitsTest(PatrolSnapshotCase):
+    def test_guard_counts_every_detected_outsider_with_strict_mode_off(self):
+        # 6 人队阈值 = 3。外部 Premium 成员只有 1 个，但外部成员一共 4 个（含一个带到期时间的），
+        # 严格模式关着（生产就是这样）：这份名单按异常处理，一个 Premium 成员都不踢。
+        members = [
+            OWNER, KEEPER,
+            _member("premiumguy@example.com", "u-p", seat_type="prolite"),
+            _member("plain1@example.com", "u-d1"),
+            _member("plain2@example.com", "u-d2"),
+            _member("dated@example.com", "u-d3", expires_at="2026-12-01T00:00:00+00:00"),
         ]
-        premium = _member("premiumguy@example.com", "u-p", seat_type="prolite",
-                          first_seen_at="2026-07-25T00:00:00+00:00")
+        self._armed_team("team-k3", members, seats_entitled=99)
 
-        without = patrol.classify_team(team_id="t", name="t", codex_enabled=False,
-                                       seats_entitled=2, members=base)
-        with_premium = patrol.classify_team(team_id="t", name="t", codex_enabled=False,
-                                            seats_entitled=2, members=base + [premium])
-        self.assertEqual(with_premium, without)
-        self.assertEqual(with_premium["over_by"], 1)
-        self.assertEqual([c["email"] for c in with_premium["detected_over"]], ["newcomer@example.com"])
-
-        self._armed_team("team-q", base + [premium], seats_entitled=2)
-        self._patrol(dry_run=False)
-
-        removed = self._calls("remove_member")
-        self.assertEqual(sorted(removed), [("remove_member", "u-d"), ("remove_member", "u-p")])
-        self.assertNotIn(("remove_member", "u-c"), removed)  # Codex 外部成员：普通模式照旧不踢
-        details = {log["target_email"]: log["detail"] for log in self._logs("patrol_kick")}
-        self.assertEqual(details["newcomer@example.com"], "user_id=u-d")  # 超员踢人日志逐字不变
-        self.assertTrue(any("巡逻发现超员" in t and "（超 1）" in t for t in self.notify_calls))
-
-    def test_automation_is_never_kicked_in_any_mode(self):
-        robot = _member("robotowner@example.com", "u-x", seat_type="automation", first_seen_at=OLD)
-        self._armed_team("team-auto", [
-            OWNER, _member("a@example.com", "u-a", source="system"), robot,
-        ], seats_entitled=1)
-        self._setting("patrol_strict_mode_enabled", "1")
-        RecordingClient.live_members = [
-            _live("owner@example.com", "u-owner", "usage_based", owner=True),
-            _live("a@example.com", "u-a", "default"),
-            _live("robotowner@example.com", "u-x", "automation"),
-        ]
-
-        self._patrol(dry_run=False)
+        result = self._patrol(dry_run=False)
 
         self.assertEqual(self._calls("remove_member"), [])
-        self.assertEqual(self._logs("patrol_strict_flagged"), [])
+        self.assertEqual(result["kicked"], 0)
+        guard = [e for e in result["events"] if e.get("action") == "premium_batch_guard"]
+        self.assertEqual((guard[0]["guard"], guard[0]["count"], guard[0]["team_size"]),
+                         ("outsiders", 4, 6))
+        capped = self._logs("patrol_kick_batch_capped")
+        self.assertIn("batch_guard=outsiders", capped[0]["detail"])
+        self.assertIn("capped_to=0", capped[0]["detail"])
         alerts = self._alerts()
         self.assertEqual(len(alerts), 1)
-        self.assertIn("其他（automation）", alerts[0])
-        self.assertIn("包括到期踢人", alerts[0])
+        self.assertIn("外部成员数量异常（4 / 团队共 6 人）", alerts[0])
+        self.assertIn("本轮 Premium 成员一个都没移除", alerts[0])
 
-
-# ═══ 三、严格模式 ═══════════════════════════════════════════════════════════
-
-class StrictModeTest(PatrolCase):
-    def _strict_team(self, team_id, members):
-        self._armed_team(team_id, members, seats_entitled=99)
-        self._setting("patrol_strict_mode_enabled", "1")
-        RecordingClient.live_members = [
-            _live(m["email"], m["id"], m["seat_type"], owner=bool(m["is_owner"])) for m in members
-        ]
-
-    def test_strict_mode_kicks_default_and_never_automation_and_premium_only_once(self):
+    def _shared_cap_team(self, team_id):
+        # 7 人队阈值 = 3，外部成员正好 3 个（不触发护栏）；ChatGPT 席位 5 / 3，超员 2。
         members = [
             OWNER,
-            _member("a@example.com", "u-a", source="system"),
-            _member("b@example.com", "u-b", source="system"),
-            _member("premiumguy@example.com", "u-p", seat_type="prolite", first_seen_at=OLD),
-            _member("robot@example.com", "u-x", seat_type="automation", first_seen_at=OLD),
-            _member("plain@example.com", "u-d", first_seen_at=OLD),
+            _member("keeper1@example.com", "u-k1", source="system"),
+            _member("keeper2@example.com", "u-k2", source="system"),
+            _member("keeper3@example.com", "u-k3", source="system"),
+            _member("premiumguy@example.com", "u-p", seat_type="prolite"),
+            _member("older@example.com", "u-old", first_seen_at="2026-07-10T00:00:00+00:00"),
+            _member("newer@example.com", "u-new", first_seen_at="2026-07-20T00:00:00+00:00"),
         ]
-        self._strict_team("team-strict", members)
+        self._armed_team(team_id, members, seats_entitled=3)
+
+    def test_premium_and_over_quota_kicks_share_one_per_round_cap(self):
+        self._shared_cap_team("team-cap")
+
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 2):
+            result = self._patrol(dry_run=False)
+
+        # Premium 先踢 1 个，超员那段只剩 1 个名额：最新的那个。
+        self.assertEqual(self._calls("remove_member"),
+                         [("remove_member", "u-p"), ("remove_member", "u-new")])
+        self.assertEqual(result["kicked"], 2)
+        capped = [l for l in self._logs("patrol_kick_batch_capped") if "over_by=" in l["detail"]]
+        self.assertEqual(len(capped), 1)
+        self.assertIn("capped_to=1", capped[0]["detail"])
+        self.assertIn("premium_kicks=1", capped[0]["detail"])
+
+    def test_dry_run_reports_the_same_shared_cap(self):
+        self._shared_cap_team("team-cap-dry")
+
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 2):
+            result = self._patrol(dry_run=True)
+
+        self.assertEqual(RecordingClient.calls, [])
+        self.assertEqual(result["would_kick"], 2)
+        would = [l["target_email"] for l in self._logs("patrol_would_kick")]
+        self.assertEqual(would, ["premiumguy@example.com", "newer@example.com"])
+
+    def test_premium_kick_that_never_reached_upstream_leaves_the_cap(self):
+        # Premium 那个人这一轮被推迟（快照开始之后 TeamBoss 动过他的席位），请求没发出去：
+        # 超员那段仍有 2 个名额。
+        self._shared_cap_team("team-cap-deferred")
+        self._log("team-cap-deferred", "change_seat", "premiumguy@example.com",
+                  "user_id=u-p, seat_type=default, from_seat_type=prolite, policy=confirm",
+                  "failed", created_at=(datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat())
+
+        with patch.object(patrol, "NON_STRICT_KICK_ABS_CAP", 2):
+            self._patrol(dry_run=False)
+
+        self.assertEqual(sorted(self._calls("remove_member")),
+                         [("remove_member", "u-new"), ("remove_member", "u-old")])
+
+
+# ═══ 三、TeamBoss 有改席位 / 邀请记录就不踢 Premium、改走提醒 ═══════════════════════
+
+class PremiumSeatRecordTest(PatrolHistoryCase):
+    def test_switch_to_chatgpt_logged_before_the_snapshot_blocks_the_kick(self):
+        # 管理员把 Premium 外部成员切到 ChatGPT：成功日志先落库，之后开始的一次刷新里上游还列着
+        # Premium。快照开始时间晚于日志，"快照之后改过席位"挡不住；有改席位记录就不能踢，交给提醒。
+        team_id = "team-p4"
+        member = _member("switched@example.com", "u-sw", seat_type="prolite")
+        members = [PROD_OWNER, _member("keeper@example.com", "u-k", source="system"), member]
+        self._armed_team(team_id, members, seats_entitled=2)
+        self._seat_log(team_id, "change_seat", "switched@example.com",
+                       "user_id=u-sw, seat_type=default, from_seat_type=prolite, policy=confirm",
+                       "success", _iso(-timedelta(minutes=10)))
+        self._cache(team_id, members, updated_at=_iso(-timedelta(minutes=5)))
 
         result = self._patrol(dry_run=False)
 
-        removed = self._calls("remove_member")
-        self.assertEqual(sorted(removed), [("remove_member", "u-d"), ("remove_member", "u-p")])
-        self.assertEqual(result["strict_kicked"], 1)
-        strict_logs = [l for l in self._logs("patrol_strict_kick") if l["result"] == "success"]
-        self.assertEqual([l["target_email"] for l in strict_logs], ["plain@example.com"])
-        premium_logs = [l for l in self._logs("patrol_kick") if l["result"] == "success"]
-        self.assertEqual([l["target_email"] for l in premium_logs], ["premiumguy@example.com"])
-
-    def test_strict_mode_kicks_codex_but_not_premium_through_strict(self):
-        members = [
-            OWNER,
-            _member("a@example.com", "u-a", source="system"),
-            _member("codexguy@example.com", "u-c", seat_type="usage_based", first_seen_at=OLD),
-        ]
-        self._strict_team("team-strict-c", members)
-
-        self._patrol(dry_run=False)
-
-        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-c")])
-
-    def test_strict_gate_rejects_premium_and_unknown_seat_types(self):
-        premium = _member("premiumguy@example.com", "u-p", seat_type="prolite", first_seen_at=OLD)
-        robot = _member("robot@example.com", "u-x", seat_type="automation", first_seen_at=OLD)
-        self._strict_team("team-sg", [OWNER, premium, robot])
-
-        conn = self._conn()
-        for member in (premium, robot):
-            with self.subTest(email=member["email"]):
-                ok, reason = patrol._patrol_strict_kick(conn, RecordingClient(), "team-sg", member)
-                self.assertFalse(ok)
-                self.assertIn("strict mode never acts on seat_type", reason)
-        conn.close()
         self.assertEqual(self._calls("remove_member"), [])
-
-    def test_batch_guard_still_counts_every_outsider(self):
-        # 4 人队阈值 = min(3, 2) = 2；3 个疑似陌生成员（含 automation）照旧触发护栏，一个都不踢。
-        # 护栏若只数可动手的 2 人，这一队反而会被放行。
-        members = [
-            OWNER,
-            _member("plain@example.com", "u-d", first_seen_at=OLD),
-            _member("codexguy@example.com", "u-c", seat_type="usage_based", first_seen_at=OLD),
-            _member("robot@example.com", "u-x", seat_type="automation", first_seen_at=OLD),
-        ]
-        self._strict_team("team-guard", members)
-
-        result = self._patrol(dry_run=False)
-
-        self.assertEqual(self._calls("remove_member"), [])
-        guard = [e for e in result["events"] if e.get("action") == "strict_batch_guard"]
-        self.assertEqual(len(guard), 1)
-        self.assertEqual(guard[0]["count"], 3)
-        self.assertEqual(guard[0]["team_size"], 4)
-
-
-# ═══ 四、陌生邀请撤销 ═════════════════════════════════════════════════════════
-
-class PendingRevocationTest(PatrolCase):
-    def test_registry_types_revoked_automation_never(self):
-        pending = [
-            _pending("inv-default@example.com"),
-            _pending("inv-codex@example.com", seat_type="usage_based"),
-            _pending("inv-premium@example.com", seat_type="prolite"),
-            _pending("inv-robot@example.com", seat_type="automation"),
-        ]
-        self._armed_team("team-inv", [OWNER, _member("a@example.com", "u-a", source="system")], pending)
-
-        result = self._patrol(dry_run=False)
-
-        self.assertEqual(
-            sorted(self._calls("revoke_invite")),
-            [
-                ("revoke_invite", "inv-codex@example.com"),
-                ("revoke_invite", "inv-default@example.com"),
-                ("revoke_invite", "inv-premium@example.com"),
-            ],
-        )
-        self.assertEqual(result["invites_revoked"], 3)
-        self.assertEqual(self._calls("remove_member"), [])
-        # automation 邀请进提醒；本轮已撤的 Premium 外部邀请不进（撤销有自己的通知）。
+        self.assertEqual(result["kicked"], 0)
+        self.assertEqual(self._logs("patrol_kick"), [])
         alerts = self._alerts()
         self.assertEqual(len(alerts), 1)
-        self.assertIn("inv-r…@example（其他（automation），邀请未接受）", alerts[0])
-        self.assertNotIn("外部 Premium 邀请", alerts[0])
+        self.assertIn("改过他的席位或邀请过他", alerts[0])
+        logged = self._logs("patrol_premium_alert")
+        self.assertEqual([l["target_email"] for l in logged], ["switched@example.com"])
+        self.assertIn("kind=premium_detected_with_record", logged[0]["detail"])
 
-        conn = self._conn()
-        ok, reason = patrol._patrol_revoke_invite(
-            conn, RecordingClient(), "team-inv", _pending("inv-robot@example.com", seat_type="automation")
-        )
-        conn.close()
+        ok, reason = self._kick(team_id, member, rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
         self.assertFalse(ok)
-        self.assertIn("not a TeamBoss seat type", reason)
-        self.assertNotIn(("revoke_invite", "inv-robot@example.com"), RecordingClient.calls)
+        self.assertIn("seat or invite record", reason)
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_any_seat_or_invite_record_blocks_the_kick(self):
+        cases = {
+            "switch_to_chatgpt_failed": ("change_seat", "x@example.com",
+                                         "user_id=u-x, seat_type=default, from_seat_type=prolite",
+                                         "failed"),
+            "switch_matched_by_user_id_only": ("change_seat", None,
+                                               "user_id=u-x, seat_type=usage_based", "success"),
+            "chatgpt_invite": ("invite_member", "X@Example.com",
+                               "seat_type=default, expires_in=30d", "success"),
+            "invite_refused_by_policy": ("invite_member", "x@example.com",
+                                         "seat_type=prolite, policy=forbid, reason=overage_forbidden",
+                                         "skipped"),
+            "switch_lookup_failed": ("change_seat", None, "user_id=u-x, pre_switch_lookup", "failed"),
+            "gpt_batch_invite": ("invite_gpt_member", "x@example.com", "seat_type=default", "success"),
+        }
+        for name, (action, target, detail, result) in cases.items():
+            with self.subTest(case=name):
+                RecordingClient.calls = []
+                team_id = f"team-p4-{name}"
+                member = _member("x@example.com", "u-x", seat_type="prolite")
+                self._armed_team(team_id, [PROD_OWNER, member], seats_entitled=2)
+                self._seat_log(team_id, action, target, detail, result, "2026-07-01T00:00:00+00:00")
+
+                self._patrol(dry_run=False, allow=[team_id])
+
+                self.assertEqual(self._calls("remove_member"), [])
+
+    def test_record_on_another_team_or_member_does_not_block(self):
+        team_id = "team-p4-other"
+        member = _member("x@example.com", "u-x", seat_type="prolite")
+        self._armed_team(team_id, [PROD_OWNER, member], seats_entitled=2)
+        self._seat_log("team-elsewhere", "change_seat", "x@example.com",
+                       "user_id=u-x, seat_type=default", "success", "2026-07-01T00:00:00+00:00")
+        self._seat_log(team_id, "change_seat", None,
+                       "user_id=u-x1, seat_type=default", "success", "2026-07-01T00:00:00+00:00")
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-x")])
+
+
+class ExistingMemberInviteLogTest(PatrolHistoryCase):
+    def test_batch_invite_existing_member_log_alone_blocks_the_premium_kick(self):
+        team_id = "team-f5"
+        member = _member("x@example.com", "u-x", seat_type="prolite")
+        self._armed_team(team_id, [PROD_OWNER, member], seats_entitled=2)
+        self._seat_log(team_id, "invite_gpt_member_existing", "X@Example.com",
+                       EMAIL_ALREADY_IN_TEAM, "skipped", "2026-07-01T00:00:00+00:00")
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(result["kicked"], 0)
+        self.assertEqual(self._logs("patrol_kick"), [])
+        logged = self._logs("patrol_premium_alert")
+        self.assertEqual([l["target_email"] for l in logged], ["x@example.com"])
+        self.assertIn("kind=premium_detected_with_record", logged[0]["detail"])
+
+        ok, reason = self._kick(team_id, member, rule=patrol.KICK_RULE_PREMIUM_OUTSIDER)
+        self.assertFalse(ok)
+        self.assertIn("seat or invite record", reason)
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_existing_member_log_is_not_a_seat_assignment(self):
+        # TeamBoss 邀请他进 Premium，后来批量邀请时发现他已在 Team、跳过：最近一次定席位仍是 Premium，
+        # 不发"不是 TeamBoss 切的"提醒。
+        team_id = "team-f5-managed"
+        managed = _member("m@example.com", "u-m", seat_type="prolite", source="system")
+        self._armed_team(team_id, [PROD_OWNER, managed], seats_entitled=2)
+        self._seat_log(team_id, "invite_member", "m@example.com",
+                       "seat_type=prolite, expires_in=30d", "success", "2026-07-01T00:00:00+00:00")
+        self._seat_log(team_id, "invite_gpt_member_existing", "m@example.com",
+                       EMAIL_ALREADY_IN_TEAM, "skipped", "2026-07-05T00:00:00+00:00")
+
+        conn = self._conn()
+        try:
+            self.assertTrue(patrol._teamboss_set_premium_sync(conn, team_id, "m@example.com", "u-m"))
+        finally:
+            conn.close()
+        self._patrol(dry_run=False)
+        self.assertEqual(self._logs("patrol_premium_alert"), [])
+
+
+# ═══ 四、Premium 移除失败的卡片限频 ═══════════════════════════════════════════════
+
+class ForbiddenClient(RecordingClient):
+    """remove_member 每次都被上游 403 拒绝。"""
+
+    def remove_member(self, user_id):
+        RecordingClient.calls.append(("remove_member", user_id))
+        return {"error": "403 Forbidden: insufficient permissions"}
+
+
+class PremiumKickFailureThrottleTest(PatrolHistoryCase):
+    def _premium_team(self, team_id):
+        member = _member("p@example.com", "u-p", seat_type="prolite")
+        self._armed_team(team_id, [PROD_OWNER, member], seats_entitled=2)
+
+    def _kick_cards(self):
+        return [t for t in self.notify_calls if "巡逻移除 Premium 外部成员" in t]
+
+    def _failed_kick_logs(self):
+        return [l for l in self._logs("patrol_kick") if l["result"] == "failed"]
+
+    def test_repeated_403_sends_one_card_and_logs_every_round(self):
+        self._premium_team("team-n2")
+
+        with patch.object(patrol, "ChatGPTClient", ForbiddenClient):
+            first = self._patrol(dry_run=False)
+            second = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-p")] * 2)
+        cards = self._kick_cards()
+        self.assertEqual(len(cards), 1)
+        self.assertIn("p@example.com（403 Forbidden", cards[0])
+        failed = self._failed_kick_logs()
+        self.assertEqual(len(failed), 2)
+        self.assertTrue(all("403 Forbidden" in (l["error_message"] or "") for l in failed))
+        for result in (first, second):
+            self.assertEqual(
+                [e["result"] for e in result["events"] if e.get("action") == "kick"], ["failed"]
+            )
+
+    def test_reminder_after_the_team_health_interval(self):
+        self._premium_team("team-n2-remind")
+        with patch.object(patrol, "ChatGPTClient", ForbiddenClient):
+            self._patrol(dry_run=False)
+            # 上一次提醒已经过了 REPEAT_ALERT_INTERVAL：再提醒一次。
+            stale = (datetime.now(timezone.utc) - team_health_alerts.REPEAT_ALERT_INTERVAL
+                     - timedelta(minutes=1)).isoformat()
+            conn = self._conn()
+            conn.execute(
+                "UPDATE team_health_incidents SET last_notified_at = ? WHERE team_id = ? "
+                "AND alert_key LIKE 'premium_kick_failed:%'",
+                (stale, "team-n2-remind"),
+            )
+            conn.commit()
+            conn.close()
+            self._patrol(dry_run=False)
+
+        cards = self._kick_cards()
+        self.assertEqual(len(cards), 2)
+        self.assertIn("仍未成功", cards[1])
+        self.assertEqual(len(self._failed_kick_logs()), 2)
+
+    def test_success_card_is_not_throttled_and_closes_the_failure(self):
+        self._premium_team("team-n2-ok")
+        with patch.object(patrol, "ChatGPTClient", ForbiddenClient):
+            self._patrol(dry_run=False)
+
+        self._patrol(dry_run=False)
+
+        cards = self._kick_cards()
+        self.assertEqual(len(cards), 2)
+        self.assertIn("✅ 已移除：p@example.com", cards[1])
+        conn = self._conn()
+        try:
+            open_rows = conn.execute(
+                "SELECT COUNT(*) FROM team_health_incidents WHERE team_id = ? AND status = 'open' "
+                "AND alert_key LIKE 'premium_kick_failed:%'",
+                ("team-n2-ok",),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(open_rows, 0)
 
 
 # ═══ 五、TeamBoss 成员被切到 Premium：只提醒 + 限频 ═══════════════════════════
@@ -763,7 +905,178 @@ class ManagedPremiumAlertTest(PatrolCase):
         self.assertEqual(failed[0]["result"], "failed")
 
 
-# ═══ 六、到期踢人：未知席位类型跳过 ═══════════════════════════════════════════
+# ═══ 六、default 超员不变；Codex / automation 不踢 ════════════════════════════
+
+class OverQuotaUnchangedTest(PatrolCase):
+    def test_default_over_quota_is_unchanged_with_premium_seats_present(self):
+        base = [
+            OWNER,
+            _member("a@example.com", "u-a", source="system"),
+            _member("b@example.com", "u-b", source="system"),
+            _member("newcomer@example.com", "u-d", first_seen_at="2026-07-20T00:00:00+00:00"),
+            _member("codexguy@example.com", "u-c", seat_type="usage_based"),
+        ]
+        premium = _member("premiumguy@example.com", "u-p", seat_type="prolite",
+                          first_seen_at="2026-07-25T00:00:00+00:00")
+
+        without = patrol.classify_team(team_id="t", name="t", codex_enabled=False,
+                                       seats_entitled=2, members=base)
+        with_premium = patrol.classify_team(team_id="t", name="t", codex_enabled=False,
+                                            seats_entitled=2, members=base + [premium])
+        self.assertEqual(with_premium, without)
+        self.assertEqual(with_premium["over_by"], 1)
+        self.assertEqual([c["email"] for c in with_premium["detected_over"]], ["newcomer@example.com"])
+
+        self._armed_team("team-q", base + [premium], seats_entitled=2)
+        self._patrol(dry_run=False)
+
+        removed = self._calls("remove_member")
+        self.assertEqual(sorted(removed), [("remove_member", "u-d"), ("remove_member", "u-p")])
+        self.assertNotIn(("remove_member", "u-c"), removed)  # Codex 外部成员：普通模式照旧不踢
+        details = {log["target_email"]: log["detail"] for log in self._logs("patrol_kick")}
+        self.assertEqual(details["newcomer@example.com"], "user_id=u-d")  # 超员踢人日志逐字不变
+        self.assertTrue(any("巡逻发现超员" in t and "（超 1）" in t for t in self.notify_calls))
+
+    def test_automation_is_never_kicked_in_any_mode(self):
+        robot = _member("robotowner@example.com", "u-x", seat_type="automation", first_seen_at=OLD)
+        self._armed_team("team-auto", [
+            OWNER, _member("a@example.com", "u-a", source="system"), robot,
+        ], seats_entitled=1)
+        self._setting("patrol_strict_mode_enabled", "1")
+        RecordingClient.live_members = [
+            _live("owner@example.com", "u-owner", "usage_based", owner=True),
+            _live("a@example.com", "u-a", "default"),
+            _live("robotowner@example.com", "u-x", "automation"),
+        ]
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        self.assertEqual(self._logs("patrol_strict_flagged"), [])
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("其他（automation）", alerts[0])
+        self.assertIn("包括到期踢人", alerts[0])
+
+
+# ═══ 七、严格模式遇到 Premium / 注册表外类型 ══════════════════════════════════════
+
+class StrictModeTest(PatrolCase):
+    def _strict_team(self, team_id, members):
+        self._armed_team(team_id, members, seats_entitled=99)
+        self._setting("patrol_strict_mode_enabled", "1")
+        RecordingClient.live_members = [
+            _live(m["email"], m["id"], m["seat_type"], owner=bool(m["is_owner"])) for m in members
+        ]
+
+    def test_strict_mode_kicks_default_and_never_automation_and_premium_only_once(self):
+        members = [
+            OWNER,
+            _member("a@example.com", "u-a", source="system"),
+            _member("b@example.com", "u-b", source="system"),
+            _member("premiumguy@example.com", "u-p", seat_type="prolite", first_seen_at=OLD),
+            _member("robot@example.com", "u-x", seat_type="automation", first_seen_at=OLD),
+            _member("plain@example.com", "u-d", first_seen_at=OLD),
+        ]
+        self._strict_team("team-strict", members)
+
+        result = self._patrol(dry_run=False)
+
+        removed = self._calls("remove_member")
+        self.assertEqual(sorted(removed), [("remove_member", "u-d"), ("remove_member", "u-p")])
+        self.assertEqual(result["strict_kicked"], 1)
+        strict_logs = [l for l in self._logs("patrol_strict_kick") if l["result"] == "success"]
+        self.assertEqual([l["target_email"] for l in strict_logs], ["plain@example.com"])
+        premium_logs = [l for l in self._logs("patrol_kick") if l["result"] == "success"]
+        self.assertEqual([l["target_email"] for l in premium_logs], ["premiumguy@example.com"])
+
+    def test_strict_mode_kicks_codex_but_not_premium_through_strict(self):
+        members = [
+            OWNER,
+            _member("a@example.com", "u-a", source="system"),
+            _member("codexguy@example.com", "u-c", seat_type="usage_based", first_seen_at=OLD),
+        ]
+        self._strict_team("team-strict-c", members)
+
+        self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [("remove_member", "u-c")])
+
+    def test_strict_gate_rejects_premium_and_unknown_seat_types(self):
+        premium = _member("premiumguy@example.com", "u-p", seat_type="prolite", first_seen_at=OLD)
+        robot = _member("robot@example.com", "u-x", seat_type="automation", first_seen_at=OLD)
+        self._strict_team("team-sg", [OWNER, premium, robot])
+
+        conn = self._conn()
+        for member in (premium, robot):
+            with self.subTest(email=member["email"]):
+                ok, reason = patrol._patrol_strict_kick(conn, RecordingClient(), "team-sg", member)
+                self.assertFalse(ok)
+                self.assertIn("strict mode never acts on seat_type", reason)
+        conn.close()
+        self.assertEqual(self._calls("remove_member"), [])
+
+    def test_batch_guard_still_counts_every_outsider(self):
+        # 4 人队阈值 = min(3, 2) = 2；3 个疑似陌生成员（含 automation）照旧触发护栏，一个都不踢。
+        # 护栏若只数可动手的 2 人，这一队反而会被放行。
+        members = [
+            OWNER,
+            _member("plain@example.com", "u-d", first_seen_at=OLD),
+            _member("codexguy@example.com", "u-c", seat_type="usage_based", first_seen_at=OLD),
+            _member("robot@example.com", "u-x", seat_type="automation", first_seen_at=OLD),
+        ]
+        self._strict_team("team-guard", members)
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(self._calls("remove_member"), [])
+        guard = [e for e in result["events"] if e.get("action") == "strict_batch_guard"]
+        self.assertEqual(len(guard), 1)
+        self.assertEqual(guard[0]["count"], 3)
+        self.assertEqual(guard[0]["team_size"], 4)
+
+
+# ═══ 八、陌生邀请撤销按席位类型 ═══════════════════════════════════════════════
+
+class PendingRevocationTest(PatrolCase):
+    def test_registry_types_revoked_automation_never(self):
+        pending = [
+            _pending("inv-default@example.com"),
+            _pending("inv-codex@example.com", seat_type="usage_based"),
+            _pending("inv-premium@example.com", seat_type="prolite"),
+            _pending("inv-robot@example.com", seat_type="automation"),
+        ]
+        self._armed_team("team-inv", [OWNER, _member("a@example.com", "u-a", source="system")], pending)
+
+        result = self._patrol(dry_run=False)
+
+        self.assertEqual(
+            sorted(self._calls("revoke_invite")),
+            [
+                ("revoke_invite", "inv-codex@example.com"),
+                ("revoke_invite", "inv-default@example.com"),
+                ("revoke_invite", "inv-premium@example.com"),
+            ],
+        )
+        self.assertEqual(result["invites_revoked"], 3)
+        self.assertEqual(self._calls("remove_member"), [])
+        # automation 邀请进提醒；本轮已撤的 Premium 外部邀请不进（撤销有自己的通知）。
+        alerts = self._alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("inv-r…@example（其他（automation），邀请未接受）", alerts[0])
+        self.assertNotIn("外部 Premium 邀请", alerts[0])
+
+        conn = self._conn()
+        ok, reason = patrol._patrol_revoke_invite(
+            conn, RecordingClient(), "team-inv", _pending("inv-robot@example.com", seat_type="automation")
+        )
+        conn.close()
+        self.assertFalse(ok)
+        self.assertIn("not a TeamBoss seat type", reason)
+        self.assertNotIn(("revoke_invite", "inv-robot@example.com"), RecordingClient.calls)
+
+
+# ═══ 九、到期踢人：未知席位类型跳过 ═══════════════════════════════════════════
 
 class ExpiryKickSeatTypeTest(PatrolCase):
     def test_expired_premium_kicked_unknown_types_skipped_and_logged_once(self):
@@ -813,7 +1126,7 @@ class ExpiryKickSeatTypeTest(PatrolCase):
         self.assertIn("seat_type=automation", member_skips[0]["detail"])
 
 
-# ═══ 七、定时同步写分类型计数 ═════════════════════════════════════════════════
+# ═══ 十、定时同步写分类型计数 ═════════════════════════════════════════════════
 
 class SyncWriterTest(PatrolCase):
     def test_data_sync_writes_seat_type_counts_and_capacity(self):

@@ -1,25 +1,31 @@
+"""Baseline rules of run_patrol and its kick / revoke gates.
+
+Covers candidate selection (system / self_service / Owner never chosen, newest over_by first),
+the switches that stop a round from acting (missing or empty cache, Codex on, exempt Team,
+patrol_kick_enabled off, empty allow list), the live over-quota kick, the central _patrol_kick
+gate, classify_team, activate_patrol_sync, stranger pending-invite revocation and the basic
+strict-mode rules. Deeper rules live in the topic files: test_patrol_over_quota,
+test_patrol_premium, test_patrol_authorization_protection, test_patrol_baseline_and_entitlement
+and test_patrol_refresh.
+
+The harness (_PatrolBase) differs from _patrol_fixtures.PatrolCase, so keep these tests on it:
+member_cache rows carry no fetch_started_at, ChatGPTClient stays the real class unless a test
+installs a fake, notify_admins_sync returns None, and team_health_alerts is not guarded.
+No upstream call is made.
+"""
 import _isolation  # noqa: F401  must precede any app import
-import asyncio
 import json
 import sqlite3
 import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import database as app_database
+from _fixtures import start_temp_db
+
 from app.services import patrol
-
-
-def _init_temp_db() -> None:
-    """用真正的 init_database() 建表，保证 schema 和生产完全一致。
-
-    Assumes get_db_dir() has already been patched by the caller.
-    """
-    asyncio.run(app_database.init_database())
 
 
 def _member(email, user_id, *, seat_type="default", is_owner=False,
@@ -87,35 +93,77 @@ class RaisingChatGPTClient:
         raise AssertionError(f"remove_member should never be called in this scenario (user_id={user_id})")
 
 
-class PatrolTest(unittest.TestCase):
+def _pending(email, *, source="detected", first_seen_at=None, created_time=None, invite_id=None):
+    return {
+        "id": invite_id or f"invite-{email}",
+        "email": email,
+        "seat_type": "default",
+        "is_owner": False,
+        "source": source,
+        "first_seen_at": first_seen_at,
+        "created_time": created_time,
+        "status": "pending",
+    }
+
+
+def _insert_expiry_row(conn, team_id, *, user_id="", email="", source="detected",
+                        first_seen_at=None, expires_at=None, kicked=0, created_at="2026-01-01"):
+    conn.execute(
+        """INSERT INTO member_expiry
+           (team_id, user_id, email, expires_at, auto_kick, kicked, first_seen_at, source, created_at)
+           VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
+        (team_id, user_id, email, expires_at, kicked, first_seen_at, source, created_at),
+    )
+    conn.commit()
+
+
+def _set_pending_cache(conn, team_id, pending):
+    """member_cache 里的 pending_json 单独更新（_insert_member_cache 只覆盖 members_json）。"""
+    conn.execute(
+        "UPDATE member_cache SET pending_json = ? WHERE team_id = ?",
+        (json.dumps(pending), team_id),
+    )
+    conn.commit()
+
+
+class RaisingInviteClient:
+    """站岗：一旦真的调用 revoke_invite 就让测试失败。"""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def revoke_invite(self, email):  # pragma: no cover
+        raise AssertionError(f"revoke_invite should never be called (email={email})")
+
+    def remove_member(self, user_id):  # pragma: no cover
+        raise AssertionError(f"remove_member should never be called (user_id={user_id})")
+
+    def get_members(self, offset=0, limit=100):  # pragma: no cover
+        raise AssertionError("get_members should never be called")
+
+    def get_pending_invites(self, offset=0, limit=100):  # pragma: no cover
+        raise AssertionError("get_pending_invites should never be called")
+
+
+class _PatrolBase(unittest.TestCase):
+    """Temp database and recorded Telegram text; patrol's client hooks are restored after each test."""
+
     def setUp(self):
-        import tempfile
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.db_dir = self._tmpdir.name
-
-        # monkeypatch get_db_dir() to return test database directory
-        self.get_db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        self.get_db_dir_patch.start()
-
-        # Initialize temp database with patched get_db_dir
-        _init_temp_db()
-        self.db_path = app_database.get_db_path()
+        self.db_path = start_temp_db(self)
 
         # 屏蔽真实 Telegram 推送，只记录调用过的文本
         self.notify_calls = []
         self._orig_notify = patrol.notify_admins_sync
         patrol.notify_admins_sync = lambda text, **kw: self.notify_calls.append(text)
 
-        # 默认拒绝任何真实网络调用；单个测试可以自行覆盖
+        # 单个测试自行装假客户端；这里只负责测试结束后还原
         self._orig_client = patrol.ChatGPTClient
         self._orig_run_call = patrol.run_chatgpt_call_sync
 
     def tearDown(self):
-        self.get_db_dir_patch.stop()
         patrol.notify_admins_sync = self._orig_notify
         patrol.ChatGPTClient = self._orig_client
         patrol.run_chatgpt_call_sync = self._orig_run_call
-        self._tmpdir.cleanup()
 
     def _conn(self):
         conn = sqlite3.connect(self.db_path)
@@ -125,9 +173,9 @@ class PatrolTest(unittest.TestCase):
     def _patrol(self, **kwargs):
         """跑一轮巡逻，白名单 = 当前所有 active team。
 
-        run_patrol 现在收的是白名单（只巡逻本轮刚刷新成功的 team），没有默认值：
+        run_patrol 收的是白名单（只巡逻本轮刚刷新成功的 team），没有默认值：
         忘记传 = 什么都不做。这些用例关心的是巡逻自身的判定，所以统一把全部
-        active team 放进白名单；白名单本身的行为由 PatrolAllowListTest 覆盖。
+        active team 放进白名单；白名单本身的行为由 PatrolFailureIsolationTest 覆盖。
         """
         conn = self._conn()
         team_ids = [
@@ -149,6 +197,12 @@ class PatrolTest(unittest.TestCase):
         conn.close()
         return [dict(r) for r in rows]
 
+    def _arm_globally(self, conn, *, baseline_at="2026-07-01T00:00:00+00:00", kick_enabled="1"):
+        _set_setting(conn, "patrol_kick_enabled", kick_enabled)
+        _set_setting(conn, "patrol_baseline_at", baseline_at)
+
+
+class PatrolTest(_PatrolBase):
     # ── (a) system / self_service / owner 永不入选 ──────────────────────
 
     def test_select_candidates_excludes_system_self_service_and_owner(self):
@@ -615,134 +669,9 @@ class PatrolTest(unittest.TestCase):
         self.assertEqual(over_status["detected_over"][0]["email"], "b@x.com")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 新增：陌生 pending invite 自动撤销 + 严格模式 + 每个 team 独立判断（不再一票否决）
-#
-# 独立的测试基类（不复用/不修改上面的 PatrolTest），避免任何风险影响已有 16 个用例。
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _pending(email, *, source="detected", first_seen_at=None, created_time=None, invite_id=None):
-    return {
-        "id": invite_id or f"invite-{email}",
-        "email": email,
-        "seat_type": "default",
-        "is_owner": False,
-        "source": source,
-        "first_seen_at": first_seen_at,
-        "created_time": created_time,
-        "status": "pending",
-    }
-
-
-def _insert_expiry_row(conn, team_id, *, user_id="", email="", source="detected",
-                        first_seen_at=None, expires_at=None, kicked=0, created_at="2026-01-01"):
-    conn.execute(
-        """INSERT INTO member_expiry
-           (team_id, user_id, email, expires_at, auto_kick, kicked, first_seen_at, source, created_at)
-           VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)""",
-        (team_id, user_id, email, expires_at, kicked, first_seen_at, source, created_at),
-    )
-    conn.commit()
-
-
-def _set_pending_cache(conn, team_id, pending):
-    """member_cache 里的 pending_json 单独更新（_insert_member_cache 只覆盖 members_json）。"""
-    conn.execute(
-        "UPDATE member_cache SET pending_json = ? WHERE team_id = ?",
-        (json.dumps(pending), team_id),
-    )
-    conn.commit()
-
-
-class RaisingInviteClient:
-    """站岗：一旦真的调用 revoke_invite 就让测试失败。"""
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def revoke_invite(self, email):  # pragma: no cover
-        raise AssertionError(f"revoke_invite should never be called (email={email})")
-
-    def remove_member(self, user_id):  # pragma: no cover
-        raise AssertionError(f"remove_member should never be called (user_id={user_id})")
-
-    def get_members(self, offset=0, limit=100):  # pragma: no cover
-        raise AssertionError("get_members should never be called")
-
-    def get_pending_invites(self, offset=0, limit=100):  # pragma: no cover
-        raise AssertionError("get_pending_invites should never be called")
-
-
-class _PatrolNewFeaturesTestBase(unittest.TestCase):
-    """与 PatrolTest 完全独立的 setUp/tearDown/helper 拷贝，绝不touch 已有测试类。"""
-
-    def setUp(self):
-        import tempfile
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.db_dir = self._tmpdir.name
-
-        # Patch get_db_dir() to return test database directory
-        self.get_db_dir_patch = patch.object(app_database, "get_db_dir", return_value=self.db_dir)
-        self.get_db_dir_patch.start()
-
-        # Initialize temp database with patched get_db_dir
-        _init_temp_db()
-        self.db_path = app_database.get_db_path()
-
-        self.notify_calls = []
-        self._orig_notify = patrol.notify_admins_sync
-        patrol.notify_admins_sync = lambda text, **kw: self.notify_calls.append(text)
-
-        self._orig_client = patrol.ChatGPTClient
-        self._orig_run_call = patrol.run_chatgpt_call_sync
-
-    def tearDown(self):
-        self.get_db_dir_patch.stop()
-        patrol.notify_admins_sync = self._orig_notify
-        patrol.ChatGPTClient = self._orig_client
-        patrol.run_chatgpt_call_sync = self._orig_run_call
-        self._tmpdir.cleanup()
-
-    def _conn(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _patrol(self, **kwargs):
-        """跑一轮巡逻，白名单 = 当前所有 active team。
-
-        run_patrol 现在收的是白名单（只巡逻本轮刚刷新成功的 team），没有默认值：
-        忘记传 = 什么都不做。这些用例关心的是巡逻自身的判定，所以统一把全部
-        active team 放进白名单；白名单本身的行为由 PatrolAllowListTest 覆盖。
-        """
-        conn = self._conn()
-        team_ids = [
-            row["id"] for row in conn.execute(
-                "SELECT id FROM teams WHERE status = 'active'"
-            ).fetchall()
-        ]
-        conn.close()
-        return patrol.run_patrol(allow_team_ids=team_ids, **kwargs)
-
-    def _operation_logs(self, action=None):
-        conn = self._conn()
-        if action:
-            rows = conn.execute(
-                "SELECT * FROM operation_logs WHERE action = ?", (action,)
-            ).fetchall()
-        else:
-            rows = conn.execute("SELECT * FROM operation_logs").fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-
-    def _arm_globally(self, conn, *, baseline_at="2026-07-01T00:00:00+00:00", kick_enabled="1"):
-        _set_setting(conn, "patrol_kick_enabled", kick_enabled)
-        _set_setting(conn, "patrol_baseline_at", baseline_at)
-
-
 # ── 一、陌生 pending invite 自动撤销 ──────────────────────────────────────────
 
-class PatrolInviteRevokeTest(_PatrolNewFeaturesTestBase):
+class PatrolInviteRevokeTest(_PatrolBase):
 
     def test_run_patrol_revokes_detected_invite_when_armed(self):
         conn = self._conn()
@@ -919,7 +848,7 @@ class PatrolInviteRevokeTest(_PatrolNewFeaturesTestBase):
 
 # ── 二、严格模式 ──────────────────────────────────────────────────────────────
 
-class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
+class PatrolStrictModeTest(_PatrolBase):
 
     def test_run_patrol_strict_mode_disabled_by_default_no_behavior_change(self):
         """patrol_strict_mode_enabled 默认是 '0'——即便有天然会被严格模式抓到的候选，
@@ -1128,9 +1057,10 @@ class PatrolStrictModeTest(_PatrolNewFeaturesTestBase):
         self.assertTrue(any("数量过多" in t and "3 / 团队共 4 人" in t for t in self.notify_calls))
         self.assertEqual(len(self._operation_logs("patrol_strict_batch_guard")), 1)
 
+
 # ── 三、每个 team 独立判断（run_patrol 的 allow_team_ids 白名单） ────────────
 
-class PatrolFailureIsolationTest(_PatrolNewFeaturesTestBase):
+class PatrolFailureIsolationTest(_PatrolBase):
 
     def test_run_patrol_allow_list_isolates_unrefreshed_team_only(self):
         conn = self._conn()
