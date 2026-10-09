@@ -1,4 +1,9 @@
-"""Premium 席位核心（注册表、分类型容量、预留、迁移）的独立测试。"""
+"""Premium 席位核心（注册表、分类型容量、预留、迁移）的独立测试。
+
+现拉容量：待接受邀请分页拉全，拉不全 / 结构不对 = 占用未知（SeatCapacityFetchError），绝不按 0 算。
+Premium 空位 = min(available, 已付 − 在用 − 待接受 Premium − 没带类型的待接受) − 预留；
+Premium 预留同时落库（seat_holds），ChatGPT 预留只在内存。
+"""
 import _isolation  # noqa: F401  must precede any app import
 import asyncio
 import sqlite3
@@ -10,10 +15,11 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _fixtures import direct_call, start_temp_db, temp_db_dir
+from _seat_fixtures import PagedClient, _filler, _premium_subscription
 
 from app import database as app_database
 from app import seat_types
-from app.services import seat_capacity, team_locks
+from app.services import seat_capacity, seat_holds, team_locks
 from app.services.seat_capacity import (
     SeatCapacityFetchError,
     billed_free_seats,
@@ -22,6 +28,9 @@ from app.services.seat_capacity import (
     fetch_live_seat_type_capacity,
     parse_seat_capacity,
 )
+from app.services.team_locks import reserve_default_seat, reserve_seat, reserved_seats
+
+OTHER = "second.redeemer@example.com"
 
 
 class FakeClient:
@@ -153,11 +162,13 @@ class ChatGPTSeatCapacityTest(unittest.TestCase):
         self.assertIsNone(cap.per_type_available)
 
 
-class LiveCapacityTest(unittest.TestCase):
+class _LiveCapacityCase(unittest.TestCase):
     def _run(self, coro):
         with patch.object(seat_capacity, "run_chatgpt_call", new=direct_call):
             return asyncio.run(coro)
 
+
+class LiveCapacityTest(_LiveCapacityCase):
     def test_live_default_uses_lower_per_type_value(self):
         client = FakeClient(
             {
@@ -220,12 +231,169 @@ class LiveCapacityTest(unittest.TestCase):
                 self._run(fetch_live_seat_type_capacity(client, seat_type))
 
 
+class PendingPaginationTest(_LiveCapacityCase):
+    def test_premium_vacancy_held_by_invite_on_page_two_is_not_free(self):
+        # 唯一的 Premium 空位已经被第二页上的邀请占着；上游 available 没扣它。
+        client = PagedClient(
+            _premium_subscription(paid=1, available=1),
+            {"default": 0, "usage_based": 0, "prolite": 0},
+            [
+                {"items": _filler(100)},
+                {"items": [{"email_address": OTHER, "seat_type": "prolite"}]},
+            ],
+        )
+        capacity, _sub, _counts, pending = self._run(
+            fetch_live_seat_type_capacity(client, "prolite")
+        )
+        self.assertEqual(capacity.pending, 1)
+        self.assertEqual(capacity.available, 0)
+        self.assertEqual(client.pending_calls, [(0, 100), (100, 100)])
+        self.assertEqual(pending["total"], 101)
+        self.assertEqual(len(pending["items"]), 101)
+
+    def test_default_vacancy_held_by_invite_on_page_two_is_not_free(self):
+        client = PagedClient(
+            {"seats_entitled": 2, "seats_in_use": 1},
+            {"default": 1, "usage_based": 0},
+            [
+                {"items": _filler(100), "total": 101},
+                {"items": [{"email_address": OTHER, "seat_type": "default"}], "total": 101},
+            ],
+        )
+        capacity, *_ = self._run(fetch_live_chatgpt_seat_capacity(client))
+        self.assertEqual(capacity.pending_default, 1)
+        self.assertEqual(capacity.available, 0)
+
+    def test_total_reached_on_a_full_page_stops_without_another_request(self):
+        client = PagedClient(
+            {"seats_entitled": 200, "seats_in_use": 0},
+            {"default": 0, "usage_based": 0},
+            [{"items": _filler(100, "default"), "total": 100}],
+        )
+        capacity, *_ = self._run(fetch_live_chatgpt_seat_capacity(client))
+        self.assertEqual(capacity.pending_default, 100)
+        self.assertEqual(client.pending_calls, [(0, 100)])
+
+    def _assert_unknown(self, pages, seat_type="prolite"):
+        client = PagedClient(
+            _premium_subscription(paid=3, available=3),
+            {"default": 0, "usage_based": 0, "prolite": 0},
+            pages,
+        )
+        with self.assertRaises(SeatCapacityFetchError):
+            self._run(fetch_live_seat_type_capacity(client, seat_type))
+
+    def test_malformed_pending_reply_is_unknown_not_zero(self):
+        for reply in ({}, {"items": None}, {"data": []}, [], "oops", None):
+            with self.subTest(reply=reply):
+                self._assert_unknown([reply])
+                self._assert_unknown([reply], seat_type="default")
+
+    def test_non_object_entry_is_unknown(self):
+        self._assert_unknown([{"items": [{"email_address": OTHER}, "x"]}])
+
+    def test_short_page_before_reported_total_is_unknown(self):
+        self._assert_unknown(
+            [
+                {"items": _filler(100), "total": 150},
+                {"items": _filler(20, prefix="more"), "total": 150},
+            ]
+        )
+
+    def test_error_on_a_later_page_is_unknown(self):
+        self._assert_unknown([{"items": _filler(100)}, {"error": "upstream 502"}])
+        self._assert_unknown([{"items": _filler(100)}, {"detail": "challenge"}])
+
+    def test_page_cap_reached_is_unknown(self):
+        endless = [{"items": _filler(100, prefix=f"p{n}-")} for n in range(5)]
+        with patch.object(seat_capacity, "MAX_PENDING_PAGES", 3):
+            self._assert_unknown(endless)
+
+
+class PremiumFreeFormulaTest(_LiveCapacityCase):
+    def _premium(self, *, paid, available, in_use, pending=()):
+        counts = {"default": 0, "usage_based": 0}
+        if in_use is not None:
+            counts["prolite"] = in_use
+        client = PagedClient(
+            _premium_subscription(paid=paid, available=available),
+            counts,
+            [{"items": list(pending)}],
+        )
+        capacity, *_ = self._run(fetch_live_seat_type_capacity(client, "prolite"))
+        return capacity
+
+    def test_untyped_pending_invite_hides_premium_occupancy(self):
+        capacity = self._premium(
+            paid=1, available=1, in_use=0, pending=[{"email_address": OTHER}]
+        )
+        self.assertEqual(capacity.pending, 1)
+        self.assertEqual(capacity.pending_untyped, 1)
+        self.assertEqual(capacity.available, 0)
+
+    def test_untyped_pending_invite_counts_for_every_billed_type(self):
+        for missing in ({}, {"seat_type": None}, {"seat_type": "  "}, {"seat_type": 7}):
+            with self.subTest(missing=missing):
+                invite = {"email_address": OTHER, **missing}
+                premium = self._premium(paid=2, available=2, in_use=0, pending=[invite])
+                self.assertEqual(premium.available, 1)
+                client = PagedClient(
+                    {"seats_entitled": 2, "seats_in_use": 1},
+                    {"default": 1, "usage_based": 0},
+                    [{"items": [invite]}],
+                )
+                default, *_ = self._run(fetch_live_chatgpt_seat_capacity(client))
+                self.assertEqual(default.pending_default, 1)
+                self.assertEqual(default.available, 0)
+
+    def test_paid_minus_occupancy_bounds_a_stale_available(self):
+        # 上游 available 还说有 1 个空位，但已付 2 个、2 个在用：没有空位。
+        capacity = self._premium(paid=2, available=1, in_use=2)
+        self.assertEqual(capacity.available, 0)
+
+    def test_available_bounds_paid_minus_occupancy(self):
+        capacity = self._premium(paid=3, available=1, in_use=0)
+        self.assertEqual(capacity.available, 1)
+
+    def test_pending_still_comes_off_the_upstream_available(self):
+        # 加了占用上界之后，available − 待接受 这一项照旧（不比修之前松）。
+        capacity = self._premium(
+            paid=5,
+            available=1,
+            in_use=0,
+            pending=[{"email_address": OTHER, "seat_type": "prolite"}],
+        )
+        self.assertEqual(capacity.available, 0)
+
+    def test_missing_premium_count_is_zero(self):
+        capacity = self._premium(paid=2, available=2, in_use=None)
+        self.assertEqual(capacity.available, 0)
+
+    def test_chatgpt_invite_still_does_not_eat_a_premium_seat(self):
+        capacity = self._premium(
+            paid=1,
+            available=1,
+            in_use=0,
+            pending=[{"email_address": OTHER, "seat_type": "default"}],
+        )
+        self.assertEqual(capacity.available, 1)
+
+
 class ReservationsTest(unittest.TestCase):
     def setUp(self):
         team_locks._reservations.clear()
         self.addCleanup(team_locks._reservations.clear)
         # Premium 预留另在库里占一份（seat_holds），需要一个空库。
         start_temp_db(self)
+
+    def _hold_rows(self):
+        conn = sqlite3.connect(app_database.get_db_path())
+        try:
+            return conn.execute(
+                "SELECT team_id, email, seat_type FROM seat_holds ORDER BY email"
+            ).fetchall()
+        finally:
+            conn.close()
 
     def test_reservations_are_counted_per_type(self):
         async def scenario():
@@ -242,6 +410,32 @@ class ReservationsTest(unittest.TestCase):
             )
 
         self.assertEqual(asyncio.run(scenario()), (1, 2, 1, 2, 0))
+
+    def test_premium_hold_survives_cleared_in_memory_reservations(self):
+        asyncio.run(reserve_seat("t1", "A@example.com", "prolite"))
+        team_locks._reservations.clear()  # 进程重启
+        self.assertEqual(asyncio.run(reserved_seats("t1", "prolite")), 1)
+        self.assertEqual(asyncio.run(reserved_seats("t1", "default")), 0)
+        self.assertEqual(self._hold_rows(), [("t1", "a@example.com", "prolite")])
+
+    def test_memory_and_db_count_once_per_email_and_respect_exclude(self):
+        async def scenario():
+            await reserve_seat("t1", "a@example.com", "prolite")
+            await seat_holds.hold_seat("t1", "b@example.com", "prolite")
+            return (
+                await reserved_seats("t1", "prolite"),
+                await reserved_seats("t1", "prolite", exclude_email="B@example.com"),
+                await reserved_seats("t1", "prolite", exclude_email="a@example.com"),
+                await reserved_seats("t2", "prolite"),
+            )
+
+        self.assertEqual(asyncio.run(scenario()), (2, 1, 1, 0))
+
+    def test_default_reservation_stays_in_memory_only(self):
+        asyncio.run(reserve_default_seat("t1", "a@example.com"))
+        asyncio.run(reserve_seat("t1", "b@example.com", "default"))
+        self.assertEqual(self._hold_rows(), [])
+        self.assertEqual(asyncio.run(reserved_seats("t1", "default")), 2)
 
 
 class SeatTypesHelpersTest(unittest.TestCase):

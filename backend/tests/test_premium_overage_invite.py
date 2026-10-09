@@ -2,26 +2,62 @@
 
 跑真实的 invite_member 路由和真实的策略检查（services/overage_policy.py），只把上游换成
 记录调用的替身。被拒时必须：409、没有任何上游写、记一条 skipped 日志。
+
+超员确认（``overage_confirmation``）带着管理员看到的加购个数 ``seat_limit``：服务端按
+``confirmation_id`` 在 overage_confirmations 表里记账，最多加购这么多个；有空位的邀请不动确认；
+只有上游明确拒绝才把扣掉的那 1 个还回去，结果不明按已经加购算并占住一个计费席位。
+旧前端只带 ``allow_overage=True``，在「超员需确认」的 Team 上不算确认。
 """
 
 import _isolation  # noqa: F401  must precede any app import
+from _fixtures import direct_call
 from _seat_fixtures import (
+    ABSENT,
     INVITE_EMAIL as EMAIL,
     INVITE_TEAM as TEAM,
     FakeTeamClient,
     InviteHarness,
+    TempDbMixin,
     _full_default_client,
     capacity_entries,
 )
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+
+from app.models import InviteMemberRequest
+from app.routes import members
+from app.services import seat_capacity
 from app.services.team_locks import reserve_default_seat, reserved_seats
+
+
+OTHER_TEAM = "rf-other-team"
+EMAILS = [f"redeemer{i}@example.com" for i in range(4)]
 
 
 def _free_default_client(**kwargs):
     return FakeTeamClient(seats_entitled=3, counts={"default": 2, "usage_based": 0}, **kwargs)
+
+
+def _confirmation(seat_limit, *, seat_type="default", cid="admin-confirm-0001"):
+    return {"confirmation_id": cid, "seat_type": seat_type, "seat_limit": seat_limit}
+
+
+class _QueuedInviteClient(FakeTeamClient):
+    """邀请结果按顺序取 ``results``，取完后照常成功。"""
+
+    def __init__(self, results, **kwargs):
+        super().__init__(**kwargs)
+        self._results = list(results)
+
+    def invite_member(self, email, seat_type="default"):
+        if self._results:
+            self.mutations.append(("invite_member", email, seat_type))
+            return dict(self._results.pop(0))
+        return super().invite_member(email, seat_type)
 
 
 class ConfirmPolicyTest(InviteHarness):
@@ -241,6 +277,199 @@ class PremiumInviteTest(InviteHarness):
 
         detail = self.assert_refused(exc, "overage_forbidden", seat_type="prolite")
         self.assertIn("Premium 席位已满", detail["message"])
+
+
+class _LedgerHarness(TempDbMixin, unittest.TestCase):
+    """Invites any of EMAILS into TEAM / OTHER_TEAM through the real route, one call per email,
+    and reads the overage_confirmations ledger. Every live member list is ``snapshot``."""
+
+    def setUp(self):
+        self._start_db()
+        for team_id in (TEAM, OTHER_TEAM):
+            for email in EMAILS:
+                self.track_reservation(team_id, email)
+
+    def ledger(self, confirmation_id="admin-confirm-0001"):
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM overage_confirmations WHERE confirmation_id = ?", (confirmation_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def invite(self, client, email, *, team_id=TEAM, seat_type="default", confirmation=None,
+               allow_overage=False, snapshot=ABSENT):
+        patches = [
+            patch.object(members, "get_team_client", new=AsyncMock(return_value=client)),
+            patch.object(members, "fetch_and_cache_members", new=AsyncMock(return_value=snapshot)),
+            patch.object(members, "run_chatgpt_call", new=direct_call),
+            patch.object(seat_capacity, "run_chatgpt_call", new=direct_call),
+            patch.object(members, "add_member_watch", new=AsyncMock()),
+            patch.object(members, "notify_member_event", new=AsyncMock()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return asyncio.run(
+                members.invite_member(
+                    team_id,
+                    InviteMemberRequest(
+                        email=email, expires_in="30d", seat_type=seat_type,
+                        overage_confirmation=confirmation, allow_overage=allow_overage,
+                    ),
+                )
+            ), None
+        except HTTPException as exc:
+            return None, exc
+        finally:
+            for p in patches:
+                p.stop()
+
+    def invited(self, client):
+        return [m[1] for m in client.mutations if m[0] == "invite_member"]
+
+
+class ConfirmationSeatLimitTest(_LedgerHarness):
+    def setUp(self):
+        super().setUp()
+        self.insert_team(TEAM, policy="confirm")
+
+    def test_one_confirmation_buys_at_most_its_seat_limit(self):
+        """确认的是 2 个；对话框（或旧前端）给 4 个邮箱都带上它，也只加购 2 个。"""
+        client = _full_default_client()
+        outcomes = [self.invite(client, email, confirmation=_confirmation(2)) for email in EMAILS]
+
+        self.assertEqual(self.invited(client), EMAILS[:2])
+        for response, exc in outcomes[:2]:
+            self.assertIsNone(exc, getattr(exc, "detail", None))
+            self.assertEqual((response["overage"], response["policy"]), (True, "confirm"))
+        for _response, exc in outcomes[2:]:
+            self.assertEqual(exc.status_code, 409)
+            self.assertEqual(exc.detail["code"], "require_overage_confirmation")
+            self.assertEqual(exc.detail["confirmation_status"], "used_up")
+            self.assertTrue(exc.detail["message"].startswith("你确认过的加购个数已经用完，需要重新确认。"))
+        self.assertEqual(self.ledger()["used"], 2)
+        details = [row["detail"] for row in self.logs("invite_member") if row["result"] == "success"]
+        self.assertIn("overage_confirmed=1/2", details[0])
+        self.assertIn("overage_confirmed=2/2", details[1])
+
+    def test_free_live_seat_does_not_touch_the_confirmation(self):
+        client = FakeTeamClient(seats_entitled=3, counts={"default": 2, "usage_based": 0})
+
+        first, exc = self.invite(client, EMAILS[0], confirmation=_confirmation(1))
+        self.assertIsNone(exc)
+        self.assertFalse(first["overage"])
+        self.assertIsNone(self.ledger(), "有空位时不登记、不扣确认")
+
+        # 第一个人占住了最后一个空位（预留），第二个才真要加购，用掉确认的 1 个。
+        second, exc = self.invite(client, EMAILS[1], confirmation=_confirmation(1))
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertTrue(second["overage"])
+        self.assertEqual(self.ledger()["used"], 1)
+
+    def test_seat_limit_is_fixed_when_first_used(self):
+        client = _full_default_client()
+        self.invite(client, EMAILS[0], confirmation=_confirmation(1))
+
+        _response, exc = self.invite(client, EMAILS[1], confirmation=_confirmation(5))
+
+        self.assertEqual(exc.detail["confirmation_status"], "used_up")
+        self.assertEqual(self.invited(client), EMAILS[:1])
+        self.assertEqual(self.ledger()["seat_limit"], 1)
+
+    def test_confirmation_is_bound_to_team_and_seat_type(self):
+        self.insert_team(OTHER_TEAM, policy="confirm")
+        client = _full_default_client()
+        self.invite(client, EMAILS[0], confirmation=_confirmation(3))
+
+        _response, exc = self.invite(client, EMAILS[1], team_id=OTHER_TEAM, confirmation=_confirmation(3))
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["confirmation_status"], "mismatch")
+
+        _response, exc = self.invite(
+            client, EMAILS[2], confirmation=_confirmation(3, seat_type="prolite", cid="admin-confirm-0002")
+        )
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["confirmation_status"], "mismatch")
+        self.assertEqual(self.invited(client), EMAILS[:1])
+
+    def test_expired_confirmation_is_not_a_confirmation(self):
+        client = _full_default_client()
+        self.invite(client, EMAILS[0], confirmation=_confirmation(3))
+        conn = self._conn()
+        conn.execute(
+            "UPDATE overage_confirmations SET expires_at = '2000-01-01T00:00:00.000000+00:00'"
+        )
+        conn.commit()
+        conn.close()
+
+        _response, exc = self.invite(client, EMAILS[1], confirmation=_confirmation(3))
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["confirmation_status"], "expired")
+        self.assertEqual(self.invited(client), EMAILS[:1])
+
+    def test_explicit_rejection_gives_the_unit_back(self):
+        rejected = {"error": "OpenAI 拒绝邀请", "_mutation_status": "rejected"}
+        client = _QueuedInviteClient([rejected], seats_entitled=2, counts={"default": 2, "usage_based": 0})
+
+        _response, exc = self.invite(client, EMAILS[0], confirmation=_confirmation(1))
+        self.assertEqual(exc.status_code, 502)
+        self.assertEqual(self.ledger()["used"], 0)
+
+        response, exc = self.invite(client, EMAILS[1], confirmation=_confirmation(1))
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertTrue(response["overage"])
+        self.assertEqual(self.ledger()["used"], 1)
+
+    def test_uncertain_invite_keeps_the_unit_used_and_holds_a_seat(self):
+        uncertain = {"error": "timed out", "_mutation_status": "uncertain"}
+        client = _QueuedInviteClient([uncertain], seats_entitled=2, counts={"default": 2, "usage_based": 0})
+
+        _response, exc = self.invite(client, EMAILS[0], confirmation=_confirmation(1))
+        self.assertEqual(exc.status_code, 409)
+        self.assertIn("邀请结果确认中", exc.detail)
+        self.assertEqual(self.ledger()["used"], 1, "结果不明按已经加购算")
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "default")), 1)
+        uncertain_log = [row for row in self.logs("invite_member") if row["result"] == "uncertain"][-1]
+        self.assertIn("seat_type=default", uncertain_log["detail"])
+
+        _response, exc = self.invite(client, EMAILS[1], confirmation=_confirmation(1))
+        self.assertEqual(exc.detail["confirmation_status"], "used_up")
+        self.assertEqual(self.invited(client), EMAILS[:1])
+
+    def test_uncertain_premium_invite_holds_a_premium_seat(self):
+        self.set_policy(TEAM, "auto")
+        uncertain = {"error": "timed out", "_mutation_status": "uncertain"}
+        client = _QueuedInviteClient([uncertain], seats_entitled=2, counts={"default": 2, "usage_based": 0})
+
+        _response, exc = self.invite(client, EMAILS[0], seat_type="prolite")
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "prolite")), 1)
+
+
+class LegacyAllowOverageTest(_LedgerHarness):
+    def test_bare_allow_overage_on_confirm_team_asks_for_confirmation(self):
+        self.insert_team(TEAM, policy="confirm")
+        client = _full_default_client()
+
+        _response, exc = self.invite(client, EMAILS[0], allow_overage=True)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["code"], "require_overage_confirmation")
+        self.assertEqual(exc.detail["confirmation_status"], "missing")
+        self.assertEqual(client.mutations, [])
+
+    def test_auto_team_is_unaffected(self):
+        self.insert_team(TEAM, policy="auto")
+        client = _full_default_client()
+
+        response, exc = self.invite(client, EMAILS[0], allow_overage=True)
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual((response["overage"], response["policy"]), (True, "auto"))
+        self.assertEqual(self.invited(client), EMAILS[:1])
 
 
 if __name__ == "__main__":

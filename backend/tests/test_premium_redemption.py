@@ -2,6 +2,11 @@
 
 全部走真实的兑换流程，上游换成只记录调用的假客户端：任何拒绝都必须**没有**发出邀请、
 码保持未使用（used_count=0、兑换行不是 pending/uncertain、邮箱占用已释放）。
+
+空位读不全就不卖：待接受邀请要分页拉全，拉不全、回复结构不对 = 占用未知 = 没有空位；
+没带 seat_type 的待接受邀请按占着计费席位算。Premium 的预留在发邀请之前就落库（seat_holds），
+进程重启也不丢；上游明确拒绝才释放。这部分用 RedeemFlowCase：待接受邀请按分页回、
+记录发邀请那一刻库里的占用。
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -18,6 +23,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _fixtures import direct_call
+from _seat_fixtures import NO_CHATGPT_SEAT, RedeemFlowCase, _filler
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -26,7 +32,7 @@ from app import database as app_database
 from app.routes import access_tokens
 from app.security import require_admin
 from app.services import seat_capacity as seat_capacity_module
-from app.services import team_locks
+from app.services import seat_holds, team_locks
 from app.services.team_locks import reserve_seat, reserved_seats
 
 EMAIL = "premium.redeemer@example.com"
@@ -491,6 +497,141 @@ class PremiumCodeRoutingTest(_FlowBase):
         self.assertEqual(uses, [])
         token = (await self._rows("SELECT used_count FROM access_tokens WHERE id = ?", (token_id,)))[0]
         self.assertEqual(token["used_count"], 0)
+
+
+class RedeemRefusesUnknownOccupancyTest(RedeemFlowCase):
+    async def test_premium_vacancy_held_on_page_two_is_not_sold(self):
+        await self._team()
+        self._premium_upstream(
+            pages=[
+                {"items": _filler(100)},
+                {"items": [{"email_address": OTHER, "seat_type": "prolite"}]},
+            ]
+        )
+        await self._assert_refused_unconsumed(
+            "atm_s1_page2", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(self.invites, [])
+        self.notify_admins.assert_awaited_once()
+
+    async def test_malformed_pending_reply_refuses_premium_with_notice(self):
+        await self._team()
+        self._premium_upstream(pages=[{"detail": "gateway challenge"}])
+        await self._assert_refused_unconsumed(
+            "atm_s1_malformed", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(self.invites, [])
+        self.notify_admins.assert_awaited_once()
+        text = self.notify_admins.await_args.args[0]
+        self.assertIn("读不到席位容量", text)
+        self.assertIn("兑换码未消耗", text)
+
+    async def test_malformed_pending_reply_refuses_chatgpt(self):
+        await self._team()
+        self._chatgpt_upstream(entitled=5, active=1, pages=[{"items": None}])
+        await self._assert_refused_unconsumed("atm_s1_cg_malformed", "default", NO_CHATGPT_SEAT)
+        self.assertEqual(self.invites, [])
+        logs = await self._rows(
+            "SELECT error_message FROM operation_logs WHERE action = 'self_service_redeem'"
+        )
+        self.assertTrue(any("capacity_unknown" in (log["error_message"] or "") for log in logs))
+
+    async def test_chatgpt_vacancy_held_on_page_two_is_not_sold(self):
+        await self._team()
+        self._chatgpt_upstream(
+            entitled=2,
+            active=1,
+            pages=[
+                {"items": _filler(100)},
+                {"items": [{"email_address": OTHER, "seat_type": "default"}]},
+            ],
+        )
+        await self._assert_refused_unconsumed("atm_s1_cg_page2", "default", NO_CHATGPT_SEAT)
+        self.assertEqual(self.invites, [])
+
+    async def test_untyped_pending_invite_blocks_premium_sale(self):
+        await self._team()
+        self._premium_upstream(pages=[{"items": [{"email_address": OTHER}]}])
+        await self._assert_refused_unconsumed(
+            "atm_s2_untyped", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(self.invites, [])
+
+
+class RedeemPremiumHoldTest(RedeemFlowCase):
+    async def test_uncertain_premium_hold_survives_restart(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1)
+        self.invite_result = {"error": "timeout", "_mutation_status": "uncertain"}
+        await self._token("atm_s2_uncertain", "prolite")
+        result = await self._redeem("atm_s2_uncertain")
+        self.assertEqual(result["status"], "pending_confirmation")
+        self.assertEqual(await self._hold_rows(), [{"team_id": "team-a", "email": EMAIL, "seat_type": "prolite"}])
+
+        team_locks._reservations.clear()  # 进程重启：内存预留没了，库里的占用还在
+        self.invite_result = {"_mutation_status": "confirmed"}
+        await self._assert_refused_unconsumed(
+            "atm_s2_second", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL, email=OTHER
+        )
+        self.assertEqual(self.invites, [("team-a", EMAIL, "prolite")])
+
+    async def test_premium_seat_is_held_before_the_invite_is_sent(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1)
+        # 发邀请时进程被打断：结果不明，库里必须已经占着这个空位。
+        self.invite_raises = RuntimeError("worker died mid-request")
+        await self._token("atm_s2_inflight", "prolite")
+        with self.assertRaises(RuntimeError):
+            await self._redeem("atm_s2_inflight")
+        self.assertEqual(self.holds_at_invite, [[("team-a", EMAIL, "prolite")]])
+
+        team_locks._reservations.clear()
+        self.invite_raises = None
+        await self._assert_refused_unconsumed(
+            "atm_s2_after_crash", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL, email=OTHER
+        )
+        self.assertEqual(len(self.invites), 1)
+
+    async def test_explicit_rejection_releases_the_hold(self):
+        await self._team()
+        self._premium_upstream(paid=1, available=1)
+        self.invite_result = {"error": "seat type not allowed", "_mutation_status": "rejected"}
+        await self._assert_refused_unconsumed(
+            "atm_s2_rejected", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(self.holds_at_invite, [[("team-a", EMAIL, "prolite")]])
+        self.assertEqual(await self._hold_rows(), [])
+        self.assertEqual(await reserved_seats("team-a", "prolite"), 0)
+
+    async def test_rejection_keeps_a_hold_that_existed_before(self):
+        await self._team()
+        self._premium_upstream(paid=2, available=2)
+        await seat_holds.hold_seat("team-a", EMAIL, "prolite", source="admin")
+        self.invite_result = {"error": "seat type not allowed", "_mutation_status": "rejected"}
+        await self._assert_refused_unconsumed(
+            "atm_s2_rejected_kept", "prolite", access_tokens._NO_PREMIUM_SEAT_DETAIL
+        )
+        self.assertEqual(len(await self._hold_rows()), 1)
+
+    async def test_confirmed_premium_invite_keeps_a_persistent_hold(self):
+        await self._team()
+        self._premium_upstream(paid=2, available=2)
+        await self._token("atm_s2_ok", "prolite")
+        result = await self._redeem("atm_s2_ok")
+        self.assertEqual(result["status"], "ok")
+        team_locks._reservations.clear()
+        self.assertEqual(await reserved_seats("team-a", "prolite"), 1)
+
+    async def test_uncertain_chatgpt_invite_holds_a_default_seat(self):
+        await self._team()
+        self._chatgpt_upstream(entitled=2, active=0)
+        self.invite_result = {"error": "timeout", "_mutation_status": "uncertain"}
+        await self._token("atm_s2_cg_uncertain", "default")
+        result = await self._redeem("atm_s2_cg_uncertain")
+        self.assertEqual(result["status"], "pending_confirmation")
+        self.assertEqual(self.holds_at_invite, [[]])  # ChatGPT 发之前不占（行为照旧）
+        team_locks._reservations.clear()
+        self.assertEqual(await reserved_seats("team-a", "default"), 1)
 
 
 class RenewalSeatTypeTest(_FlowBase):

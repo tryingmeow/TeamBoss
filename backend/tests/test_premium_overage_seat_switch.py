@@ -3,6 +3,10 @@
 旧代码切到 ChatGPT 从不查空位：满员 Team 里 Codex → ChatGPT 会让 ChatGPT 直接加购扣费。
 现在切到计费类型走和邀请同一套检查；切到 Codex 不查；当前席位类型不认识的成员一律不动。
 上游 change_seat_type 是唯一的写操作，被拒时绝不能发。
+
+切到计费类型的超员确认和邀请共用一本账（overage_confirmations）：``seat_limit`` 个用完就要重新确认；
+上游明确拒绝把扣掉的 1 个还回去；结果不明照样算用掉，并占住目标类型的一个席位。
+旧前端只带 ``allow_overage=True`` 不算确认。
 """
 
 import _isolation  # noqa: F401  must precede any app import
@@ -36,6 +40,22 @@ def _snapshot(seat_type="usage_based", *, user_id=USER_ID, email=EMAIL):
 
 def _full_client(**kwargs):
     return FakeTeamClient(seats_entitled=2, counts={"default": 2, "usage_based": 1}, **kwargs)
+
+
+def _confirmation(seat_limit, *, seat_type="default", cid="admin-confirm-0001"):
+    return {"confirmation_id": cid, "seat_type": seat_type, "seat_limit": seat_limit}
+
+
+class _SwitchResultClient(FakeTeamClient):
+    """change_seat_type 记录调用后回 ``switch_result``（例如上游拒绝或超时）。"""
+
+    def __init__(self, switch_result, **kwargs):
+        super().__init__(**kwargs)
+        self.switch_result = switch_result
+
+    def change_seat_type(self, user_id, seat_type):
+        self.mutations.append(("change_seat_type", user_id, seat_type))
+        return dict(self.switch_result)
 
 
 class _SeatHarness(TempDbMixin, unittest.TestCase):
@@ -274,6 +294,107 @@ class SwitchToCodexAndGuardsTest(_SeatHarness):
 
         self.assertEqual(exc.status_code, 404)
         self.assert_no_mutation()
+
+
+class SeatSwitchConfirmationTest(TempDbMixin, unittest.TestCase):
+    """Codex → ChatGPT on a full confirm Team. Every live member list shows the member still on
+    Codex, so a switch whose result is unclear stays unclear after the refresh."""
+
+    USER = "user-77"
+    EMAIL = "seat.member@example.com"
+
+    def setUp(self):
+        self._start_db()
+        self.track_reservation(TEAM, self.EMAIL)
+        self.insert_team(TEAM, policy="confirm")
+
+    def ledger(self, confirmation_id="admin-confirm-0001"):
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT * FROM overage_confirmations WHERE confirmation_id = ?", (confirmation_id,)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def switch(self, client, *, confirmation=None, allow_overage=False, target="default"):
+        member = {"id": self.USER, "email": self.EMAIL, "seat_type": "usage_based", "status": "active"}
+        snapshot = {"members": [member], "pending_invites": []}
+        patches = [
+            patch.object(members, "get_team_client", new=AsyncMock(return_value=client)),
+            patch.object(members, "fetch_and_cache_members", new=AsyncMock(return_value=snapshot)),
+            patch.object(members, "run_chatgpt_call", new=direct_call),
+            patch.object(seat_capacity, "run_chatgpt_call", new=direct_call),
+            patch.object(members, "add_member_watch", new=AsyncMock()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return asyncio.run(
+                members.change_seat(
+                    TEAM,
+                    self.USER,
+                    ChangeSeatRequest(
+                        seat_type=target, overage_confirmation=confirmation, allow_overage=allow_overage
+                    ),
+                )
+            ), None
+        except HTTPException as exc:
+            return None, exc
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_bare_allow_overage_is_not_a_confirmation(self):
+        client = FakeTeamClient(seats_entitled=2, counts={"default": 2, "usage_based": 1})
+
+        _result, exc = self.switch(client, allow_overage=True)
+
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["code"], "require_overage_confirmation")
+        self.assertEqual(exc.detail["confirmation_status"], "missing")
+        self.assertEqual(client.mutations, [])
+
+    def test_seat_limit_one_buys_one(self):
+        client = FakeTeamClient(seats_entitled=2, counts={"default": 2, "usage_based": 1})
+
+        result, exc = self.switch(client, confirmation=_confirmation(1))
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual((result["overage"], result["policy"]), (True, "confirm"))
+
+        _result, exc = self.switch(client, confirmation=_confirmation(1))
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["confirmation_status"], "used_up")
+        self.assertEqual(len(client.mutations), 1)
+
+    def test_explicit_rejection_gives_the_unit_back(self):
+        client = _SwitchResultClient(
+            {"error": "400 Bad Request", "status_code": 400},
+            seats_entitled=2, counts={"default": 2, "usage_based": 1},
+        )
+
+        _result, exc = self.switch(client, confirmation=_confirmation(1))
+
+        self.assertEqual(exc.status_code, 502)
+        self.assertEqual(self.ledger()["used"], 0)
+        self.assertEqual(self.logs("change_seat")[-1]["result"], "failed")
+        self.assertEqual(asyncio.run(reserved_seats(TEAM, "default")), 0)
+
+    def test_uncertain_switch_keeps_the_unit_and_holds_the_target_seat(self):
+        for status_code in (None, 502, 429):
+            with self.subTest(status_code=status_code):
+                result = {"error": "upstream timed out"}
+                if status_code is not None:
+                    result["status_code"] = status_code
+                client = _SwitchResultClient(result, seats_entitled=2, counts={"default": 2, "usage_based": 1})
+                cid = f"admin-confirm-switch-{status_code}"
+
+                _result, exc = self.switch(client, confirmation=_confirmation(1, cid=cid))
+
+                self.assertEqual(exc.status_code, 502)
+                self.assertIn("切换结果不明确", exc.detail)
+                self.assertEqual(self.ledger(cid)["used"], 1)
+                self.assertEqual(self.logs("change_seat")[-1]["result"], "uncertain")
+                self.assertEqual(asyncio.run(reserved_seats(TEAM, "default")), 1)
 
 
 class UnknownTargetRejectedTest(TempDbMixin, unittest.TestCase):

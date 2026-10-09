@@ -4,20 +4,41 @@
 * 没空位的邮箱：「超员自动」的 Team 直接加、不问；只剩「超员需确认」时问一次，
   409 里带 overage_plan（加购几个、加在哪个 Team）；「禁止超员」永远不超员。
 * 哪里都去不了：failed 里写「没位置，未邀请」，并列在 no_place_emails。
+* 确认过的加购额度在发邀请之前先扣：结果不明也算用掉，下一个邮箱不能再买一个；
+  上游明确拒绝才把额度还回去。
 """
 
 import _isolation  # noqa: F401  must precede any app import
 from _fixtures import direct_call
-from _seat_fixtures import ABSENT, BatchHarness
+from _seat_fixtures import ABSENT, BatchHarness, FakeTeamClient, TempDbMixin
 
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.services import gpt_invites
+from fastapi import HTTPException
+
+from app.routes import gpt_members
+from app.services import gpt_invites, seat_capacity
 
 
 NO_PLACE = "没位置，未邀请"
+TEAM = "rf-prem-team"
+EMAILS = [f"redeemer{i}@example.com" for i in range(4)]
+
+
+class _QueuedInviteClient(FakeTeamClient):
+    """邀请结果按顺序取 ``results``，取完后照常成功。"""
+
+    def __init__(self, results, **kwargs):
+        super().__init__(**kwargs)
+        self._results = list(results)
+
+    def invite_member(self, email, seat_type="default"):
+        if self._results:
+            self.mutations.append(("invite_member", email, seat_type))
+            return dict(self._results.pop(0))
+        return super().invite_member(email, seat_type)
 
 
 class AutoTeamTest(BatchHarness):
@@ -341,6 +362,115 @@ class CachedMinRuleTest(BatchHarness):
         self.assertEqual(by_id["t-min"]["cached_available"], 0)
         self.assertEqual(by_id["t-plain"]["cached_available"], 1)
         self.assertEqual(asyncio.run(gpt_invites.cached_gpt_capacity_summary())["available"], 1)
+
+
+class BatchAllowanceReservedBeforeInviteTest(TempDbMixin, unittest.TestCase):
+    """One confirm Team; each submit passes its own client, so a test can swap in a queued result."""
+
+    def setUp(self):
+        self._start_db()
+        for email in EMAILS:
+            self.track_reservation(TEAM, email)
+        # 缓存：1 个已付、0 个在用（1 个空位）；现拉：已经满了。
+        self.insert_team(TEAM, policy="confirm", seats_entitled=1, created_at="2026-10-01T00:00:00+00:00")
+
+    def invited(self, client):
+        return [m[1] for m in client.mutations if m[0] == "invite_member"]
+
+    def submit(self, client, emails, **kwargs):
+        patches = [
+            patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=client)),
+            patch.object(gpt_invites, "fetch_and_cache_members", new=AsyncMock(return_value=ABSENT)),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
+            patch.object(seat_capacity, "run_chatgpt_call", new=direct_call),
+            patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
+            patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            return asyncio.run(
+                gpt_members.invite_gpt_members(
+                    gpt_members.InviteGptMembersRequest(emails=emails, expires_in="30d", **kwargs)
+                )
+            ), None
+        except HTTPException as exc:
+            return None, exc
+        finally:
+            for p in patches:
+                p.stop()
+
+    def confirmed_plan(self, emails):
+        _result, exc = self.submit(FakeTeamClient(seats_entitled=1, counts={"default": 1, "usage_based": 0}), emails)
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["extra_seats_total"], 1, "按缓存空位，管理员确认加购 1 个")
+        return {
+            "allow_overage": True,
+            "overage_team_ids": [item["team_id"] for item in exc.detail["overage_plan"]],
+            "overage_seat_limit": exc.detail["extra_seats_total"],
+        }
+
+    def test_uncertain_overfill_uses_up_the_confirmed_seat(self):
+        emails = EMAILS[:2]
+        planned = self.confirmed_plan(emails)
+        uncertain = {"error": "timed out", "_mutation_status": "uncertain"}
+        client = _QueuedInviteClient([uncertain], seats_entitled=1, counts={"default": 1, "usage_based": 0})
+
+        _result, exc = self.submit(client, emails, **planned)
+
+        self.assertEqual(self.invited(client), emails[:1], "第二个邮箱不能再买一个没确认的席位")
+        self.assertEqual(exc.status_code, 409)
+        self.assertEqual(exc.detail["remaining_emails"], emails[1:])
+        self.assertEqual([item["email"] for item in exc.detail["failed"]], emails[:1])
+
+    def test_explicit_rejection_returns_the_confirmed_seat(self):
+        emails = EMAILS[:2]
+        planned = self.confirmed_plan(emails)
+        rejected = {"error": "OpenAI 拒绝邀请", "_mutation_status": "rejected"}
+        client = _QueuedInviteClient([rejected], seats_entitled=1, counts={"default": 1, "usage_based": 0})
+
+        result, exc = self.submit(client, emails, **planned)
+
+        self.assertIsNone(exc, getattr(exc, "detail", None))
+        self.assertEqual(self.invited(client), emails)
+        self.assertEqual([item["email"] for item in result["added"]], emails[1:])
+        self.assertTrue(result["added"][0]["overage"])
+        self.assertEqual([item["email"] for item in result["failed"]], emails[:1])
+
+    def test_allowance_is_taken_before_the_upstream_call(self):
+        allowance = gpt_invites.ConfirmedOverfillAllowance(1)
+        seen = []
+        client = FakeTeamClient(seats_entitled=1, counts={"default": 1, "usage_based": 0})
+        original = client.invite_member
+
+        def _invite(email, seat_type="default"):
+            seen.append(allowance.remaining)
+            return original(email, seat_type)
+
+        client.invite_member = _invite
+        team = {"id": TEAM, "name": f"{TEAM}-name", "overage_policy": "confirm"}
+        with (
+            patch.object(gpt_invites, "get_team_client", new=AsyncMock(return_value=client)),
+            patch.object(gpt_invites, "fetch_and_cache_members", new=AsyncMock(return_value=ABSENT)),
+            patch.object(gpt_invites, "run_chatgpt_call", new=direct_call),
+            patch.object(gpt_invites, "add_member_watch", new=AsyncMock()),
+            patch.object(gpt_invites, "notify_member_event", new=AsyncMock()),
+        ):
+            added, error = asyncio.run(gpt_invites._invite_to_team(
+                team, EMAILS[0], None, check_capacity=False, action="invite_gpt_member",
+                allow_overage=True, allowance=allowance,
+            ))
+            self.assertIsNone(error)
+            self.assertTrue(added["overage"])
+            again, error = asyncio.run(gpt_invites._invite_to_team(
+                team, EMAILS[1], None, check_capacity=False, action="invite_gpt_member",
+                allow_overage=True, allowance=allowance,
+            ))
+
+        self.assertEqual(seen, [0], "发邀请时额度已经扣掉")
+        self.assertIsNone(again)
+        self.assertTrue(error.startswith("no_gpt_seat"))
+        self.assertEqual(self.invited(client), EMAILS[:1])
 
 
 if __name__ == "__main__":
