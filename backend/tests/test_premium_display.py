@@ -232,10 +232,6 @@ class PremiumTelegramSummaryTest(unittest.TestCase):
                 self.assertNotIn("Premium", text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PendingInviteCountsTest(unittest.TestCase):
     def setUp(self):
         start_temp_db(self)
@@ -284,3 +280,7 @@ class PendingInviteCountsTest(unittest.TestCase):
         row = conn.execute("SELECT * FROM teams WHERE id = 'c1'").fetchone()
         conn.close()
         self.assertEqual(_team_row_to_response(row)["pending_invite_counts"]["prolite"], 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
