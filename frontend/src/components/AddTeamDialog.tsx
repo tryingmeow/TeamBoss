@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { Globe, Copy, Check, ExternalLink } from 'lucide-react';
 import { addTeam, fetchProxies, reimportTeam, type Proxy } from '../api/client';
 import type { Team } from '../types';
@@ -15,15 +15,24 @@ interface AddTeamDialogProps {
 }
 
 const SESSION_URL = 'https://chatgpt.com/api/auth/session';
+const STEP_BADGE = 'grid size-7 shrink-0 place-items-center rounded-full bg-blue-600 text-sm font-semibold text-white';
 
 export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = null }: AddTeamDialogProps) {
   const [json, setJson] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
-  const copyResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [selectedProxyId, setSelectedProxyId] = useState<number | null>(null);
+
+  const copySessionUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(SESSION_URL);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
 
   useEffect(() => {
     if (open) {
@@ -31,24 +40,10 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
       setError('');
       setSelectedProxyId(team?.proxy_id ?? null);
       setCopied(false);
+      void copySessionUrl();
       fetchProxies().then(setProxies).catch(() => {});
     }
-
-    return () => {
-      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
-    };
   }, [open, team]);
-
-  const copySessionUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(SESSION_URL);
-      setCopied(true);
-      if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
-      copyResetTimer.current = setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setCopied(false);
-    }
-  };
 
   const handleSubmit = async () => {
     if (!json.trim()) {
@@ -85,11 +80,8 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
     <DialogFrame
       open={open}
       onOpenChange={onOpenChange}
-      size="lg"
+      size="xl"
       title={team ? `重新导入 ${team.name}` : '添加 Team'}
-      description={team
-        ? '更新当前 Team 的 Session 凭证，现有管理数据保持不变。'
-        : '导入 ChatGPT Team Owner 账号的 Session 凭证以接入。'}
       footer={
         <>
           <button type="button" onClick={() => onOpenChange(false)} className={BUTTON.secondary}>取消</button>
@@ -100,66 +92,75 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
         </>
       }
     >
-          <ol className="space-y-2 text-sm text-gray-600 dark:text-ink-300">
-            <li className="flex gap-2.5">
-              <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-semibold text-gray-500 dark:bg-ink-800 dark:text-ink-300">1</span>
-              <span>在浏览器里用 Owner 账号登录 chatgpt.com</span>
-            </li>
-            <li className="flex gap-2.5">
-              <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-semibold text-gray-500 dark:bg-ink-800 dark:text-ink-300">2</span>
-              <span className="min-w-0 flex-1">
-                打开这个链接，复制页面显示的全部 JSON
-                <span className="mt-1.5 flex items-center gap-1 rounded-lg border border-gray-200 bg-gray-50 py-1 pl-3 pr-1 dark:border-ink-800 dark:bg-ink-950">
-                  <code className="min-w-0 flex-1 break-all text-xs text-blue-600 dark:text-blue-400">{SESSION_URL}</code>
+          <ol className="space-y-5 text-base leading-7 text-gray-800 dark:text-gray-100">
+            <li className="flex gap-3">
+              <span className={STEP_BADGE}>1</span>
+              <div className="min-w-0 flex-1">
+                <p>登录 ChatGPT Owner 账号，打开</p>
+                <div className="mt-2.5 flex items-center gap-1 rounded-lg bg-blue-50 py-1.5 pl-4 pr-1.5 ring-1 ring-inset ring-blue-100 dark:bg-blue-500/10 dark:ring-blue-500/20">
+                  <a
+                    href={SESSION_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => void copySessionUrl()}
+                    className="min-w-0 flex-1 break-all font-mono text-sm text-blue-700 hover:underline dark:text-blue-300"
+                  >
+                    {SESSION_URL}
+                  </a>
+                  {copied && (
+                    <span className="flex shrink-0 items-center gap-1 px-1.5 text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                      <Check size={16} />已复制
+                    </span>
+                  )}
                   <button
                     type="button"
                     onClick={() => void copySessionUrl()}
-                    className={cn(
-                      'shrink-0 rounded-md p-1.5 transition-colors',
-                      copied
-                        ? 'text-emerald-600 dark:text-emerald-400'
-                        : 'text-gray-400 hover:bg-gray-200 hover:text-gray-700 dark:text-ink-400 dark:hover:bg-ink-800 dark:hover:text-gray-200'
-                    )}
-                    title={copied ? '已复制' : '复制链接'}
-                    aria-label={copied ? '已复制' : '复制 Session 链接'}
+                    className={cn(BUTTON.icon, 'text-blue-600 hover:bg-blue-100 hover:text-blue-800 dark:text-blue-300 dark:hover:bg-blue-500/20 dark:hover:text-blue-200')}
+                    title="复制链接"
+                    aria-label="复制链接"
                   >
-                    {copied ? <Check size={15} /> : <Copy size={15} />}
+                    <Copy size={17} />
                   </button>
                   <a
                     href={SESSION_URL}
                     target="_blank"
                     rel="noreferrer"
-                    className="shrink-0 rounded-md p-1.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:text-ink-400 dark:hover:bg-ink-800 dark:hover:text-gray-200"
-                    title="在新标签页打开"
-                    aria-label="在新标签页打开 Session 链接"
+                    className={cn(BUTTON.icon, 'text-blue-600 hover:bg-blue-100 hover:text-blue-800 dark:text-blue-300 dark:hover:bg-blue-500/20 dark:hover:text-blue-200')}
+                    title="打开链接"
+                    aria-label="打开链接"
                   >
-                    <ExternalLink size={15} />
+                    <ExternalLink size={17} />
                   </a>
-                </span>
-              </span>
+                </div>
+              </div>
             </li>
-            <li className="flex gap-2.5">
-              <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded-full bg-gray-100 text-xs font-semibold text-gray-500 dark:bg-ink-800 dark:text-ink-300">3</span>
-              <span>粘贴到下面</span>
+            <li className="flex gap-3">
+              <span className={STEP_BADGE}>2</span>
+              <p>全选复制展示的 Session</p>
+            </li>
+            <li className="flex gap-3">
+              <span className={STEP_BADGE}>3</span>
+              <div className="min-w-0 flex-1">
+                <p>粘贴</p>
+                <textarea
+                  value={json}
+                  onChange={(e) => setJson(e.target.value)}
+                  placeholder="请输入"
+                  rows={8}
+                  aria-label="Session JSON"
+                  className={cn(INPUT, 'mt-2.5 resize-none px-4 py-3 font-mono sm:text-sm')}
+                />
+              </div>
             </li>
           </ol>
 
-          <textarea
-            value={json}
-            onChange={(e) => setJson(e.target.value)}
-            placeholder="粘贴 Session JSON …"
-            rows={7}
-            aria-label="Session JSON"
-            className={cn(INPUT, 'mt-3 resize-none font-mono text-base sm:text-xs')}
-          />
-
-          <label className="mt-3 flex items-center gap-2">
-            <Globe size={15} className="shrink-0 text-gray-400 dark:text-ink-500" />
-            <span className="shrink-0 text-sm text-gray-600 dark:text-ink-300">连接方式</span>
+          <label className="mt-6 flex items-center gap-3 border-t border-gray-100 pt-5 dark:border-ink-800">
+            <Globe size={18} className="shrink-0 text-gray-400 dark:text-ink-500" />
+            <span className="shrink-0 text-base text-gray-800 dark:text-gray-100">连接方式</span>
             <select
               value={selectedProxyId ?? ''}
               onChange={(e) => setSelectedProxyId(e.target.value === '' ? null : Number(e.target.value))}
-              className={cn(INPUT, 'py-1.5')}
+              className={INPUT}
             >
               <option value="">直连</option>
               {proxies.map((p) => (
@@ -168,7 +169,7 @@ export default function AddTeamDialog({ open, onOpenChange, onSuccess, team = nu
             </select>
           </label>
 
-          {error && <p role="alert" className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>}
+          {error && <p role="alert" className="mt-4 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </DialogFrame>
   );
 }
