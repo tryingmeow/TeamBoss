@@ -168,7 +168,7 @@ class QuoteClientTests(unittest.TestCase):
 class QuoteRouteTests(unittest.IsolatedAsyncioTestCase):
     async def request(self, body, authenticated=True):
         headers = {"X-API-Key": "test-admin-key"} if authenticated else {}
-        with patch("app.security._get_valid_admin_api_keys", new=AsyncMock(return_value=("test-admin-key", None))):
+        with patch("app.security.get_admin_api_key", new=AsyncMock(return_value="test-admin-key")):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
                 return await client.post("/api/teams/test-team/seat-purchase-preview", json=body, headers=headers)
 

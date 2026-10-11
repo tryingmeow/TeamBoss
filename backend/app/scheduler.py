@@ -11,6 +11,7 @@ from .chatgpt_client import ChatGPTClient
 from .chatgpt_limiter import run_chatgpt_call_sync
 from .database import get_db_path
 from .member_cache_service import snapshot_fetch_started_now, store_member_snapshot_sync
+from .proxy_resolve import ProxyUnavailableError, resolve_proxy_url_sync
 from .services.invoices import refresh_invoices_if_stale_sync
 from .services.pricing import account_billing_updates, subscription_billing_updates, fetch_seat_pricing_sync
 from .seat_types import is_known_seat_type, normalize_seat_type
@@ -258,14 +259,9 @@ def _get_kick_settings(conn):
     return mode, delay_hours
 
 
-def _get_proxy_url_sync(conn, proxy_id) -> str | None:
-    if not proxy_id:
-        return None
-    try:
-        row = conn.execute("SELECT url FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
-        return row["url"] if row else None
-    except Exception:
-        return None
+# 绑了代理却解析不出来时抛 ProxyUnavailableError：这一轮跳过这个 Team，
+# 不能换成本机 IP 直连（见 proxy_resolve）。
+_get_proxy_url_sync = resolve_proxy_url_sync
 
 
 def _effective_kick_at(expires_at, mode, delay_hours):
@@ -779,7 +775,14 @@ def auto_kick_job():
             email = row["email"]
             access_token = row["access_token"]
             device_id = row["device_id"]
-            proxy_url = _get_proxy_url_sync(conn, row["proxy_id"])
+            try:
+                proxy_url = _get_proxy_url_sync(conn, row["proxy_id"])
+            except ProxyUnavailableError as exc:
+                # 代理解析不出来就不动这个人：这一刀从本机 IP 发出去，等于临时换了出口。
+                skip_detail = f"reason=proxy_unavailable, {exc}"
+                if _latest_log_detail_sync(conn, team_id, "auto_kick", email) != skip_detail:
+                    _log_operation_sync(team_id, "auto_kick", email, skip_detail, "skipped")
+                continue
             row_id = row["id"]
 
             try:
@@ -1083,9 +1086,10 @@ def data_sync_job():
                 suspended_team_ids.add(team_id)
                 continue
 
-            proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
-
             try:
+                # 在 try 里面解析：代理不可用时这一轮按同步失败处理（下面的 except
+                # 会记 data_sync failed 并上报），而不是改成本机 IP 直连。
+                proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
                 client = ChatGPTClient(access_token, team_id, device_id, proxy_url=proxy_url)
                 now_dt = datetime.now(timezone.utc)
                 refresh_display = _display_sync_due(team["display_synced_at"], now_dt)

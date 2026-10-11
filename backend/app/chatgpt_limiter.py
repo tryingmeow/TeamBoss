@@ -12,6 +12,7 @@ from typing import Any, Callable, TypeVar
 import jwt
 
 from .database import get_db_path
+from .proxy_resolve import ProxyUnavailableError, resolve_proxy_url_sync
 from .session_store import update_session_file_tokens
 from .chatgpt_client import (
     REFRESH_DIAGNOSTICS_KEY,
@@ -208,11 +209,7 @@ def _insert_operation_log(
     )
 
 
-def _proxy_url_sync(conn: sqlite3.Connection, proxy_id: int | None) -> str | None:
-    if not proxy_id:
-        return None
-    row = conn.execute("SELECT url FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
-    return row["url"] if row else None
+_proxy_url_sync = resolve_proxy_url_sync
 
 
 def _decode_token_expires(access_token: str) -> str | None:
@@ -608,7 +605,15 @@ def refresh_team_auth_sync(
                         token_expires=_decode_token_expires(db_access_token),
                     )
 
-            proxy_url = _proxy_url_sync(conn, row["proxy_id"])
+            try:
+                proxy_url = _proxy_url_sync(conn, row["proxy_id"])
+            except ProxyUnavailableError as exc:
+                # 宁可这一轮不刷新：从本机 IP 去换 token，等于把这个账号的出口换了。
+                return AuthRefreshOutcome(
+                    status="failed",
+                    error=str(exc),
+                    token_expires=_decode_token_expires(db_access_token),
+                )
             try:
                 refresh_result = ChatGPTClient.refresh_token(
                     row["session_token"],

@@ -14,6 +14,7 @@ from .chatgpt_limiter import (
 )
 from .database import get_db, log_operation
 from .models import TeamSession
+from .proxy_resolve import ProxyUnavailableError, resolve_proxy_url
 from .seat_types import CODEX_SEAT_TYPE
 from .services.pricing import account_billing_updates, subscription_billing_updates, fetch_seat_pricing
 from .services.seat_capacity import (
@@ -59,11 +60,11 @@ def _assert_session_account_matches(session_data: TeamSession, team_id: str) -> 
 
 
 async def _resolve_proxy_url(proxy_id: int | None) -> str | None:
-    if not proxy_id:
-        return None
-    async with get_db() as db:
-        row = await (await db.execute("SELECT url FROM proxies WHERE id = ?", (proxy_id,))).fetchone()
-    return row["url"] if row else None
+    """选了代理却解析不出来时拒绝导入，而不是从本机 IP 去验证这个 session。"""
+    try:
+        return await resolve_proxy_url(proxy_id)
+    except ProxyUnavailableError as exc:
+        raise HTTPException(status_code=400, detail=f"选定的代理不可用：{exc}") from exc
 
 
 async def upsert_team_from_session(

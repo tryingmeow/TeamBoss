@@ -26,6 +26,7 @@ from ..services.member_expiry import (
     record_confirmed_invite_extension,
     resolve_token_use_reconciliations_in_tx,
 )
+from ..proxy_resolve import ProxyUnavailableError
 from ..services.team_clients import get_proxy_url as _get_proxy_url
 from ..services.open_redemptions import (
     INTERRUPTED_INVITE_AFTER_SECONDS as _INTERRUPTED_INVITE_AFTER_SECONDS,
@@ -844,10 +845,11 @@ async def _find_all_memberships(
                 # 缓存不存在，跳过该 team
                 continue
         else:
-            # 实时拉取并缓存
-            _proxy_url = await _get_proxy_url(team.get("proxy_id"))
-            client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=_proxy_url)
+            # 实时拉取并缓存。代理解析失败走下面同一条 fail-closed 路径：
+            # 不能换成本机 IP 直连，也不能当成"这个 Team 里没有这个人"。
             try:
+                _proxy_url = await _get_proxy_url(team.get("proxy_id"))
+                client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=_proxy_url)
                 snapshot = await fetch_and_cache_members(team["id"], client)
             except Exception as exc:
                 await log_operation(
@@ -1361,7 +1363,15 @@ async def _invite_to_available_team(
             premium_reasons.append((team["id"], "no_premium_seat: cached"))
             continue
         async with team_invite_lock(team["id"]):
-            _proxy_url_inv = await _get_proxy_url(team.get("proxy_id"))
+            try:
+                _proxy_url_inv = await _get_proxy_url(team.get("proxy_id"))
+            except ProxyUnavailableError as exc:
+                # 代理不可用就换下一个 Team：邀请不能从本机 IP 发出去。
+                last_error = str(exc)
+                if premium:
+                    premium_checked.append((team.get("name") or team["id"], "代理不可用"))
+                    premium_reasons.append((team["id"], f"proxy_unavailable: {exc}"))
+                continue
             client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=_proxy_url_inv)
             if premium:
                 ok, reason, notice_reason = await _premium_available(client, team["id"], email=email)
@@ -1777,14 +1787,16 @@ async def reconcile_pending_redemptions() -> dict[str, int]:
         # 时同样落到下面——这些情况自动确认永远等不来，被中断的那笔得交给管理员。
         snapshot = None
         if attempt.get("team_id") and attempt.get("access_token") and attempt.get("device_id"):
-            proxy_url = await _get_proxy_url(attempt.get("proxy_id"))
-            client = ChatGPTClient(
-                attempt["access_token"],
-                attempt["team_id"],
-                attempt["device_id"],
-                proxy_url=proxy_url,
-            )
             try:
+                # 代理解析失败和名单拉不到同样处理：快照留空，这笔交给管理员，
+                # 不能改成本机 IP 直连去查。
+                proxy_url = await _get_proxy_url(attempt.get("proxy_id"))
+                client = ChatGPTClient(
+                    attempt["access_token"],
+                    attempt["team_id"],
+                    attempt["device_id"],
+                    proxy_url=proxy_url,
+                )
                 snapshot = await fetch_and_cache_members(attempt["team_id"], client)
             except Exception:
                 snapshot = None
@@ -2179,9 +2191,10 @@ async def resolve_pending_confirmation(
             status_code=status.HTTP_409_CONFLICT,
             detail="原 Team 当前不可用，无法核实远端状态，暂不能退码",
         )
-    proxy_url = await _get_proxy_url(team.get("proxy_id"))
-    client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=proxy_url)
     try:
+        # 代理不可用时和"名单拉不到"同样处理：不能换出口去查，也不能就这么退码。
+        proxy_url = await _get_proxy_url(team.get("proxy_id"))
+        client = ChatGPTClient(team["access_token"], team["id"], team["device_id"], proxy_url=proxy_url)
         snapshot = await fetch_and_cache_members(team_id, client)
     except Exception as exc:
         raise HTTPException(

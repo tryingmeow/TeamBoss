@@ -702,7 +702,7 @@ export default function SettingsDialog({
         open={rotateConfirmOpen}
         onOpenChange={setRotateConfirmOpen}
         title="更换 API Key"
-        message="更换后旧 API Key 只剩 10 分钟宽限期，之后彻底失效；使用该 Key 的所有会话及脚本都要换成新 Key。"
+        message="更换后当前 API Key 立即失效，使用该 Key 的所有会话及脚本均需重新配置。"
         confirmLabel="确认更换"
         destructive
         onConfirm={() => void handleRotateApiKey()}

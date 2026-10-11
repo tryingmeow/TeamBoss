@@ -709,6 +709,13 @@ async def init_database():
                WHERE chatgpt_count IS NULL"""
         )
 
+        # 轮换 API Key 的宽限期已取消（见 security.rotate_admin_api_key）：旧 Key 立即
+        # 失效，不再保留。历史库里这两行是没人再读的旧密钥，删掉。
+        await db.execute(
+            "DELETE FROM settings WHERE key IN "
+            "('admin_api_key_previous', 'admin_api_key_previous_expires_at')"
+        )
+
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
             "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",

@@ -84,6 +84,7 @@ from ..chatgpt_client import ChatGPTClient
 from ..chatgpt_limiter import run_chatgpt_call_sync
 from ..database import get_db_path
 from ..member_cache_service import snapshot_fetch_started_now, store_member_snapshot_sync
+from ..proxy_resolve import ProxyUnavailableError, resolve_proxy_url_sync
 from ..seat_types import (
     DEFAULT_SEAT_TYPE,
     PREMIUM_SEAT_TYPE,
@@ -147,14 +148,9 @@ def _log_operation_sync(team_id, action, target_email=None, detail=None,
         pass
 
 
-def _get_proxy_url_sync(conn: sqlite3.Connection, proxy_id) -> Optional[str]:
-    if not proxy_id:
-        return None
-    try:
-        row = conn.execute("SELECT url FROM proxies WHERE id = ?", (proxy_id,)).fetchone()
-        return row["url"] if row else None
-    except Exception:
-        return None
+# 绑了代理却解析不出来时抛 ProxyUnavailableError。巡逻会动人，所以每个调用点都
+# 必须跳过这个 Team（见 proxy_resolve）：换出口踢人、撤邀请的代价比少踢一轮大。
+_get_proxy_url_sync = resolve_proxy_url_sync
 
 
 def _mark_member_kicked_sync(conn: sqlite3.Connection, team_id: str, kick_source: str,
@@ -1229,7 +1225,11 @@ def _refresh_team_snapshot_sync(
     负责"确认当前谁还在"。刷新失败时调用方必须跳过整队，绝不能拿旧数据动手。
     """
     team_id = team["id"]
-    proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
+    try:
+        proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
+    except ProxyUnavailableError as exc:
+        # 调用方据此跳过整队：代理不可用时既不能拿旧缓存动手，也不能换出口去拉名单。
+        return False, str(exc), None
     client = ChatGPTClient(team["access_token"], team_id, team["device_id"], proxy_url=proxy_url)
 
     fetch_started_at = snapshot_fetch_started_now()
@@ -2500,7 +2500,20 @@ def run_patrol(
                                 continue
 
                             if invite_client is None:
-                                proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
+                                try:
+                                    proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
+                                except ProxyUnavailableError as exc:
+                                    # 代理不可用：这个 Team 这一轮一个邀请都不撤，
+                                    # 不能改成从本机 IP 发撤销请求。
+                                    log_op(
+                                        team_id, "patrol_skip_proxy_unavailable", None,
+                                        f"stage=revoke_invite, {exc}", "skipped",
+                                    )
+                                    events.append({
+                                        "team_id": team_id, "team_name": name,
+                                        "action": "skip_proxy_unavailable", "stage": "revoke_invite",
+                                    })
+                                    break
                                 invite_client = ChatGPTClient(
                                     team["access_token"], team_id, team["device_id"], proxy_url=proxy_url
                                 )
@@ -2776,7 +2789,20 @@ def run_patrol(
 
             client = None
             if not effective_dry_run:
-                proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
+                try:
+                    proxy_url = _get_proxy_url_sync(conn, team["proxy_id"])
+                except ProxyUnavailableError as exc:
+                    # 代理不可用：这个 Team 这一轮超员一个都不踢。
+                    log_op(
+                        team_id, "patrol_skip_proxy_unavailable", None,
+                        f"stage=over_quota_kick, over_by={over_by}, {exc}", "skipped",
+                    )
+                    events.append({
+                        "team_id": team_id, "team_name": name,
+                        "action": "skip_proxy_unavailable", "stage": "over_quota_kick",
+                        "over_by": over_by,
+                    })
+                    continue
                 client = ChatGPTClient(team["access_token"], team_id, team["device_id"], proxy_url=proxy_url)
 
             kicked_emails: list[str] = []

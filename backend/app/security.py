@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import Header, HTTPException, status
@@ -14,9 +14,6 @@ ADMIN_PASSWORD_ENV = "AUTO_TEAM_ADMIN_PASSWORD"
 ADMIN_API_KEY_ENV = "AUTO_TEAM_API_KEY"
 ADMIN_PASSWORD_HASH_SETTING = "admin_password_hash"
 ADMIN_API_KEY_SETTING = "admin_api_key"
-ADMIN_PREVIOUS_API_KEY_SETTING = "admin_api_key_previous"
-ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING = "admin_api_key_previous_expires_at"
-ADMIN_API_KEY_GRACE_PERIOD = timedelta(minutes=10)
 PASSWORD_HASH_ITERATIONS = 210_000
 INITIAL_PASSWORD_MIN_LENGTH = 8
 INITIAL_API_KEY_MIN_LENGTH = 12
@@ -195,14 +192,12 @@ async def change_admin_password(current_password: str, new_password: str) -> str
     password_hash = await asyncio.to_thread(_password_hash, new_password)
     new_api_key = _new_admin_api_key()
     now = _now_iso()
-    # 密码、新 Key 和清掉的宽限 Key 一次提交：不会出现密码换了、Key 没换的中间状态。
+    # 密码和新 Key 一次提交：不会出现密码换了、Key 没换的中间状态。
     async with get_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         for key, value in (
             (ADMIN_PASSWORD_HASH_SETTING, password_hash),
             (ADMIN_API_KEY_SETTING, new_api_key),
-            (ADMIN_PREVIOUS_API_KEY_SETTING, ""),
-            (ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING, ""),
         ):
             await _upsert_setting(db, key, value, now)
         await db.commit()
@@ -224,12 +219,14 @@ async def _upsert_setting(db, key: str, value: str, updated_at: str) -> None:
 
 
 async def rotate_admin_api_key() -> str:
+    """换一把新 Key，旧 Key 同一笔提交里立即失效，不留宽限。
+
+    只有一个 Key 有效，所以轮换的响应万一断在半路，旧 Key 也已经进不来了：
+    管理员用密码重新登录拿新 Key。
+    """
     new_api_key = _new_admin_api_key()
     now = datetime.now(timezone.utc)
-    expires_at = (now + ADMIN_API_KEY_GRACE_PERIOD).isoformat()
 
-    # 当前 key、旧 key 和宽限截止时间必须一次提交。这样即使响应在新 key
-    # 返回前中断，调用方仍能用旧 key 访问 /api/admin/account 取回新 key。
     async with get_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         cursor = await db.execute(
@@ -237,62 +234,25 @@ async def rotate_admin_api_key() -> str:
             (ADMIN_API_KEY_SETTING,),
         )
         row = await cursor.fetchone()
-        previous_api_key = (row["value"] or "").strip() if row else ""
-        if not previous_api_key:
+        if not (row and (row["value"] or "").strip()):
             await db.rollback()
             raise RuntimeError("API Key 未初始化")
 
-        for key, value in (
-            (ADMIN_PREVIOUS_API_KEY_SETTING, previous_api_key),
-            (ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING, expires_at),
-            (ADMIN_API_KEY_SETTING, new_api_key),
-        ):
-            await _upsert_setting(db, key, value, now.isoformat())
+        await _upsert_setting(db, ADMIN_API_KEY_SETTING, new_api_key, now.isoformat())
         await db.commit()
     return new_api_key
-
-
-async def _get_valid_admin_api_keys() -> tuple[Optional[str], Optional[str]]:
-    async with get_db() as db:
-        cursor = await db.execute(
-            """SELECT key, value FROM settings
-               WHERE key IN (?, ?, ?)""",
-            (
-                ADMIN_API_KEY_SETTING,
-                ADMIN_PREVIOUS_API_KEY_SETTING,
-                ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING,
-            ),
-        )
-        values = {row["key"]: (row["value"] or "").strip() for row in await cursor.fetchall()}
-
-    current = values.get(ADMIN_API_KEY_SETTING) or None
-    previous = values.get(ADMIN_PREVIOUS_API_KEY_SETTING) or None
-    previous_expires = values.get(ADMIN_PREVIOUS_API_KEY_EXPIRES_SETTING) or None
-    if not previous or not previous_expires:
-        return current, None
-    try:
-        expires_at = datetime.fromisoformat(previous_expires.replace("Z", "+00:00"))
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
-            return current, None
-    except (TypeError, ValueError):
-        return current, None
-    return current, previous
 
 
 async def require_admin(
     authorization: Optional[str] = Header(None),
     x_api_key: Optional[str] = Header(None),
 ) -> None:
-    expected, previous = await _get_valid_admin_api_keys()
+    expected = await get_admin_api_key()
     if not expected:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="API Key 未初始化")
 
     supplied = (x_api_key or "").strip() or (_bearer_token(authorization) or "").strip()
-    current_matches = bool(supplied) and safe_compare_digest(supplied, expected)
-    previous_matches = bool(supplied and previous) and safe_compare_digest(supplied, previous)
-    if not current_matches and not previous_matches:
+    if not (supplied and safe_compare_digest(supplied, expected)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API Key 无效")
 
 

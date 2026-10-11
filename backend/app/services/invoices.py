@@ -203,13 +203,16 @@ def refresh_invoices_for_team_blocking(team_id: str, force: bool = False):
     conn.row_factory = sqlite3.Row
     try:
         team = conn.execute(
-            """SELECT t.id, t.status, t.access_token, t.device_id, p.url AS proxy_url
+            """SELECT t.id, t.status, t.access_token, t.device_id, t.proxy_id, p.url AS proxy_url
                FROM teams t LEFT JOIN proxies p ON p.id = t.proxy_id
                WHERE t.id = ?""",
             (team_id,),
         ).fetchone()
         if team is None or team["status"] != "active" or not team["access_token"]:
             return "team not eligible for invoice sync"
+        # 绑了代理但 join 不出地址：这一次不拉发票，不能换成本机 IP 直连。
+        if team["proxy_id"] and not (team["proxy_url"] or "").strip():
+            return f"代理 #{team['proxy_id']} 不可用，已跳过发票同步"
         client = ChatGPTClient(
             team["access_token"], team["id"], team["device_id"],
             proxy_url=team["proxy_url"],

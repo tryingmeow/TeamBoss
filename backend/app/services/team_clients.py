@@ -2,6 +2,7 @@ from fastapi import HTTPException
 
 from ..chatgpt_client import ChatGPTClient
 from ..database import get_db
+from ..proxy_resolve import ProxyUnavailableError, resolve_proxy_url
 from .subscription_status import subscription_status
 
 
@@ -32,13 +33,16 @@ async def is_team_auth_rejected(team_id: str) -> bool:
     return bool(row) and row["auth_state"] == "rejected"
 
 
-async def get_proxy_url(proxy_id: int | None) -> str | None:
-    if not proxy_id:
-        return None
-    async with get_db() as db:
-        cursor = await db.execute("SELECT url FROM proxies WHERE id = ?", (proxy_id,))
-        row = await cursor.fetchone()
-    return row["url"] if row else None
+# 绑了代理但解析不出来：抛 ProxyUnavailableError，调用方要么转成下面的 503，
+# 要么跳过这个 Team。任何情况下都不能退化成不带代理的直连。
+get_proxy_url = resolve_proxy_url
+
+
+def proxy_unavailable_error(exc: ProxyUnavailableError) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={"code": "team_proxy_unavailable", "message": f"该 Team 的代理不可用：{exc}"},
+    )
 
 
 async def get_team_client(team_id: str) -> ChatGPTClient:
@@ -56,7 +60,10 @@ async def get_team_client(team_id: str) -> ChatGPTClient:
         # 复用 team_auth_rejected 的 409，避免前端把 401 当成管理员 key 失效。
         raise team_auth_rejected_error()
 
-    proxy_url = await get_proxy_url(row["proxy_id"])
+    try:
+        proxy_url = await get_proxy_url(row["proxy_id"])
+    except ProxyUnavailableError as exc:
+        raise proxy_unavailable_error(exc) from exc
     return ChatGPTClient(row["access_token"], team_id, row["device_id"], proxy_url=proxy_url)
 
 
