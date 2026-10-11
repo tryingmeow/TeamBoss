@@ -615,6 +615,9 @@ export default function Finance() {
   const [invoicesByTeam, setInvoicesByTeam] = useState<Record<string, FinanceInvoiceRow[] | 'loading' | 'error'>>({});
   // Premium 在用人数不在财务接口里：从 Team 列表的缓存计数取。拿不到时只显示已付。
   const [premiumInUse, setPremiumInUse] = useState<Map<string, number> | null>(null);
+  // 低余额预警的阈值：后台这里是唯一入口，留空/0 等于只在 Credit 为负时报警。
+  const [thresholdInput, setThresholdInput] = useState('');
+  const [savingThreshold, setSavingThreshold] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -653,6 +656,39 @@ export default function Finance() {
       setOverviewError('');
     } catch (error) {
       setOverviewError((error as Error).message || '切换基准币种失败');
+    }
+  };
+
+  // 输入框只在服务端值变化时回填：正在输入时 overview 不会变，不会被盖掉。
+  useEffect(() => {
+    if (overview) setThresholdInput(String(overview.low_balance_threshold));
+  }, [overview?.low_balance_threshold]);
+
+  const handleThresholdCommit = async () => {
+    if (!overview) return;
+    const current = overview.low_balance_threshold;
+    const raw = thresholdInput.trim();
+    const next = raw === '' ? 0 : Number(raw);
+    if (!Number.isFinite(next) || next < 0) {
+      setThresholdInput(String(current));
+      setOverviewError('预警阈值只能填 0 或正数');
+      return;
+    }
+    if (next === current) {
+      setThresholdInput(String(current));
+      return;
+    }
+    setSavingThreshold(true);
+    try {
+      await updateFinanceSettings({ low_balance_threshold: next });
+      const updated = await getFinanceOverview();
+      setOverview(updated);
+      setOverviewError('');
+    } catch (error) {
+      setThresholdInput(String(current));
+      setOverviewError((error as Error).message || '保存预警阈值失败');
+    } finally {
+      setSavingThreshold(false);
     }
   };
 
@@ -885,6 +921,27 @@ export default function Finance() {
                 </Select.Portal>
               </Select.Root>
             )}
+          </div>
+          <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-ink-400">
+            <label htmlFor="finance-low-balance" className="whitespace-nowrap">Credit 低于</label>
+            {overviewLoading ? (
+              <span className="block h-9 w-20 animate-pulse rounded-lg bg-gray-200 dark:bg-ink-800" />
+            ) : (
+              <input
+                id="finance-low-balance"
+                type="number"
+                min={0}
+                step={1}
+                value={thresholdInput}
+                disabled={savingThreshold}
+                onChange={event => setThresholdInput(event.target.value)}
+                onBlur={() => void handleThresholdCommit()}
+                onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+                title="Credit 余额低于这个数就进预警；填 0 表示只在余额为负时提醒"
+                className={cn(INPUT, 'h-9 w-20 py-0 text-sm tabular-nums')}
+              />
+            )}
+            <span className="whitespace-nowrap">时预警</span>
           </div>
           <span className="whitespace-nowrap text-xs text-gray-500 dark:text-ink-400">
             {overviewLoading

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Check, Copy, Globe, Loader2, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Globe, Loader2, Pencil, Plus, RefreshCw, Trash2, Wifi, WifiOff } from 'lucide-react';
 import type { Settings, Team } from '../types';
 import {
   changeAdminPassword,
@@ -10,6 +10,7 @@ import {
   fetchProxies,
   rotateAdminApiKey,
   setStoredAdminApiKey,
+  updateProxy,
   type AdminAccount,
   type Proxy,
 } from '../api/client';
@@ -111,6 +112,10 @@ export default function SettingsDialog({
   const [newProxyUrl, setNewProxyUrl] = useState('');
   const [addingProxy, setAddingProxy] = useState(false);
   const [checkingId, setCheckingId] = useState<number | null>(null);
+  const [editingProxyId, setEditingProxyId] = useState<number | null>(null);
+  const [editProxyName, setEditProxyName] = useState('');
+  const [editProxyUrl, setEditProxyUrl] = useState('');
+  const [savingProxyEdit, setSavingProxyEdit] = useState(false);
 
   useEffect(() => {
     setInterval_(settings.sync_interval_minutes);
@@ -152,6 +157,7 @@ export default function SettingsDialog({
   useEffect(() => {
     if (!open) return;
     clearStatus();
+    cancelEditProxy();
     void reloadSettings();
     fetchAdminAccount()
       .then(setAccount)
@@ -275,6 +281,50 @@ export default function SettingsDialog({
       setProxies((prev) => prev.map((p) => (p.id === id ? { ...p, status: 'error' } : p)));
     } finally {
       setCheckingId(null);
+    }
+  };
+
+  const startEditProxy = (p: Proxy) => {
+    clearStatus();
+    setShowAddProxy(false);
+    setEditingProxyId(p.id);
+    setEditProxyName(p.name);
+    setEditProxyUrl(p.url);
+  };
+
+  const cancelEditProxy = () => {
+    setEditingProxyId(null);
+    setEditProxyName('');
+    setEditProxyUrl('');
+  };
+
+  const handleSaveProxyEdit = async (p: Proxy) => {
+    const name = editProxyName.trim();
+    const url = editProxyUrl.trim();
+    if (!name || !url) return;
+    if (name === p.name && url === p.url) {
+      cancelEditProxy();
+      return;
+    }
+    clearStatus();
+    setSavingProxyEdit(true);
+    try {
+      await updateProxy(p.id, { name, url });
+      const urlChanged = url !== p.url;
+      setProxies((prev) =>
+        prev.map((item) =>
+          item.id === p.id
+            ? { ...item, name, url, ...(urlChanged ? { status: 'unknown', last_check_at: null } : {}) }
+            : item,
+        ),
+      );
+      cancelEditProxy();
+      // 地址换了，上一次的测试结果说明不了新地址：立刻重测，顺手把库里的状态也写对。
+      if (urlChanged) await handleCheckProxy(p.id);
+    } catch (err) {
+      setErrorText(err instanceof Error ? err.message : '保存失败');
+    } finally {
+      setSavingProxyEdit(false);
     }
   };
 
@@ -485,30 +535,83 @@ export default function SettingsDialog({
           {proxies.length > 0 && (
             <ul className="divide-y divide-gray-100 rounded-lg border border-gray-200 dark:divide-ink-800 dark:border-ink-800">
               {proxies.map((p) => (
-                <li key={p.id} className="flex items-center gap-2.5 py-1.5 pl-3 pr-1.5">
-                  {proxyStatusIcon(p)}
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{p.name}</div>
-                    <div className="truncate font-mono text-[11px] text-gray-500 dark:text-ink-400">{p.url.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}</div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleCheckProxy(p.id)}
-                    disabled={checkingId === p.id}
-                    className={cn(BUTTON.secondary, 'h-8 px-2.5 py-0 text-xs')}
-                    title="测试连接"
-                  >
-                    测试
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setProxyToDelete(p)}
-                    className={cn(BUTTON.icon, 'hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10 dark:hover:text-red-400')}
-                    title="删除"
-                    aria-label={`删除 ${p.name}`}
-                  >
-                    <Trash2 size={15} />
-                  </button>
+                <li key={p.id} className="py-1.5 pl-3 pr-1.5">
+                  {editingProxyId === p.id ? (
+                    <div className="space-y-2 py-1 pr-1.5">
+                      <input
+                        type="text"
+                        placeholder="名称"
+                        aria-label={`${p.name} 的名称`}
+                        value={editProxyName}
+                        onChange={(e) => setEditProxyName(e.target.value)}
+                        className={INPUT}
+                      />
+                      <input
+                        type="text"
+                        placeholder="http://user:pass@host:port"
+                        aria-label={`${p.name} 的地址`}
+                        value={editProxyUrl}
+                        onChange={(e) => setEditProxyUrl(e.target.value)}
+                        className={cn(INPUT, 'font-mono text-xs')}
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <span className="mr-auto text-xs text-gray-500 dark:text-ink-400">
+                          改地址后会自动重测一次。
+                        </span>
+                        <button
+                          type="button"
+                          onClick={cancelEditProxy}
+                          disabled={savingProxyEdit}
+                          className={cn(BUTTON.secondary, 'h-8 px-3 py-0 text-xs')}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveProxyEdit(p)}
+                          disabled={savingProxyEdit || !editProxyName.trim() || !editProxyUrl.trim()}
+                          className={cn(BUTTON.primary, 'h-8 px-3 py-0 text-xs')}
+                        >
+                          {savingProxyEdit ? '保存中…' : '保存'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2.5">
+                      {proxyStatusIcon(p)}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{p.name}</div>
+                        <div className="truncate font-mono text-[11px] text-gray-500 dark:text-ink-400">{p.url.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleCheckProxy(p.id)}
+                        disabled={checkingId === p.id}
+                        className={cn(BUTTON.secondary, 'h-8 px-2.5 py-0 text-xs')}
+                        title="测试连接"
+                      >
+                        测试
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => startEditProxy(p)}
+                        className={BUTTON.icon}
+                        title="编辑"
+                        aria-label={`编辑 ${p.name}`}
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setProxyToDelete(p)}
+                        className={cn(BUTTON.icon, 'hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-500/10 dark:hover:text-red-400')}
+                        title="删除"
+                        aria-label={`删除 ${p.name}`}
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -599,7 +702,7 @@ export default function SettingsDialog({
         open={rotateConfirmOpen}
         onOpenChange={setRotateConfirmOpen}
         title="更换 API Key"
-        message="更换后当前 API Key 将立即失效，使用该 Key 的所有会话及脚本均需重新配置。"
+        message="更换后旧 API Key 只剩 10 分钟宽限期，之后彻底失效；使用该 Key 的所有会话及脚本都要换成新 Key。"
         confirmLabel="确认更换"
         destructive
         onConfirm={() => void handleRotateApiKey()}
